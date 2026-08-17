@@ -1,0 +1,29 @@
+# Corpus data — never committed. The release contract is code, annotations and
+# keypoints, never pixels; and BoxingVI's licence grants use, not redistribution.
+data/
+Dataset/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Derived
+results/
+runs/
+*.pt
+*.ckpt
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

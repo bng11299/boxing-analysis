@@ -1,0 +1,106 @@
+"""A compact spatial-temporal graph convolutional network.
+
+Written from scratch rather than pulled from pyskl/mmcv deliberately. Those
+stacks need compilation, are pinned to older Python, and do not install on
+Windows with Python 3.13 -- which would make the first published baseline on
+this benchmark unreproducible for the next person who tries. Roughly 200 lines
+of plain PyTorch is a better artifact for a result whose whole value is that
+someone else can check it.
+
+Architecture follows Yan et al. (AAAI 2018): alternating graph convolution over
+the joint adjacency and temporal convolution along time.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from .data import EDGES, N_CLASSES, N_JOINTS
+
+
+def normalised_adjacency(num_nodes: int = N_JOINTS, edges=EDGES) -> torch.Tensor:
+    """Symmetric-normalised adjacency with self-loops: D^-1/2 (A+I) D^-1/2."""
+    a = np.eye(num_nodes, dtype=np.float32)
+    for i, j in edges:
+        a[i, j] = a[j, i] = 1.0
+    deg = a.sum(1)
+    dinv = np.diag((deg ** -0.5).astype(np.float32))
+    return torch.from_numpy(dinv @ a @ dinv)
+
+
+class STGCNBlock(nn.Module):
+    def __init__(self, cin: int, cout: int, stride: int = 1, dropout: float = 0.1):
+        super().__init__()
+        self.gconv = nn.Conv2d(cin, cout, kernel_size=1)
+        self.tconv = nn.Sequential(
+            nn.BatchNorm2d(cout), nn.ReLU(inplace=True),
+            nn.Conv2d(cout, cout, kernel_size=(9, 1), padding=(4, 0),
+                      stride=(stride, 1)),
+            nn.BatchNorm2d(cout), nn.Dropout(dropout),
+        )
+        if cin == cout and stride == 1:
+            self.residual = nn.Identity()
+        else:
+            self.residual = nn.Sequential(
+                nn.Conv2d(cin, cout, kernel_size=1, stride=(stride, 1)),
+                nn.BatchNorm2d(cout),
+            )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+        # x: (N, C, T, V)
+        res = self.residual(x)
+        h = self.gconv(x)
+        h = torch.einsum("nctv,vw->nctw", h, adj)
+        h = self.tconv(h)
+        return self.relu(h + res)
+
+
+class STGCN(nn.Module):
+    """Small by design: the corpus is ~5.5k clips of 25 frames."""
+
+    def __init__(self, in_channels: int = 3, n_classes: int = N_CLASSES,
+                 widths=(32, 64, 128), dropout: float = 0.1):
+        super().__init__()
+        self.register_buffer("adj", normalised_adjacency())
+        self.data_bn = nn.BatchNorm1d(in_channels * N_JOINTS)
+        blocks, cin = [], in_channels
+        for i, w in enumerate(widths):
+            blocks.append(STGCNBlock(cin, w, stride=1 if i == 0 else 2,
+                                     dropout=dropout))
+            cin = w
+        self.blocks = nn.ModuleList(blocks)
+        self.head = nn.Linear(cin, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x arrives as (N, T, V, C); ST-GCN wants (N, C, T, V).
+        n, t, v, c = x.shape
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = self.data_bn(x.permute(0, 1, 3, 2).reshape(n, c * v, t))
+        x = x.reshape(n, c, v, t).permute(0, 1, 3, 2).contiguous()
+        for b in self.blocks:
+            x = b(x, self.adj)
+        return self.head(x.mean(dim=(2, 3)))
+
+    def n_params(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class StaticPoseBaseline(nn.Module):
+    """Sees one frame per clip -- the middle one -- and nothing else.
+
+    This is the baseline that makes the others mean something. A temporal model
+    that fails to beat it has not shown that it uses time at all, only posture.
+    """
+
+    def __init__(self, n_classes: int = N_CLASSES, hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(), nn.Linear(N_JOINTS * 3, hidden), nn.ReLU(inplace=True),
+            nn.Dropout(0.2), nn.Linear(hidden, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x[:, x.shape[1] // 2])
