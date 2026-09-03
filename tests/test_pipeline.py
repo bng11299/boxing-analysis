@@ -164,5 +164,114 @@ with tempfile.TemporaryDirectory() as d:
     empty.write_text("[]", encoding="utf-8")
     raises("empty file rejected", lambda: data._read_alphapose_json(empty))
 
+
+print("\n--- 11. Validity channel: a mask, not an invented confidence ---")
+two = np.zeros((4, N_JOINTS, 2), dtype=np.float32)
+two[:2] = 0.4                                    # two observed frames
+got = data._with_validity_channel(two)           # frames 2-3 are padding
+check("adds a third channel", got.shape == (4, N_JOINTS, 3))
+check("observed joints marked 1.0", bool((got[:2, :, 2] == 1.0).all()))
+check("padding marked 0.0", bool((got[2:, :, 2] == 0.0).all()))
+check("coordinates untouched", bool(np.allclose(got[..., :2], two)))
+three = np.ones((4, N_JOINTS, 3), dtype=np.float32)
+check("3-channel input passes through", bool(np.allclose(data._with_validity_channel(three), three)))
+raises("wrong joint count rejected",
+       lambda: data._with_validity_channel(np.zeros((4, 5, 2), dtype=np.float32)))
+raises("4 channels rejected",
+       lambda: data._with_validity_channel(np.zeros((4, N_JOINTS, 4), dtype=np.float32)))
+# The property the mask exists for: features._valid must drop the padding.
+check("features._valid drops padded frames", int(features._valid(got).sum()) == 2)
+
+print("\n--- 12. Label normalisation across the corpus's inconsistent spellings ---")
+check("canonical passes", data._normalise_label("Cross") == "cross")
+check("lowercase variant", data._normalise_label("cross") == "cross")
+check("space becomes underscore", data._normalise_label("Lead Hook") == "lead_hook")
+check("mixed case variant", data._normalise_label("Lead hook") == "lead_hook")
+check("trailing space tolerated", data._normalise_label("Rear uppercut ") == "rear_uppercut")
+check("non-label is None", data._normalise_label("nan") is None)
+check("empty is None", data._normalise_label("") is None)
+# An unknown punch name must NOT quietly become a class.
+check("unknown label is None, not a guess", data._normalise_label("Overhand Right") is None)
+
+import pandas as pd  # noqa: E402
+unnamed = pd.DataFrame([[10, 20, "Jab"], [30, 40, "Cross"], [50, 60, "Rear Hook"]])
+check("class column found by content, not header",
+      data._class_column(unnamed) == unnamed.columns[2])
+raises("a frame with no punch column is an error",
+       lambda: data._class_column(pd.DataFrame([[1, 2], [3, 4]])))
+
+print("\n--- 13. Splits cannot leak, and refuse when they cannot be trusted ---")
+def _clip(src, label=0):
+    kp = np.zeros((MAX_FRAMES, N_JOINTS, 3), dtype=np.float32)
+    kp[:, :, :2] = 0.5
+    kp[:, :, 2] = 1.0
+    return Clip(keypoints=kp, label=label, subject="", source=src)
+
+corpus = [_clip(v, i % data.N_CLASSES) for i, v in enumerate(
+    ["V1"] * 5 + ["V2"] * 3 + ["V5"] * 3 + ["V9"] * 2 + ["V3"] * 4)]
+tr, va = data.split_by_video(corpus)
+check("held-out videos go to validation",
+      {c.source for c in va} == set(data.HELD_OUT_VIDEOS))
+check("training excludes them", {c.source for c in tr} == {"V1", "V3"})
+check("no video straddles the split",
+      not ({c.source for c in tr} & {c.source for c in va}))
+check("every clip is accounted for", len(tr) + len(va) == len(corpus))
+raises("absent held-out video is an error",
+       lambda: data.split_by_video(corpus, held_out=("V99",)))
+# The guard that stops anyone applying the official split it cannot support.
+raises("subject split refuses clips with no subject id",
+       lambda: data.split_by_subject(corpus))
+try:
+    data.split_by_subject(corpus)
+except ValueError as e:
+    check("and the refusal explains why", "O10" in str(e) and "split_by_video" in str(e),
+          str(e)[:60])
+
+print("\n--- 14. The static-pose floor reads the middle OBSERVED frame ---")
+padded = torch.zeros(1, MAX_FRAMES, N_JOINTS, 3)
+padded[0, :9, :, :2] = 0.4
+padded[0, :9, :, 2] = 1.0
+check("padded clip picks the middle of the observed span",
+      int(StaticPoseBaseline.middle_observed_frame(padded)[0]) == 4,
+      "9 observed frames -> expected index 4, not MAX_FRAMES // 2")
+full = torch.ones(1, MAX_FRAMES, N_JOINTS, 3)
+check("fully observed clip is unchanged at T // 2",
+      int(StaticPoseBaseline.middle_observed_frame(full)[0]) == MAX_FRAMES // 2)
+blank = torch.zeros(1, MAX_FRAMES, N_JOINTS, 3)
+check("all-padding clip falls back instead of crashing",
+      int(StaticPoseBaseline.middle_observed_frame(blank)[0]) == MAX_FRAMES // 2)
+mixed = torch.cat([padded, full, blank], dim=0)
+check("batched selection stays per-clip",
+      StaticPoseBaseline.middle_observed_frame(mixed).tolist() == [4, 12, 12])
+check("floor still returns class logits",
+      StaticPoseBaseline()(mixed).shape == (3, data.N_CLASSES))
+
+print("\n--- 15. Real-corpus loader refuses misaligned input ---")
+with tempfile.TemporaryDirectory() as d:
+    root = Path(d)
+    (root / "Skeleton_data").mkdir()
+    (root / "Annotation_files").mkdir()
+    arr = np.zeros((3, MAX_FRAMES, N_JOINTS, 2), dtype=np.float32)
+    arr[:, :6, :, :] = 0.4
+    np.save(root / "Skeleton_data" / "V1.npy", arr)
+    pd.DataFrame([[1, 2, "Jab"], [3, 4, "Cross"], [5, 6, "Lead Hook"]]).to_excel(
+        root / "Annotation_files" / "V1.xlsx", index=False)
+    clips, unlabelled, degenerate = data._load_presegmented(
+        "V1", root / "Skeleton_data", root / "Annotation_files")
+    check("loads aligned clips", len(clips) == 3, f"got {len(clips)}")
+    check("labels map to class indices",
+          [c.label for c in clips] == [data.CLASSES.index(n)
+                                       for n in ("jab", "cross", "lead_hook")])
+    check("loaded clips carry their video, not a fake subject",
+          all(c.source == "V1" and c.subject == "" for c in clips))
+    check("validity channel was synthesised", clips[0].keypoints.shape[-1] == 3)
+
+    # One fewer annotation row than clips: correspondence is unknowable.
+    pd.DataFrame([[1, 2, "Jab"], [3, 4, "Cross"]]).to_excel(
+        root / "Annotation_files" / "V1.xlsx", index=False)
+    raises("count mismatch is an error, not a silent truncation",
+           lambda: data._load_presegmented("V1", root / "Skeleton_data",
+                                           root / "Annotation_files"))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

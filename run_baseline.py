@@ -128,6 +128,12 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, default=Path("results/baseline.json"))
+    ap.add_argument("--layout-only", action="store_true",
+                    help="probe the on-disk layout and stop")
+    ap.add_argument("--include-v6", action="store_true",
+                    help="re-segment V6 from its raw per-frame array; off by "
+                         "default because that segmentation is ours, not the "
+                         "authors'")
     a = ap.parse_args()
 
     if not (a.data or a.synthetic):
@@ -137,20 +143,32 @@ def main() -> int:
         from boxingvi.synthetic import make_corpus
         print("SYNTHETIC FIXTURES -- not a result about BoxingVI")
         clips = make_corpus(seed=a.seed)
+        train, val = split_by_subject(clips)
+        split_desc = "subject-disjoint S1-S15 / S16-S20 (synthetic fixtures)"
     else:
-        from boxingvi.data import discover_layout
+        from boxingvi.data import (HELD_OUT_VIDEOS, discover_layout,
+                                   load_corpus, split_by_video)
         print(json.dumps(discover_layout(a.data), indent=2))
-        raise SystemExit(
-            "Layout reported above. Real-corpus loading is not wired up until "
-            "the on-disk arrangement has been seen -- fill in load_corpus() in "
-            "src/boxingvi/data.py against what is printed, then re-run."
+        if a.layout_only:
+            raise SystemExit("--layout-only requested; stopping after the probe")
+        clips = load_corpus(a.data, include_v6=a.include_v6)
+        train, val = split_by_video(clips)
+        # Stated in full, and carried into the results file, because the
+        # difference between this and the paper's split is the single most
+        # misreadable thing about any number produced here.
+        split_desc = (
+            "video-disjoint, held out " + "/".join(HELD_OUT_VIDEOS)
+            + " -- NOT the paper's official subject-disjoint S1-S15 / S16-S20 "
+              "split, which the release does not carry the subject ids to "
+              "reproduce (ISSUES-LOG O10)"
         )
+        print(f"split: {split_desc}")
 
-    train, val = split_by_subject(clips)
     xtr, ytr = to_arrays(train)
     xva, yva = to_arrays(val)
+    disjoint = "subject-disjoint" if a.synthetic else "video-disjoint"
     print(f"train {len(train)} clips / val {len(val)} clips  "
-          f"(subject-disjoint)  x={xtr.shape}")
+          f"({disjoint})  x={xtr.shape}")
 
     results = run_floors(ytr, yva, a.seed)
     results += run_interpretable([c.keypoints for c in train], ytr,
@@ -174,6 +192,11 @@ def main() -> int:
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(
         {"synthetic": bool(a.synthetic), "seed": a.seed, "epochs": a.epochs,
+         "split": split_desc,
+         "n_train_clips": len(train), "n_val_clips": len(val),
+         "train_videos": sorted({c.source for c in train}) or None,
+         "val_videos": sorted({c.source for c in val}) or None,
+         "include_v6": bool(a.include_v6),
          "results": results}, indent=2), encoding="utf-8")
     print(f"\nwrote {a.out}")
     return 0

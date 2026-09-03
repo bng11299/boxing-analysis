@@ -89,10 +89,19 @@ class STGCN(nn.Module):
 
 
 class StaticPoseBaseline(nn.Module):
-    """Sees one frame per clip -- the middle one -- and nothing else.
+    """Sees one frame per clip -- the middle OBSERVED one -- and nothing else.
 
     This is the baseline that makes the others mean something. A temporal model
     that fails to beat it has not shown that it uses time at all, only posture.
+
+    "Middle observed" rather than `T // 2`, corrected 2026-09-02. BoxingVI pads
+    every clip to 25 frames and real punches run 7-13, so 46-70% of each array
+    is trailing zeros -- frame 12 lands in the padding for most clips, and the
+    floor was reading a blank pose. It scored 0.256 accuracy against a 0.205
+    majority-class floor and its loss moved 0.009 across 30 epochs: not a low
+    baseline but a broken one. A floor that is too low silently flatters every
+    model measured against it, which is the one thing this class exists to
+    prevent. Channel 2 is the validity mask, so the observed span is known.
     """
 
     def __init__(self, n_classes: int = N_CLASSES, hidden: int = 128):
@@ -102,5 +111,18 @@ class StaticPoseBaseline(nn.Module):
             nn.Dropout(0.2), nn.Linear(hidden, n_classes),
         )
 
+    @staticmethod
+    def middle_observed_frame(x: torch.Tensor) -> torch.Tensor:
+        """Index of the central non-padding frame of each clip. (N, T, V, C)."""
+        valid = x[..., 2].sum(-1) > 0                      # (N, T)
+        n, t = valid.shape
+        counts = valid.sum(1)                              # frames observed
+        # The ceil(count / 2)-th valid frame: the middle of what was seen.
+        target = ((counts + 1) // 2).clamp(min=1).unsqueeze(1)
+        reached = (valid.cumsum(1) >= target) & valid
+        fallback = torch.full((n,), t // 2, device=x.device, dtype=torch.long)
+        return torch.where(counts > 0, reached.float().argmax(1), fallback)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x[:, x.shape[1] // 2])
+        idx = self.middle_observed_frame(x)
+        return self.net(x[torch.arange(x.shape[0], device=x.device), idx])
