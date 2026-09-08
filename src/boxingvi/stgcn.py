@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .data import EDGES, N_CLASSES, N_JOINTS
 
@@ -49,11 +50,19 @@ class STGCNBlock(nn.Module):
             )
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
-        # x: (N, C, T, V)
+    def forward(self, x: torch.Tensor, adj: torch.Tensor,
+                mask: torch.Tensor = None) -> torch.Tensor:
+        # x: (N, C, T, V). `mask` is (N, 1, T, 1) at this block's INPUT
+        # resolution: 1 where a real frame sits, 0 over padding.
         res = self.residual(x)
         h = self.gconv(x)
         h = torch.einsum("nctv,vw->nctw", h, adj)
+        if mask is not None:
+            # Zero padding again here. The graph convolution and its batch-norm
+            # give padded positions a non-zero value even though the input was
+            # zero, and the kernel-9 temporal convolution below would then mix
+            # that invention into the real frames next to it.
+            h = h * mask
         h = self.tconv(h)
         return self.relu(h + res)
 
@@ -77,12 +86,39 @@ class STGCN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x arrives as (N, T, V, C); ST-GCN wants (N, C, T, V).
         n, t, v, c = x.shape
+        # Channel 2 is the validity mask. Capture it before the permutes, so
+        # the pool below can ignore padding rather than average it in.
+        valid = (x[..., 2].sum(-1) > 0).float()          # (N, T)
         x = x.permute(0, 3, 1, 2).contiguous()
         x = self.data_bn(x.permute(0, 1, 3, 2).reshape(n, c * v, t))
         x = x.reshape(n, c, v, t).permute(0, 1, 3, 2).contiguous()
         for b in self.blocks:
-            x = b(x, self.adj)
-        return self.head(x.mean(dim=(2, 3)))
+            m_in = F.adaptive_max_pool1d(valid.unsqueeze(1), x.shape[2])
+            x = b(x, self.adj, m_in.unsqueeze(-1))
+            # And again on the way out, because the residual branch carries its
+            # own invented values at the padded positions.
+            m_out = F.adaptive_max_pool1d(valid.unsqueeze(1), x.shape[2])
+            x = x * m_out.unsqueeze(-1)
+        return self.head(self._masked_pool(x, valid))
+
+    @staticmethod
+    def _masked_pool(x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        """Global average over the OBSERVED span only. x is (N, C, T', V).
+
+        BoxingVI pads every clip to 25 frames and real punches run 7-13, so a
+        plain mean(dim=(2,3)) averages the learned representation over 46-70%
+        padding and divides by the padded length regardless. Shorter clips are
+        diluted hardest, which penalises exactly the classes whose punches are
+        quickest. The temporal convolutions downsample T, so the mask is pooled
+        to match: adaptive max-pool asks "did this output position overlap any
+        real input frame", which is the right question and survives a change of
+        architecture.
+        """
+        t_out = x.shape[2]
+        m = F.adaptive_max_pool1d(valid.unsqueeze(1), t_out)      # (N, 1, T')
+        num = (x * m.unsqueeze(-1)).sum(dim=(2, 3))               # (N, C)
+        den = (m.sum(dim=(1, 2)) * x.shape[3]).clamp(min=1.0)     # (N,)
+        return num / den.unsqueeze(1)
 
     def n_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

@@ -36,6 +36,39 @@ corpus interpretability is not paid for in accuracy. Its most important features
 are rear-hand reach, elbow range and mean speed — which is what a coach would
 say separates these punches.
 
+### Is that comparison fair? (2026-09-07)
+
+The obvious objection is that the learned arm was handicapped, so it was given
+every advantage that could be given and re-run:
+
+| | ST-GCN macro F1 | gap vs random forest |
+|---|---:|---:|
+| as first reported | 0.407 | -0.103 |
+| + padding-masked pooling | 0.404 | -0.106 |
+| + inverse-frequency class weighting (both arms) | 0.404 | -0.110 |
+| + 60 epochs instead of 30 | 0.417 | -0.093 |
+
+**The ranking does not move.** Three objections are now closed:
+
+- *"The pooling averaged over padding."* It did -- `mean(dim=(2,3))` divided by
+  25 frames when only ~10 are real -- and the fix is in. Padding is now provably
+  unreachable: perturbing the padded frames moves the output logits by
+  0.00000000, down from 0.142. A genuine bug, and not what was holding the
+  learned arm back.
+- *"You didn't weight the classes."* Now available via `--balanced`, applied to
+  the forest, the SVM and both neural arms alike. Weighting only the arm that is
+  losing would be a differently unfair comparison, not a fairer one.
+- *"It was undertrained."* The opposite. ST-GCN reaches **0.921 train accuracy
+  against 0.558 validation** -- a 0.363 generalisation gap; at 60 epochs it is
+  0.979 / 0.569 and the gap *widens* to 0.410 for +0.011 validation accuracy.
+  It memorises the training set. More epochs is not the missing ingredient;
+  more clips is, which is what the learning curve independently shows.
+
+One thing does change under weighting: **SVM-RBF becomes the strongest arm on
+macro F1 (0.530), above the random forest's 0.514.** Which model leads depends
+on whether classes are weighted, so both are reported rather than whichever
+flatters.
+
 Two cautions that belong next to any use of these numbers:
 
 - **ST-GCN clears the static-pose floor by only 0.061 accuracy.** A single
@@ -45,6 +78,10 @@ Two cautions that belong next to any use of these numbers:
 - **`rear_hook` scores F1 = 0.000** for the random forest — not one correct
   prediction. It is the rarest class (7.2% of labels, 50 clips in validation).
   The 0.510 macro F1 is an average over a class the model never gets right.
+  Class weighting does **not** rescue it: the balanced forest predicts
+  `rear_hook` 14 times and gets 0 right, so this is not simply a rarity
+  artefact. Its errors land on cross (21/50) and rear uppercut (20/50) -- the
+  right hand, the wrong trajectory.
 
 ## What the release actually contains
 

@@ -32,6 +32,10 @@ def macro_f1(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 def evaluate(name: str, y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
     return {
+        # Underscored keys are stripped before the results file is written.
+        # Predictions are kept in memory so a paired bootstrap can resample
+        # both models on the same draw of validation clips.
+        "_pred": np.asarray(y_pred).tolist(),
         "model": name,
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_f1": macro_f1(y_true, y_pred),
@@ -54,7 +58,7 @@ def run_floors(ytr, yva, seed=0):
             evaluate("weighted-random", yva, weighted)]
 
 
-def run_interpretable(xtr_kp, ytr, xva_kp, yva, seed=0):
+def run_interpretable(xtr_kp, ytr, xva_kp, yva, seed=0, balanced=False):
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
@@ -62,8 +66,12 @@ def run_interpretable(xtr_kp, ytr, xva_kp, yva, seed=0):
 
     ftr, fva = feature_matrix(xtr_kp), feature_matrix(xva_kp)
     out = []
+    # Applied to BOTH arms or neither. Weighting only the arm that is losing
+    # would not be a fairer comparison, just a differently unfair one.
+    cw = "balanced" if balanced else None
 
-    rf = RandomForestClassifier(n_estimators=400, random_state=seed, n_jobs=-1)
+    rf = RandomForestClassifier(n_estimators=400, random_state=seed, n_jobs=-1,
+                                class_weight=cw)
     rf.fit(ftr, ytr)
     r = evaluate("random-forest", yva, rf.predict(fva))
     order = np.argsort(rf.feature_importances_)[::-1][:10]
@@ -73,13 +81,15 @@ def run_interpretable(xtr_kp, ytr, xva_kp, yva, seed=0):
     ]
     out.append(r)
 
-    svm = make_pipeline(StandardScaler(), SVC(kernel="rbf", random_state=seed))
+    svm = make_pipeline(StandardScaler(),
+                        SVC(kernel="rbf", random_state=seed, class_weight=cw))
     svm.fit(ftr, ytr)
     out.append(evaluate("svm-rbf", yva, svm.predict(fva)))
     return out
 
 
-def run_learned(xtr, ytr, xva, yva, epochs=30, seed=0, static=False):
+def run_learned(xtr, ytr, xva, yva, epochs=30, seed=0, static=False,
+                balanced=False):
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -93,7 +103,15 @@ def run_learned(xtr, ytr, xva, yva, epochs=30, seed=0, static=False):
                     batch_size=64, shuffle=True)
     opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    lossf = torch.nn.CrossEntropyLoss()
+    # Same inverse-frequency scheme sklearn's class_weight="balanced" uses:
+    # n / (k * count_k). Keeps the two arms comparable.
+    if balanced:
+        counts = np.bincount(ytr, minlength=N_CLASSES).astype(np.float64)
+        w = len(ytr) / (N_CLASSES * np.clip(counts, 1, None))
+        lossf = torch.nn.CrossEntropyLoss(
+            weight=torch.tensor(w, dtype=torch.float32))
+    else:
+        lossf = torch.nn.CrossEntropyLoss()
 
     t0 = time.time()
     for ep in range(epochs):
@@ -112,7 +130,17 @@ def run_learned(xtr, ytr, xva, yva, epochs=30, seed=0, static=False):
     model.eval()
     with torch.no_grad():
         pred = model(torch.from_numpy(xva)).argmax(1).numpy()
+        tr_pred = model(torch.from_numpy(xtr)).argmax(1).numpy()
     r = evaluate(name, yva, pred)
+    # Train-set score alongside the validation one, so the gap between them is
+    # visible in the results file. Without it there is no way to tell an
+    # undertrained model from an overfitted one, and the two call for opposite
+    # remedies -- which is exactly the question a reader will ask of any arm
+    # that loses a comparison.
+    from sklearn.metrics import accuracy_score
+    r["train_accuracy"] = float(accuracy_score(ytr, tr_pred))
+    r["train_macro_f1"] = macro_f1(ytr, tr_pred)
+    r["generalisation_gap"] = round(r["train_accuracy"] - r["accuracy"], 4)
     r["params"] = model.n_params() if hasattr(model, "n_params") else sum(
         p.numel() for p in model.parameters())
     r["train_seconds"] = round(time.time() - t0, 1)
@@ -128,6 +156,12 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, default=Path("results/baseline.json"))
+    ap.add_argument("--balanced", action="store_true",
+                    help="inverse-frequency class weighting on every fitted "
+                         "arm, interpretable and learned alike")
+    ap.add_argument("--bootstrap", type=int, default=2000, metavar="N",
+                    help="paired bootstrap resamples for the CI on the "
+                         "st-gcn minus random-forest macro-F1 gap; 0 to skip")
     ap.add_argument("--layout-only", action="store_true",
                     help="probe the on-disk layout and stop")
     ap.add_argument("--include-v6", action="store_true",
@@ -170,11 +204,17 @@ def main() -> int:
     print(f"train {len(train)} clips / val {len(val)} clips  "
           f"({disjoint})  x={xtr.shape}")
 
+    if a.balanced:
+        print("class weighting: ON for every fitted arm "
+              "(inverse frequency, n / (k * count_k))")
     results = run_floors(ytr, yva, a.seed)
     results += run_interpretable([c.keypoints for c in train], ytr,
-                                 [c.keypoints for c in val], yva, a.seed)
-    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed, static=True))
-    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed))
+                                 [c.keypoints for c in val], yva, a.seed,
+                                 balanced=a.balanced)
+    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed,
+                               static=True, balanced=a.balanced))
+    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed,
+                               balanced=a.balanced))
 
     print(f"\n{'model':<18}{'acc':>8}{'macroF1':>10}")
     print("-" * 36)
@@ -186,18 +226,32 @@ def main() -> int:
     gap = gcn["macro_f1"] - rf["macro_f1"]
     print(f"\ninterpretability cost (st-gcn - random-forest): {gap:+.3f} macro F1")
 
+    bootstrap_result = None
+    if a.bootstrap and "_pred" in rf and "_pred" in gcn:
+        from boxingvi.stats import bootstrap_gap_ci
+        bootstrap_result = bootstrap_gap_ci(
+            yva, np.array(gcn["_pred"]), np.array(rf["_pred"]),
+            n_boot=a.bootstrap, seed=a.seed)
+        verdict = ("excludes zero" if bootstrap_result["excludes_zero"]
+                   else "INCLUDES ZERO -- not yet a claim")
+        print(f"  95% CI [{bootstrap_result['ci_low']:+.3f}, "
+              f"{bootstrap_result['ci_high']:+.3f}]  "
+              f"({a.bootstrap} paired resamples) -- {verdict}")
+
     if a.synthetic and not a.allow_synthetic:
         print("\nnot written: synthetic run without --allow-synthetic")
         return 0
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(
         {"synthetic": bool(a.synthetic), "seed": a.seed, "epochs": a.epochs,
-         "split": split_desc,
+         "split": split_desc, "balanced": bool(a.balanced),
          "n_train_clips": len(train), "n_val_clips": len(val),
          "train_videos": sorted({c.source for c in train}) or None,
          "val_videos": sorted({c.source for c in val}) or None,
          "include_v6": bool(a.include_v6),
-         "results": results}, indent=2), encoding="utf-8")
+         "gap_st_gcn_minus_random_forest": bootstrap_result,
+         "results": [{k: v for k, v in r.items()
+                      if not k.startswith("_")} for r in results]}, indent=2), encoding="utf-8")
     print(f"\nwrote {a.out}")
     return 0
 

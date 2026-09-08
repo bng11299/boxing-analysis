@@ -273,5 +273,35 @@ with tempfile.TemporaryDirectory() as d:
            lambda: data._load_presegmented("V1", root / "Skeleton_data",
                                            root / "Annotation_files"))
 
+
+print("\n--- 16. ST-GCN ignores padding entirely, as the feature arm does ---")
+_obs = torch.zeros(1, MAX_FRAMES, N_JOINTS, 3)
+_obs[0, :9, :, :2] = 0.4
+_obs[0, :9, :, 2] = 1.0
+_net = STGCN().eval()
+_alt = _obs.clone()
+_alt[0, 9:, :, :2] = 99.0            # garbage in the padded frames only
+with torch.no_grad():
+    _delta = float((_net(_obs) - _net(_alt)).abs().max())
+check("padded content cannot reach the output", _delta < 1e-5,
+      f"logit delta {_delta:.6f} -- padding is leaking into real frames")
+
+# The pooled representation must divide by the observed length, not by 25.
+_short = torch.zeros(2, MAX_FRAMES, N_JOINTS, 3)
+_short[:, :5, :, :2] = 0.4
+_short[:, :5, :, 2] = 1.0
+_valid = (_short[..., 2].sum(-1) > 0).float()
+_feat = torch.ones(2, 8, MAX_FRAMES, N_JOINTS)
+_pooled = STGCN._masked_pool(_feat, _valid)
+check("masked pool averages over observed frames only",
+      bool(torch.allclose(_pooled, torch.ones_like(_pooled))),
+      f"got {_pooled[0, 0].item():.4f}, expected 1.0 -- a plain mean would give 5/25 = 0.2")
+
+_none = torch.zeros(1, MAX_FRAMES, N_JOINTS, 3)
+with torch.no_grad():
+    _out = _net(_none)
+check("all-padding clip does not divide by zero",
+      bool(torch.isfinite(_out).all()))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
