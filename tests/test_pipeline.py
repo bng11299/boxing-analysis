@@ -303,5 +303,62 @@ with torch.no_grad():
 check("all-padding clip does not divide by zero",
       bool(torch.isfinite(_out).all()))
 
+
+print("\n--- 17. Paired bootstrap: an interval that can actually say 'no' ---")
+from boxingvi.stats import bootstrap_gap_ci, stratified_subsample  # noqa: E402
+
+_rng = np.random.default_rng(0)
+_y = _rng.integers(0, data.N_CLASSES, 400)
+_perfect = _y.copy()
+_noisy = np.where(_rng.random(400) < 0.5, _y, _rng.integers(0, data.N_CLASSES, 400))
+
+# A gate whose pass condition is "excludes zero" is worthless until it has been
+# shown to fire on a known positive AND stay silent on a known negative.
+_signal = bootstrap_gap_ci(_y, _perfect, _noisy, n_boot=200)
+check("real difference excludes zero", _signal["excludes_zero"],
+      f"CI [{_signal['ci_low']:.3f}, {_signal['ci_high']:.3f}]")
+check("point estimate has the right sign", _signal["point"] > 0)
+check("interval brackets the point estimate",
+      _signal["ci_low"] <= _signal["point"] <= _signal["ci_high"])
+
+_none = bootstrap_gap_ci(_y, _noisy, _noisy.copy(), n_boot=200)
+check("a model against itself does NOT exclude zero", not _none["excludes_zero"],
+      "the interval would certify a difference that cannot exist")
+check("and its point estimate is exactly zero", _none["point"] == 0.0)
+
+_a = bootstrap_gap_ci(_y, _perfect, _noisy, n_boot=200, seed=7)
+_b = bootstrap_gap_ci(_y, _perfect, _noisy, n_boot=200, seed=7)
+check("same seed reproduces the interval exactly",
+      (_a["ci_low"], _a["ci_high"]) == (_b["ci_low"], _b["ci_high"]))
+
+_acc = bootstrap_gap_ci(_y, _perfect, _noisy, n_boot=200, metric="accuracy")
+check("accuracy metric is selectable", _acc["metric"] == "accuracy")
+check("and gives a different interval than macro F1",
+      abs(_acc["point"] - _signal["point"]) > 1e-9)
+check("macro_f1 is the default", bootstrap_gap_ci(
+      _y, _perfect, _noisy, n_boot=50)["metric"] == "macro_f1")
+raises("an unknown metric is rejected, not silently defaulted",
+       lambda: bootstrap_gap_ci(_y, _perfect, _noisy, n_boot=50, metric="auc"))
+
+raises("mismatched lengths are rejected",
+       lambda: bootstrap_gap_ci(_y, _perfect, _noisy[:10]))
+
+print("\n--- 18. Stratified subsample keeps the rare class alive ---")
+# 300 of class 0, 4 of class 5: uniform sampling at 10% would routinely lose
+# class 5 entirely, and the learning curve would then be measuring class
+# coverage rather than training-set size.
+_yc = np.array([0] * 300 + [1] * 60 + [5] * 4)
+_idx = stratified_subsample(_yc, 0.1, seed=0)
+_kept = set(np.unique(_yc[_idx]).tolist())
+check("every class survives a 10% subsample", _kept == {0, 1, 5}, str(sorted(_kept)))
+check("rare class keeps at least one clip", int((_yc[_idx] == 5).sum()) >= 1)
+check("subsample is roughly the requested size",
+      25 <= len(_idx) <= 50, f"got {len(_idx)} from 364 at frac 0.1")
+check("indices are unique", len(set(_idx.tolist())) == len(_idx))
+check("frac 1.0 keeps everything", len(stratified_subsample(_yc, 1.0, 0)) == len(_yc))
+_s1 = stratified_subsample(_yc, 0.5, seed=3)
+_s2 = stratified_subsample(_yc, 0.5, seed=3)
+check("same seed gives the same subsample", _s1.tolist() == _s2.tolist())
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

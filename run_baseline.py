@@ -160,8 +160,9 @@ def main() -> int:
                     help="inverse-frequency class weighting on every fitted "
                          "arm, interpretable and learned alike")
     ap.add_argument("--bootstrap", type=int, default=2000, metavar="N",
-                    help="paired bootstrap resamples for the CI on the "
-                         "st-gcn minus random-forest macro-F1 gap; 0 to skip")
+                    help="paired bootstrap resamples for the macro-F1 CIs "
+                         "(st-gcn vs random-forest, and st-gcn vs the "
+                         "static-pose floor); 0 to skip")
     ap.add_argument("--layout-only", action="store_true",
                     help="probe the on-disk layout and stop")
     ap.add_argument("--include-v6", action="store_true",
@@ -226,17 +227,37 @@ def main() -> int:
     gap = gcn["macro_f1"] - rf["macro_f1"]
     print(f"\ninterpretability cost (st-gcn - random-forest): {gap:+.3f} macro F1")
 
-    bootstrap_result = None
-    if a.bootstrap and "_pred" in rf and "_pred" in gcn:
+    # Two intervals, because the project makes two separate claims and both
+    # need one. The interpretability gap is the headline. The margin over the
+    # static-pose floor is the one that decides whether the temporal model can
+    # be said to use time at all -- and at roughly 0.06 accuracy that claim is
+    # small enough that an interval including zero would retire it.
+    sp = next((r for r in results if r["model"] == "static-pose"), None)
+    cis: dict = {}
+    if a.bootstrap:
         from boxingvi.stats import bootstrap_gap_ci
-        bootstrap_result = bootstrap_gap_ci(
-            yva, np.array(gcn["_pred"]), np.array(rf["_pred"]),
-            n_boot=a.bootstrap, seed=a.seed)
-        verdict = ("excludes zero" if bootstrap_result["excludes_zero"]
-                   else "INCLUDES ZERO -- not yet a claim")
-        print(f"  95% CI [{bootstrap_result['ci_low']:+.3f}, "
-              f"{bootstrap_result['ci_high']:+.3f}]  "
-              f"({a.bootstrap} paired resamples) -- {verdict}")
+        comparisons = [
+            ("gap_st_gcn_minus_random_forest",
+             "interpretability gap (st-gcn - random-forest)", gcn, rf),
+            ("gap_st_gcn_minus_static_pose",
+             "temporal margin     (st-gcn - static-pose)  ", gcn, sp),
+        ]
+        for key, label, high, low in comparisons:
+            if not (high and low and "_pred" in high and "_pred" in low):
+                continue
+            # Both metrics, because they can disagree about whether a claim
+            # survives: the temporal margin is 0.189 macro F1 but 0.061
+            # accuracy, and only the second one ever looked fragile.
+            for metric in ("macro_f1", "accuracy"):
+                ci = bootstrap_gap_ci(
+                    yva, np.array(high["_pred"]), np.array(low["_pred"]),
+                    n_boot=a.bootstrap, seed=a.seed, metric=metric)
+                cis[f"{key}__{metric}"] = ci
+                verdict = ("excludes zero" if ci["excludes_zero"]
+                           else "INCLUDES ZERO -- not a claim")
+                print(f"  {label} [{metric:>9}]: {ci['point']:+.3f}  "
+                      f"95% CI [{ci['ci_low']:+.3f}, {ci['ci_high']:+.3f}]  "
+                      f"-- {verdict}")
 
     if a.synthetic and not a.allow_synthetic:
         print("\nnot written: synthetic run without --allow-synthetic")
@@ -249,7 +270,14 @@ def main() -> int:
          "train_videos": sorted({c.source for c in train}) or None,
          "val_videos": sorted({c.source for c in val}) or None,
          "include_v6": bool(a.include_v6),
-         "gap_st_gcn_minus_random_forest": bootstrap_result,
+         "gap_st_gcn_minus_random_forest":
+             cis.get("gap_st_gcn_minus_random_forest__macro_f1"),
+         "gap_st_gcn_minus_random_forest_accuracy":
+             cis.get("gap_st_gcn_minus_random_forest__accuracy"),
+         "gap_st_gcn_minus_static_pose":
+             cis.get("gap_st_gcn_minus_static_pose__macro_f1"),
+         "gap_st_gcn_minus_static_pose_accuracy":
+             cis.get("gap_st_gcn_minus_static_pose__accuracy"),
          "results": [{k: v for k, v in r.items()
                       if not k.startswith("_")} for r in results]}, indent=2), encoding="utf-8")
     print(f"\nwrote {a.out}")
