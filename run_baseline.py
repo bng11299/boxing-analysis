@@ -147,6 +147,80 @@ def run_learned(xtr, ytr, xva, yva, epochs=30, seed=0, static=False,
     return r
 
 
+def run_stgcnpp(xtr, ytr, xva, yva, epochs=30, seed=0, t_out=50,
+                pretrained=None, spec=None, balanced=False):
+    """ST-GCN++, from scratch or fine-tuned from a PYSKL checkpoint.
+
+    Both variants get the same optimiser -- AdamW with the backbone at 1e-3 and
+    the fresh head at 1e-2 -- so the only thing separating them is where the
+    backbone weights started. That is the comparison that tests whether the
+    random forest wins for lack of data.
+    """
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from boxingvi.stgcnpp import STGCNPP, load_pretrained, prepare_input
+
+    torch.manual_seed(seed)
+    model = STGCNPP()
+    name = "st-gcn++ pretrained" if pretrained else "st-gcn++ scratch"
+    provenance = None
+    if pretrained:
+        provenance = load_pretrained(model, pretrained, spec)
+        print(f"    loaded {provenance['loaded_tensors']} backbone tensors "
+              f"(source head: {provenance['source_classes']} classes, "
+              f"sha256 {provenance['sha256'][:12]}...)")
+
+    ttr, tva = prepare_input(xtr, t_out), prepare_input(xva, t_out)
+    dl = DataLoader(TensorDataset(ttr, torch.from_numpy(ytr)),
+                    batch_size=64, shuffle=True)
+    opt = torch.optim.AdamW([
+        {"params": model.backbone.parameters(), "lr": 1e-3},
+        {"params": model.cls_head.parameters(), "lr": 1e-2},
+    ], weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    if balanced:
+        counts = np.bincount(ytr, minlength=N_CLASSES).astype(np.float64)
+        w = len(ytr) / (N_CLASSES * np.clip(counts, 1, None))
+        lossf = torch.nn.CrossEntropyLoss(weight=torch.tensor(w, dtype=torch.float32))
+    else:
+        lossf = torch.nn.CrossEntropyLoss()
+
+    def predict(t):
+        model.eval()
+        with torch.no_grad():
+            return torch.cat([model(t[i:i + 256]).argmax(1)
+                              for i in range(0, len(t), 256)]).numpy()
+
+    t0 = time.time()
+    for ep in range(epochs):
+        model.train()
+        tot = 0.0
+        for xb, yb in dl:
+            opt.zero_grad()
+            loss = lossf(model(xb), yb)
+            loss.backward()
+            opt.step()
+            tot += loss.item() * len(xb)
+        sched.step()
+        if (ep + 1) % 5 == 0:
+            print(f"    {name} epoch {ep + 1:>3}/{epochs}  loss {tot / len(ttr):.4f}"
+                  f"  ({time.time() - t0:.0f}s)")
+
+    r = evaluate(name, yva, predict(tva))
+    from sklearn.metrics import accuracy_score
+    tr_pred = predict(ttr)
+    r["train_accuracy"] = float(accuracy_score(ytr, tr_pred))
+    r["train_macro_f1"] = macro_f1(ytr, tr_pred)
+    r["generalisation_gap"] = round(r["train_accuracy"] - r["accuracy"], 4)
+    r["params"] = model.n_params()
+    r["t_out"] = t_out
+    r["train_seconds"] = round(time.time() - t0, 1)
+    if provenance:
+        r["pretrained_from"] = {"path": Path(pretrained).name, **provenance}
+    return r
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=Path, help="root containing Skeleton_data/")
@@ -169,10 +243,31 @@ def main() -> int:
                     help="re-segment V6 from its raw per-frame array; off by "
                          "default because that segmentation is ours, not the "
                          "authors'")
+    ap.add_argument("--stgcnpp", choices=["off", "scratch", "pretrained", "both"],
+                    default="off",
+                    help="add the ST-GCN++ arm: from scratch, fine-tuned from "
+                         "--pretrained, or both. Off by default, so existing runs "
+                         "reproduce unchanged")
+    ap.add_argument("--pretrained", type=Path, metavar="PTH",
+                    help="PYSKL ST-GCN++ checkpoint (see boxingvi.stgcnpp.PRETRAINED)")
+    ap.add_argument("--pretrained-spec", default="ntu120_xsub_hrnet_j",
+                    help="which PRETRAINED entry to verify the checkpoint against")
+    ap.add_argument("--t-out", type=int, default=50,
+                    help="frames each clip is resampled to for ST-GCN++")
+    ap.add_argument("--stgcnpp-epochs", type=int, default=None,
+                    help="epochs for the ST-GCN++ arm (default: --epochs)")
     a = ap.parse_args()
 
     if not (a.data or a.synthetic):
         ap.error("pass --data or --synthetic")
+    spec = None
+    if a.stgcnpp in ("pretrained", "both"):
+        from boxingvi.stgcnpp import PRETRAINED
+        if not a.pretrained:
+            ap.error("--stgcnpp pretrained/both needs --pretrained PTH")
+        if a.pretrained_spec not in PRETRAINED:
+            ap.error(f"unknown --pretrained-spec; choose from {sorted(PRETRAINED)}")
+        spec = PRETRAINED[a.pretrained_spec]
 
     if a.synthetic:
         from boxingvi.synthetic import make_corpus
@@ -216,11 +311,19 @@ def main() -> int:
                                static=True, balanced=a.balanced))
     results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed,
                                balanced=a.balanced))
+    pp_epochs = a.stgcnpp_epochs or a.epochs
+    if a.stgcnpp in ("scratch", "both"):
+        results.append(run_stgcnpp(xtr, ytr, xva, yva, pp_epochs, a.seed,
+                                   a.t_out, balanced=a.balanced))
+    if a.stgcnpp in ("pretrained", "both"):
+        results.append(run_stgcnpp(xtr, ytr, xva, yva, pp_epochs, a.seed,
+                                   a.t_out, pretrained=a.pretrained, spec=spec,
+                                   balanced=a.balanced))
 
-    print(f"\n{'model':<18}{'acc':>8}{'macroF1':>10}")
-    print("-" * 36)
+    print(f"\n{'model':<22}{'acc':>8}{'macroF1':>10}")
+    print("-" * 40)
     for r in results:
-        print(f"{r['model']:<18}{r['accuracy']:>8.3f}{r['macro_f1']:>10.3f}")
+        print(f"{r['model']:<22}{r['accuracy']:>8.3f}{r['macro_f1']:>10.3f}")
 
     rf = next(r for r in results if r["model"] == "random-forest")
     gcn = next(r for r in results if r["model"] == "st-gcn")
@@ -236,11 +339,18 @@ def main() -> int:
     cis: dict = {}
     if a.bootstrap:
         from boxingvi.stats import bootstrap_gap_ci
+        ppp = next((r for r in results if r["model"] == "st-gcn++ pretrained"), None)
+        pps = next((r for r in results if r["model"] == "st-gcn++ scratch"), None)
         comparisons = [
             ("gap_st_gcn_minus_random_forest",
              "interpretability gap (st-gcn - random-forest)", gcn, rf),
             ("gap_st_gcn_minus_static_pose",
              "temporal margin     (st-gcn - static-pose)  ", gcn, sp),
+            # The M2 question: does pretraining close the gap to the forest?
+            ("gap_stgcnpp_pretrained_minus_random_forest",
+             "pretrained gap  (st-gcn++ pre - random-forest)", ppp, rf),
+            ("gap_stgcnpp_pretrained_minus_scratch",
+             "pretraining effect (st-gcn++ pre - scratch)   ", ppp, pps),
         ]
         for key, label, high, low in comparisons:
             if not (high and low and "_pred" in high and "_pred" in low):
@@ -278,6 +388,11 @@ def main() -> int:
              cis.get("gap_st_gcn_minus_static_pose__macro_f1"),
          "gap_st_gcn_minus_static_pose_accuracy":
              cis.get("gap_st_gcn_minus_static_pose__accuracy"),
+         "stgcnpp": a.stgcnpp,
+         "gap_stgcnpp_pretrained_minus_random_forest":
+             cis.get("gap_stgcnpp_pretrained_minus_random_forest__macro_f1"),
+         "gap_stgcnpp_pretrained_minus_scratch":
+             cis.get("gap_stgcnpp_pretrained_minus_scratch__macro_f1"),
          "results": [{k: v for k, v in r.items()
                       if not k.startswith("_")} for r in results]}, indent=2), encoding="utf-8")
     print(f"\nwrote {a.out}")

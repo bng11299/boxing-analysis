@@ -360,5 +360,138 @@ _s1 = stratified_subsample(_yc, 0.5, seed=3)
 _s2 = stratified_subsample(_yc, 0.5, seed=3)
 check("same seed gives the same subsample", _s1.tolist() == _s2.tolist())
 
+print("\n--- 19. ST-GCN++ port: architecture pinned to PYSKL ---")
+from boxingvi.stgcnpp import (STGCNPP, coco_spatial_adjacency,  # noqa: E402
+                              load_pretrained, prepare_input)
+
+_A = coco_spatial_adjacency()
+check("adjacency is three 17x17 subsets", _A.shape == (3, N_JOINTS, N_JOINTS))
+check("first subset is the identity", np.allclose(_A[0], np.eye(N_JOINTS)))
+_cols = _A[1].sum(0)
+check("inward subset is column-normalised",
+      np.allclose(_cols[_cols > 0], 1.0), str(_cols))
+_pp = STGCNPP()
+check("parameter count matches PYSKL's ST-GCN++ (~1.39M)",
+      1_370_000 <= _pp.n_params() <= 1_400_000, f"{_pp.n_params():,}")
+check("backbone exposes 690 tensors, the PYSKL key count",
+      sum(k.startswith("backbone.") for k in _pp.state_dict()) == 690)
+_pp.eval()
+check("ST-GCN++ output shape",
+      _pp(torch.zeros(3, 1, 50, N_JOINTS, 3)).shape == (3, data.N_CLASSES))
+raises("forward rejects a 4-D tensor",
+       lambda: _pp(torch.zeros(3, 50, N_JOINTS, 3)))
+raises("forward rejects the wrong joint count",
+       lambda: _pp(torch.zeros(3, 1, 50, 25, 3)))
+
+print("\n--- 20. ST-GCN++ input preparation ---")
+_x = np.zeros((2, MAX_FRAMES, N_JOINTS, 3), np.float32)
+_x[:, :5, :, 0] = 0.0          # x at the left edge
+_x[:, :5, :, 1] = 1.0          # y at the bottom edge
+_x[:, :5, :, 2] = 1.0          # five real frames, twenty of padding
+_x[0, :5, 3, 2] = 0.0          # joint 3 never observed in clip 0
+_t = prepare_input(_x, t_out=40)
+check("shape is (N, persons=1, t_out, V, C)", tuple(_t.shape) == (2, 1, 40, N_JOINTS, 3))
+check("x in [0,1] maps to 2x-1", float(_t[1, 0, :, 0, 0].max()) == -1.0)
+check("y in [0,1] maps to 2y-1", float(_t[1, 0, :, 0, 1].min()) == 1.0)
+check("no padding frame is ever sampled -- every output frame is observed",
+      bool((_t[1, 0, :, :, 2] == 1).all()))
+check("an unobserved joint is zeroed, as PYSKL zeroes low-score joints",
+      bool((_t[0, 0, :, 3, :] == 0).all()))
+check("the validity flag becomes the score channel",
+      bool((_t[0, 0, :, 0, 2] == 1).all()))
+raises("rejects the wrong joint count",
+       lambda: prepare_input(np.zeros((1, 10, 12, 3), np.float32)))
+raises("rejects the wrong channel count",
+       lambda: prepare_input(np.zeros((1, 10, N_JOINTS, 2), np.float32)))
+raises("rejects a 3-D array",
+       lambda: prepare_input(np.zeros((10, N_JOINTS, 3), np.float32)))
+_nan = _x.copy()
+_nan[0, 0, 0, 0] = np.nan
+raises("rejects NaN rather than propagating it", lambda: prepare_input(_nan))
+raises("rejects a clip with no observed frame",
+       lambda: prepare_input(np.zeros((1, 10, N_JOINTS, 3), np.float32)))
+_px = _x.copy()
+_px[:, :5, :, 0] = 640.0
+raises("rejects pixel-space coordinates instead of feeding nonsense to the weights",
+       lambda: prepare_input(_px))
+raises("rejects a non-positive t_out", lambda: prepare_input(_x, t_out=0))
+_edge = _x.copy()
+_edge[:, :5, 0, 0] = -0.05     # a wrist a little past the left edge
+_edge[:, :5, 1, 1] = 1.08      # an ankle a little below the frame
+check("accepts joints slightly outside the frame -- estimators produce them",
+      prepare_input(_edge).shape[0] == 2)
+
+print("\n--- 21. Pretrained checkpoint is untrusted input ---")
+_SENTINEL = Path(tempfile.gettempdir()) / "boxingvi_unsafe_unpickle_ran"
+
+
+def _pwn(path):  # would only run if the checkpoint were unpickled unsafely
+    Path(path).write_text("executed", encoding="utf-8")
+    return {}
+
+
+class _Evil:
+    def __reduce__(self):
+        return (_pwn, (str(_SENTINEL),))
+
+
+with tempfile.TemporaryDirectory() as _d:
+    _d = Path(_d)
+    _src = STGCNPP(n_classes=60)
+    for _p in _src.parameters():                # make the weights distinguishable
+        torch.nn.init.normal_(_p, std=0.05)
+    _good = _d / "good.pth"
+    torch.save({"meta": {"note": "pyskl"}, "state_dict": _src.state_dict()}, _good)
+
+    _dst = STGCNPP()
+    _head_before = _dst.cls_head.fc_cls.weight.clone()
+    _rep = load_pretrained(_dst, _good)
+    check("a well-formed checkpoint loads", _rep["loaded_tensors"] == 690, str(_rep))
+    check("backbone weights actually arrive",
+          torch.equal(_dst.backbone.gcn[4].gcn.conv.weight,
+                      _src.backbone.gcn[4].gcn.conv.weight))
+    check("the source head is not copied -- it has a different label set",
+          torch.equal(_dst.cls_head.fc_cls.weight, _head_before)
+          and _dst.cls_head.fc_cls.out_features == data.N_CLASSES)
+    check("the source class count is reported", _rep["source_classes"] == 60)
+    check("a sha256 is reported for pinning", len(_rep["sha256"]) == 64)
+
+    raises("a missing file is an error",
+           lambda: load_pretrained(STGCNPP(), _d / "nope.pth"), FileNotFoundError)
+    raises("a size mismatch is refused",
+           lambda: load_pretrained(STGCNPP(), _good, {"size": 123}))
+    raises("an md5 mismatch is refused",
+           lambda: load_pretrained(STGCNPP(), _good, {"md5": "0" * 32}))
+    raises("a sha256 mismatch is refused",
+           lambda: load_pretrained(STGCNPP(), _good, {"sha256": "0" * 64}))
+
+    _sd = _src.state_dict()
+    _miss = {k: v for k, v in _sd.items() if k != "backbone.gcn.3.gcn.A"}
+    torch.save({"state_dict": _miss}, _d / "missing.pth")
+    raises("a missing backbone tensor is refused, not silently left random",
+           lambda: load_pretrained(STGCNPP(), _d / "missing.pth"))
+
+    torch.save({"state_dict": {**_sd, "backbone.extra.weight": torch.zeros(1)}},
+               _d / "extra.pth")
+    raises("an unexpected backbone tensor is refused -- wrong architecture",
+           lambda: load_pretrained(STGCNPP(), _d / "extra.pth"))
+
+    _shape = dict(_sd)
+    _shape["backbone.data_bn.weight"] = torch.zeros(75)
+    torch.save({"state_dict": _shape}, _d / "shape.pth")
+    raises("a shape mismatch is refused (25-joint NTU weights, say)",
+           lambda: load_pretrained(STGCNPP(), _d / "shape.pth"))
+
+    torch.save({"state_dict": {"backbone.data_bn.weight": [1, 2, 3]}}, _d / "notensor.pth")
+    raises("a payload that is not tensors is refused",
+           lambda: load_pretrained(STGCNPP(), _d / "notensor.pth"))
+
+    if _SENTINEL.exists():
+        _SENTINEL.unlink()
+    torch.save({"state_dict": _Evil()}, _d / "evil.pth")
+    raises("a checkpoint carrying arbitrary code is refused by the safe loader",
+           lambda: load_pretrained(STGCNPP(), _d / "evil.pth"))
+    check("and the embedded code never ran", not _SENTINEL.exists())
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
