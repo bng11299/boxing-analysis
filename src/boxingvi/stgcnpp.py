@@ -45,7 +45,9 @@ PRETRAINED = {
                "stgcnpp_ntu120_xsub_hrnet/j.pth",
         "size": 5_915_801,
         "md5": "c61f2dd4e71f130ee3e942580356cf26",
-        "sha256": None,
+        # Pinned 2026-09-16 after a verified download: size and md5 matched the
+        # host, and all 690 backbone tensors matched this port by name and shape.
+        "sha256": "c6e074210fa30c01081460665ce9c1c221ba4a60d7eeb10456cde6e8ac40486e",
         "source_classes": 120,
     },
     "ntu60_xsub_hrnet_j": {
