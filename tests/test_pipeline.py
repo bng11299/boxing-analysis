@@ -422,6 +422,7 @@ check("accepts joints slightly outside the frame -- estimators produce them",
       prepare_input(_edge).shape[0] == 2)
 
 print("\n--- 21. Pretrained checkpoint is untrusted input ---")
+import hashlib  # noqa: E402
 _SENTINEL = Path(tempfile.gettempdir()) / "boxingvi_unsafe_unpickle_ran"
 
 
@@ -445,7 +446,7 @@ with tempfile.TemporaryDirectory() as _d:
 
     _dst = STGCNPP()
     _head_before = _dst.cls_head.fc_cls.weight.clone()
-    _rep = load_pretrained(_dst, _good)
+    _rep = load_pretrained(_dst, _good, allow_unpinned=True)
     check("a well-formed checkpoint loads", _rep["loaded_tensors"] == 690, str(_rep))
     check("backbone weights actually arrive",
           torch.equal(_dst.backbone.gcn[4].gcn.conv.weight,
@@ -456,12 +457,17 @@ with tempfile.TemporaryDirectory() as _d:
     check("the source class count is reported", _rep["source_classes"] == 60)
     check("a sha256 is reported for pinning", len(_rep["sha256"]) == 64)
 
+    raises("no spec and no opt-out: an unpinned checkpoint is refused",
+           lambda: load_pretrained(STGCNPP(), _good))
+    raises("a spec with md5 but no sha256 is refused as unpinned",
+           lambda: load_pretrained(STGCNPP(), _good,
+                                   {"md5": hashlib.md5(_good.read_bytes()).hexdigest()}))
     raises("a missing file is an error",
-           lambda: load_pretrained(STGCNPP(), _d / "nope.pth"), FileNotFoundError)
+           lambda: load_pretrained(STGCNPP(), _d / "nope.pth", allow_unpinned=True), FileNotFoundError)
     raises("a size mismatch is refused",
-           lambda: load_pretrained(STGCNPP(), _good, {"size": 123}))
+           lambda: load_pretrained(STGCNPP(), _good, {"size": 123}, allow_unpinned=True))
     raises("an md5 mismatch is refused",
-           lambda: load_pretrained(STGCNPP(), _good, {"md5": "0" * 32}))
+           lambda: load_pretrained(STGCNPP(), _good, {"md5": "0" * 32}, allow_unpinned=True))
     raises("a sha256 mismatch is refused",
            lambda: load_pretrained(STGCNPP(), _good, {"sha256": "0" * 64}))
 
@@ -469,32 +475,32 @@ with tempfile.TemporaryDirectory() as _d:
     _miss = {k: v for k, v in _sd.items() if k != "backbone.gcn.3.gcn.A"}
     torch.save({"state_dict": _miss}, _d / "missing.pth")
     raises("a missing backbone tensor is refused, not silently left random",
-           lambda: load_pretrained(STGCNPP(), _d / "missing.pth"))
+           lambda: load_pretrained(STGCNPP(), _d / "missing.pth", allow_unpinned=True))
 
     torch.save({"state_dict": {**_sd, "backbone.extra.weight": torch.zeros(1)}},
                _d / "extra.pth")
     raises("an unexpected backbone tensor is refused -- wrong architecture",
-           lambda: load_pretrained(STGCNPP(), _d / "extra.pth"))
+           lambda: load_pretrained(STGCNPP(), _d / "extra.pth", allow_unpinned=True))
 
     _shape = dict(_sd)
     _shape["backbone.data_bn.weight"] = torch.zeros(75)
     torch.save({"state_dict": _shape}, _d / "shape.pth")
     raises("a shape mismatch is refused (25-joint NTU weights, say)",
-           lambda: load_pretrained(STGCNPP(), _d / "shape.pth"))
+           lambda: load_pretrained(STGCNPP(), _d / "shape.pth", allow_unpinned=True))
 
-    torch.save({"state_dict": {"backbone.data_bn.weight": [1, 2, 3]}}, _d / "notensor.pth")
-    raises("a payload that is not tensors is refused",
-           lambda: load_pretrained(STGCNPP(), _d / "notensor.pth"))
+    torch.save({"state_dict": {**_sd, "backbone.data_bn.weight": [1, 2, 3]}},
+               _d / "notensor.pth")
+    raises("a payload that is not tensors is refused -- full key set, one list value",
+           lambda: load_pretrained(STGCNPP(), _d / "notensor.pth", allow_unpinned=True))
 
     if _SENTINEL.exists():
         _SENTINEL.unlink()
     torch.save({"state_dict": _Evil()}, _d / "evil.pth")
     raises("a checkpoint carrying arbitrary code is refused by the safe loader",
-           lambda: load_pretrained(STGCNPP(), _d / "evil.pth"))
+           lambda: load_pretrained(STGCNPP(), _d / "evil.pth", allow_unpinned=True))
     check("and the embedded code never ran", not _SENTINEL.exists())
 
     print("\n--- 22. The verified bytes are the loaded bytes ---")
-    import hashlib  # noqa: E402
 
     from boxingvi import stgcnpp as _pp  # noqa: E402
     _blob = _good.read_bytes()
@@ -521,12 +527,17 @@ with tempfile.TemporaryDirectory() as _d:
           len(_seen) == 1 and isinstance(_seen[0], bytes)
           and hashlib.sha256(_seen[0]).hexdigest() == _pin["sha256"])
     _cap = _pp.MAX_CHECKPOINT_BYTES
+    _reads = []
+    _real_read = Path.read_bytes
     _pp.MAX_CHECKPOINT_BYTES = 10
+    Path.read_bytes = lambda self: _reads.append(self) or _real_read(self)
     try:
-        raises("a file over the size ceiling is refused before it is read",
-               lambda: load_pretrained(STGCNPP(), _good))
+        raises("a file over the size ceiling is refused",
+               lambda: load_pretrained(STGCNPP(), _good, allow_unpinned=True))
     finally:
         _pp.MAX_CHECKPOINT_BYTES = _cap
+        Path.read_bytes = _real_read
+    check("... and refused before a single byte is read", _reads == [])
 
 print("\n--- 23. run_baseline: seeds, intervals, and pinning ---")
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -538,9 +549,16 @@ _models = ["random-forest", "st-gcn", "static-pose",
            "st-gcn++ pretrained", "st-gcn++ scratch"]
 _cmp = {k: (hi, lo) for k, _l, hi, lo in
         run_baseline.interval_comparisons([{"model": m} for m in _models])}
-check("scratch - random-forest is among the intervals, scratch on the higher side",
-      _cmp.get("gap_stgcnpp_scratch_minus_random_forest") ==
-      ({"model": "st-gcn++ scratch"}, {"model": "random-forest"}))
+_want = {
+    "gap_st_gcn_minus_random_forest": ("st-gcn", "random-forest"),
+    "gap_st_gcn_minus_static_pose": ("st-gcn", "static-pose"),
+    "gap_stgcnpp_pretrained_minus_random_forest": ("st-gcn++ pretrained", "random-forest"),
+    "gap_stgcnpp_pretrained_minus_scratch": ("st-gcn++ pretrained", "st-gcn++ scratch"),
+    "gap_stgcnpp_scratch_minus_random_forest": ("st-gcn++ scratch", "random-forest"),
+}
+check("all five intervals exist, each with the named model on the higher side",
+      {k: (hi["model"], lo["model"]) for k, (hi, lo) in _cmp.items()} == _want,
+      str(_cmp))
 _cmp_off = {k: (hi, lo) for k, _l, hi, lo in run_baseline.interval_comparisons(
     [{"model": m} for m in _models[:3]])}
 check("without ST-GCN++ its intervals carry None and are skipped, not faked",
@@ -548,19 +566,24 @@ check("without ST-GCN++ its intervals carry None and are skipped, not faked",
 
 
 def _exit_code(argv):
+    import contextlib
+    import io
+    err = io.StringIO()
     try:
-        run_baseline.main(argv)
+        with contextlib.redirect_stderr(err):
+            run_baseline.main(argv)
     except SystemExit as e:
-        return e.code
-    return 0
+        return e.code, err.getvalue()
+    return 0, err.getvalue()
 
 
 with tempfile.TemporaryDirectory() as _d:
     _fake = Path(_d) / "w.pth"
     _fake.write_bytes(b"x")
-    check("a checkpoint spec with no pinned sha256 is refused at the CLI",
-          _exit_code(["--synthetic", "--stgcnpp", "pretrained", "--pretrained",
-                      str(_fake), "--pretrained-spec", "ntu60_xsub_hrnet_j"]) == 2)
+    _code, _msg = _exit_code(["--synthetic", "--stgcnpp", "pretrained", "--pretrained",
+                              str(_fake), "--pretrained-spec", "ntu60_xsub_hrnet_j"])
+    check("a checkpoint spec with no pinned sha256 is refused at the CLI, for that reason",
+          _code == 2 and "no pinned sha256" in _msg, _msg[-200:])
 
 _sc = synthetic.make_corpus(n_train=36, n_val=12, seed=4)
 _str, _sva = data.split_by_subject(_sc)

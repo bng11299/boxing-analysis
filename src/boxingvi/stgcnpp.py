@@ -22,7 +22,6 @@ Anything else raises. There is no fallback to an unsafe load.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import io
 from collections.abc import Mapping
@@ -326,16 +325,21 @@ def _digest(blob: bytes, algo: str) -> str:
     return hashlib.new(algo, blob).hexdigest()
 
 
-def load_pretrained(model: STGCNPP, path: str | Path, spec: Mapping | None = None) -> dict:
+def load_pretrained(model: STGCNPP, path: str | Path, spec: Mapping | None = None,
+                    *, allow_unpinned: bool = False) -> dict:
     """Load a PYSKL ST-GCN++ backbone into `model`. The classifier head is left
     as initialised, since the source task has a different label set.
 
-    Checks, in order, and raises on the first failure: the file exists and is a
-    regular file; its size and digests match `spec` where given; it opens under
-    ``weights_only=True``; it holds a mapping of tensors; the backbone keys
-    match this architecture exactly, with no missing or unexpected names; and
-    every shape matches.
+    Deny by default: `spec` must pin a sha256 unless the caller passes
+    ``allow_unpinned=True`` (tests of the later checks do). Then, in order,
+    raising on the first failure: the file exists and is a regular file; its
+    size and digests match `spec`; it opens under ``weights_only=True``; it
+    holds a mapping of tensors; the backbone keys match this architecture
+    exactly, with no missing or unexpected names; and every shape matches.
     """
+    if not (spec and spec.get("sha256")) and not allow_unpinned:
+        raise ValueError("refusing a checkpoint with no pinned sha256; pass a spec "
+                         "from PRETRAINED, or allow_unpinned=True knowingly")
     path = Path(path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"checkpoint not found: {path}")
@@ -379,7 +383,7 @@ def load_pretrained(model: STGCNPP, path: str | Path, spec: Mapping | None = Non
         raise ValueError(f"shape mismatch on {len(bad)} tensors, e.g. {bad[0]}: "
                          f"{tuple(got[bad[0]].shape)} vs {tuple(want[bad[0]].shape)}")
 
-    model.load_state_dict({**model.state_dict(), **copy.copy(got)}, strict=True)
+    model.load_state_dict({**model.state_dict(), **got}, strict=True)
     src_w = sd.get("cls_head.fc_cls.weight")
     return {
         "loaded_tensors": len(got),

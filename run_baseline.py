@@ -217,16 +217,28 @@ def run_stgcnpp(xtr, ytr, xva, yva, epochs=30, seed=0, t_out=50,
     r["t_out"] = t_out
     r["train_seconds"] = round(time.time() - t0, 1)
     if provenance:
-        r["pretrained_from"] = {"path": Path(pretrained).name, **provenance}
+        r["pretrained_from"] = {"path": Path(pretrained).name,
+                                "spec": (spec or {}).get("url"), **provenance}
     return r
+
+
+def environment() -> dict:
+    import platform
+
+    import sklearn
+    import torch
+    return {"python": platform.python_version(), "numpy": np.__version__,
+            "sklearn": sklearn.__version__, "torch": torch.__version__,
+            "torch_threads": torch.get_num_threads()}
 
 
 def interval_comparisons(results: list[dict]) -> list[tuple]:
     """Every (key, label, higher, lower) pair that gets a paired bootstrap CI.
 
     A pair whose models were not run carries None and is skipped by the caller,
-    so a run without ST-GCN++ reproduces the earlier intervals unchanged. Each
-    interval is seeded independently, so adding a pair here moves no other one.
+    so a run without ST-GCN++ reproduces the earlier intervals unchanged. Every
+    interval builds its own generator from the run's seed, so adding or
+    reordering a pair here moves no other interval.
     """
     def find(name):
         return next((r for r in results if r["model"] == name), None)
@@ -421,6 +433,9 @@ def main(argv: list[str] | None = None) -> int:
          "gap_stgcnpp_scratch_minus_random_forest":
              cis.get("gap_stgcnpp_scratch_minus_random_forest__macro_f1"),
          "stgcnpp_epochs": pp_epochs if a.stgcnpp != "off" else None,
+         # A bit-identical reproduction claim is only as good as knowing what
+         # produced the original: library versions and thread count both matter.
+         "environment": environment(),
          # Every interval on both metrics, keyed "<comparison>__<metric>".
          "intervals": cis,
          "results": [{k: v for k, v in r.items()
