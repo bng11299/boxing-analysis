@@ -221,7 +221,36 @@ def run_stgcnpp(xtr, ytr, xva, yva, epochs=30, seed=0, t_out=50,
     return r
 
 
-def main() -> int:
+def interval_comparisons(results: list[dict]) -> list[tuple]:
+    """Every (key, label, higher, lower) pair that gets a paired bootstrap CI.
+
+    A pair whose models were not run carries None and is skipped by the caller,
+    so a run without ST-GCN++ reproduces the earlier intervals unchanged. Each
+    interval is seeded independently, so adding a pair here moves no other one.
+    """
+    def find(name):
+        return next((r for r in results if r["model"] == name), None)
+
+    rf, gcn, sp = find("random-forest"), find("st-gcn"), find("static-pose")
+    ppp, pps = find("st-gcn++ pretrained"), find("st-gcn++ scratch")
+    return [
+        ("gap_st_gcn_minus_random_forest",
+         "interpretability gap (st-gcn - random-forest)", gcn, rf),
+        ("gap_st_gcn_minus_static_pose",
+         "temporal margin     (st-gcn - static-pose)  ", gcn, sp),
+        # The M2 question: does pretraining close the gap to the forest?
+        ("gap_stgcnpp_pretrained_minus_random_forest",
+         "pretrained gap  (st-gcn++ pre - random-forest)", ppp, rf),
+        ("gap_stgcnpp_pretrained_minus_scratch",
+         "pretraining effect (st-gcn++ pre - scratch)   ", ppp, pps),
+        # Without this one, "the architecture alone beats the forest" is only a
+        # point estimate, and pretraining and architecture cannot be separated.
+        ("gap_stgcnpp_scratch_minus_random_forest",
+         "architecture gap (st-gcn++ scratch - random-forest)", pps, rf),
+    ]
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=Path, help="root containing Skeleton_data/")
     ap.add_argument("--synthetic", action="store_true")
@@ -256,7 +285,12 @@ def main() -> int:
                     help="frames each clip is resampled to for ST-GCN++")
     ap.add_argument("--stgcnpp-epochs", type=int, default=None,
                     help="epochs for the ST-GCN++ arm (default: --epochs)")
-    a = ap.parse_args()
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_parser()
+    a = ap.parse_args(argv)
 
     if not (a.data or a.synthetic):
         ap.error("pass --data or --synthetic")
@@ -268,6 +302,11 @@ def main() -> int:
         if a.pretrained_spec not in PRETRAINED:
             ap.error(f"unknown --pretrained-spec; choose from {sorted(PRETRAINED)}")
         spec = PRETRAINED[a.pretrained_spec]
+        # Deny by default: the checkpoint is a pickle from the network, and md5
+        # alone is not a pin. An entry with no sha256 has never been verified.
+        if not spec.get("sha256"):
+            ap.error(f"--pretrained-spec {a.pretrained_spec} has no pinned sha256; "
+                     "pin it after a verified download before using it")
 
     if a.synthetic:
         from boxingvi.synthetic import make_corpus
@@ -335,24 +374,10 @@ def main() -> int:
     # static-pose floor is the one that decides whether the temporal model can
     # be said to use time at all -- and at roughly 0.06 accuracy that claim is
     # small enough that an interval including zero would retire it.
-    sp = next((r for r in results if r["model"] == "static-pose"), None)
     cis: dict = {}
     if a.bootstrap:
         from boxingvi.stats import bootstrap_gap_ci
-        ppp = next((r for r in results if r["model"] == "st-gcn++ pretrained"), None)
-        pps = next((r for r in results if r["model"] == "st-gcn++ scratch"), None)
-        comparisons = [
-            ("gap_st_gcn_minus_random_forest",
-             "interpretability gap (st-gcn - random-forest)", gcn, rf),
-            ("gap_st_gcn_minus_static_pose",
-             "temporal margin     (st-gcn - static-pose)  ", gcn, sp),
-            # The M2 question: does pretraining close the gap to the forest?
-            ("gap_stgcnpp_pretrained_minus_random_forest",
-             "pretrained gap  (st-gcn++ pre - random-forest)", ppp, rf),
-            ("gap_stgcnpp_pretrained_minus_scratch",
-             "pretraining effect (st-gcn++ pre - scratch)   ", ppp, pps),
-        ]
-        for key, label, high, low in comparisons:
+        for key, label, high, low in interval_comparisons(results):
             if not (high and low and "_pred" in high and "_pred" in low):
                 continue
             # Both metrics, because they can disagree about whether a claim
@@ -393,6 +418,11 @@ def main() -> int:
              cis.get("gap_stgcnpp_pretrained_minus_random_forest__macro_f1"),
          "gap_stgcnpp_pretrained_minus_scratch":
              cis.get("gap_stgcnpp_pretrained_minus_scratch__macro_f1"),
+         "gap_stgcnpp_scratch_minus_random_forest":
+             cis.get("gap_stgcnpp_scratch_minus_random_forest__macro_f1"),
+         "stgcnpp_epochs": pp_epochs if a.stgcnpp != "off" else None,
+         # Every interval on both metrics, keyed "<comparison>__<metric>".
+         "intervals": cis,
          "results": [{k: v for k, v in r.items()
                       if not k.startswith("_")} for r in results]}, indent=2), encoding="utf-8")
     print(f"\nwrote {a.out}")

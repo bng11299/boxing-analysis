@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -317,12 +318,12 @@ def prepare_input(x: np.ndarray, t_out: int = 50) -> torch.Tensor:
 
 # ----------------------------------------------------------- checkpoint ------
 
-def _digest(path: Path, algo: str) -> str:
-    h = hashlib.new(algo)
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# Real checkpoints are a few MB; this bounds the read when no spec pins a size.
+MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
+
+
+def _digest(blob: bytes, algo: str) -> str:
+    return hashlib.new(algo, blob).hexdigest()
 
 
 def load_pretrained(model: STGCNPP, path: str | Path, spec: Mapping | None = None) -> dict:
@@ -338,16 +339,27 @@ def load_pretrained(model: STGCNPP, path: str | Path, spec: Mapping | None = Non
     path = Path(path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"checkpoint not found: {path}")
+    want_size = spec.get("size") if spec else None
+    # Size is checked on the stat first, so a wrong or oversized file is refused
+    # before it is read into memory, and again on the bytes themselves.
+    size = path.stat().st_size
+    if want_size is not None and size != want_size:
+        raise ValueError(f"checkpoint size {size} != expected {want_size}")
+    if size > MAX_CHECKPOINT_BYTES:
+        raise ValueError(f"checkpoint is {size} bytes, over the {MAX_CHECKPOINT_BYTES} limit")
+    # Read once. Every digest is taken over these bytes, and these bytes are what
+    # gets unpickled, so the file cannot change between the check and the load.
+    blob = path.read_bytes()
+    if want_size is not None and len(blob) != want_size:
+        raise ValueError(f"checkpoint size {len(blob)} != expected {want_size}")
     if spec:
-        if spec.get("size") is not None and path.stat().st_size != spec["size"]:
-            raise ValueError(f"checkpoint size {path.stat().st_size} != expected {spec['size']}")
         for algo in ("md5", "sha256"):
             want = spec.get(algo)
-            if want and _digest(path, algo) != want:
+            if want and _digest(blob, algo) != want:
                 raise ValueError(f"checkpoint {algo} does not match the pinned value")
 
     try:
-        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        ckpt = torch.load(io.BytesIO(blob), map_location="cpu", weights_only=True)
     except Exception as e:  # never fall back to an unsafe load
         raise ValueError(f"checkpoint refused by the safe loader: {type(e).__name__}") from None
 
@@ -372,5 +384,5 @@ def load_pretrained(model: STGCNPP, path: str | Path, spec: Mapping | None = Non
     return {
         "loaded_tensors": len(got),
         "source_classes": int(src_w.shape[0]) if isinstance(src_w, torch.Tensor) else None,
-        "sha256": _digest(path, "sha256"),
+        "sha256": _digest(blob, "sha256"),
     }

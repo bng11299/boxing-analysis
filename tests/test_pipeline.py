@@ -493,5 +493,97 @@ with tempfile.TemporaryDirectory() as _d:
            lambda: load_pretrained(STGCNPP(), _d / "evil.pth"))
     check("and the embedded code never ran", not _SENTINEL.exists())
 
+    print("\n--- 22. The verified bytes are the loaded bytes ---")
+    import hashlib  # noqa: E402
+
+    from boxingvi import stgcnpp as _pp  # noqa: E402
+    _blob = _good.read_bytes()
+    _pin = {"size": len(_blob), "md5": hashlib.md5(_blob).hexdigest(),
+            "sha256": hashlib.sha256(_blob).hexdigest()}
+    check("a checkpoint matching its pinned size, md5 and sha256 loads",
+          load_pretrained(STGCNPP(), _good, _pin)["sha256"] == _pin["sha256"])
+
+    # If the loader re-opened the file after hashing it, a swap in between
+    # would load unverified bytes. Record what torch.load is actually handed.
+    _seen = []
+    _real_load = torch.load
+
+    def _spy(f, *a, **k):
+        _seen.append(f.getvalue() if hasattr(f, "getvalue") else f)
+        return _real_load(f, *a, **k)
+
+    _pp.torch.load = _spy
+    try:
+        load_pretrained(STGCNPP(), _good, _pin)
+    finally:
+        _pp.torch.load = _real_load
+    check("torch.load is handed the in-memory bytes that were hashed, not the path",
+          len(_seen) == 1 and isinstance(_seen[0], bytes)
+          and hashlib.sha256(_seen[0]).hexdigest() == _pin["sha256"])
+    _cap = _pp.MAX_CHECKPOINT_BYTES
+    _pp.MAX_CHECKPOINT_BYTES = 10
+    try:
+        raises("a file over the size ceiling is refused before it is read",
+               lambda: load_pretrained(STGCNPP(), _good))
+    finally:
+        _pp.MAX_CHECKPOINT_BYTES = _cap
+
+print("\n--- 23. run_baseline: seeds, intervals, and pinning ---")
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import run_baseline  # noqa: E402
+
+check("--seed is accepted and parsed",
+      run_baseline.build_parser().parse_args(["--synthetic", "--seed", "2"]).seed == 2)
+_models = ["random-forest", "st-gcn", "static-pose",
+           "st-gcn++ pretrained", "st-gcn++ scratch"]
+_cmp = {k: (hi, lo) for k, _l, hi, lo in
+        run_baseline.interval_comparisons([{"model": m} for m in _models])}
+check("scratch - random-forest is among the intervals, scratch on the higher side",
+      _cmp.get("gap_stgcnpp_scratch_minus_random_forest") ==
+      ({"model": "st-gcn++ scratch"}, {"model": "random-forest"}))
+_cmp_off = {k: (hi, lo) for k, _l, hi, lo in run_baseline.interval_comparisons(
+    [{"model": m} for m in _models[:3]])}
+check("without ST-GCN++ its intervals carry None and are skipped, not faked",
+      _cmp_off["gap_stgcnpp_scratch_minus_random_forest"][0] is None)
+
+
+def _exit_code(argv):
+    try:
+        run_baseline.main(argv)
+    except SystemExit as e:
+        return e.code
+    return 0
+
+
+with tempfile.TemporaryDirectory() as _d:
+    _fake = Path(_d) / "w.pth"
+    _fake.write_bytes(b"x")
+    check("a checkpoint spec with no pinned sha256 is refused at the CLI",
+          _exit_code(["--synthetic", "--stgcnpp", "pretrained", "--pretrained",
+                      str(_fake), "--pretrained-spec", "ntu60_xsub_hrnet_j"]) == 2)
+
+_sc = synthetic.make_corpus(n_train=36, n_val=12, seed=4)
+_str, _sva = data.split_by_subject(_sc)
+_xtr, _ytr = data.to_arrays(_str)
+_xva, _yva = data.to_arrays(_sva)
+
+
+def _rf(seed):
+    return run_baseline.run_interpretable(
+        [c.keypoints for c in _str], _ytr, [c.keypoints for c in _sva], _yva,
+        seed)[0]["_pred"]
+
+
+check("the random forest is deterministic for a fixed seed", _rf(3) == _rf(3))
+
+
+def _pp_run(seed):
+    r = run_baseline.run_stgcnpp(_xtr, _ytr, _xva, _yva, epochs=1, seed=seed, t_out=8)
+    return r["_pred"], r["train_macro_f1"]
+
+
+check("ST-GCN++ is deterministic for a fixed seed -- the reproduction check "
+      "depends on it", _pp_run(5) == _pp_run(5))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
