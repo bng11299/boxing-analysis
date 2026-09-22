@@ -75,6 +75,44 @@ def bootstrap_gap_ci(
     }
 
 
+def sign_test_p(n_pos: int, n_neg: int) -> float:
+    """Exact two-sided sign test; ties are dropped before calling.
+
+    With nine videos the smallest p it can return is 2/512 = 0.0039, so it can
+    confirm a gap every video agrees on, and is silent about anything less.
+    """
+    from math import comb
+    n = n_pos + n_neg
+    if n == 0:
+        return 1.0
+    k = min(n_pos, n_neg)
+    tail = sum(comb(n, i) for i in range(k + 1)) / 2 ** n
+    return float(min(1.0, 2 * tail))
+
+
+def per_group_gaps(y_true, pred_a, pred_b, groups, score) -> dict:
+    """score(a) - score(b) inside each group, with a sign test across groups.
+
+    The clip-level bootstrap treats clips as independent, and clips from one
+    video are not. The unit that actually varies independently here is the
+    video, so this is the check on that interval: does the gap point the same
+    way video by video? A gap of exactly zero is counted as a tie, not as a
+    disagreement.
+    """
+    y_true, pred_a, pred_b, groups = map(np.asarray, (y_true, pred_a, pred_b, groups))
+    if not (len(y_true) == len(pred_a) == len(pred_b) == len(groups)):
+        raise ValueError("y_true, pred_a, pred_b and groups must be the same length")
+    gaps = {}
+    for g in dict.fromkeys(groups.tolist()):  # first-seen order, deterministic
+        m = groups == g
+        gaps[g] = float(score(y_true[m], pred_a[m]) - score(y_true[m], pred_b[m]))
+    pos = sum(v > 0 for v in gaps.values())
+    neg = sum(v < 0 for v in gaps.values())
+    return {"gaps": gaps, "positive": pos, "negative": neg,
+            "ties": len(gaps) - pos - neg,
+            "sign_test_p": sign_test_p(pos, neg)}
+
+
 def stratified_subsample(y: np.ndarray, frac: float, seed: int) -> np.ndarray:
     """Indices for a class-proportional subsample, at least one clip per class.
 

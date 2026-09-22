@@ -64,3 +64,62 @@ into a repo that later goes public.
 - Review #8: fine-tuning input differs from pretraining (1 person, 50 frames, a
   0/1 score channel, against 2 persons, 100 frames and detector scores). This
   works against the pretrained arm, not for it. It belongs in the method section.
+
+## `main..feat/grouped-video-cv` — 2026-09-22
+
+**Why.** Closes residual risk #7 above. Git history shows the ST-GCN++ settings
+were committed (`14d61b4`, 20:04) before the only ST-GCN++ run (finished 21:41),
+and the operator recalls no tuning on validation. But every design decision so
+far was still checked against V2/V5/V9, so a single held-out split cannot serve
+as the test set. `--cv K`: leave-videos-out folds, assigned from clip counts only.
+
+**Acceptance criteria.** (1) No video on both sides of any fold, checked where the
+models are fitted. (2) Every clip scored exactly once; pooled labels and
+predictions aligned. (3) The fold assignment cannot read labels or scores.
+(4) The single-split path is unchanged: same results JSON, same keys, same order.
+(5) The checkpoint's sha256 record survives into the CV output.
+
+**Threat sketch.** No new trust boundary. The new input is an integer CLI argument.
+The threat is to the *integrity of reported numbers*: a leak across folds,
+misaligned pooling, a CV file overwriting the single-split headline, or folds
+picked to flatter a result.
+
+### Iteration 1
+
+- **Test:** 145 → 161. Four planted mutations each caught (misaligned pooled
+  labels, missing-class guard removed, no-group guard removed, fold balancing
+  inverted). The single-split synthetic JSON matched the pre-change output exactly.
+- **Review (code-reviewer subagent, adversarial):** SHIP-WITH-FIXES. Blocking:
+  (a) the default `--out` would let a CV run overwrite `results/baseline.json`;
+  (b) CV output dropped `pretrained_from` (the sha256), `top_features`, `params`
+  and `t_out`; (c) no test caught `run_arms(clips, ...)`, which trains on the
+  whole corpus. Suggestions: three folds are too few for a sign check, so report
+  per-video gaps; zero gaps were counted as disagreement; per-fold macro F1
+  penalises classes a fold lacks; `--cv --include-v6` would put our V6
+  segmentation into the headline; too many folds gave a traceback; the console
+  did not show the clustering caveat; single-split key order was not under test.
+  No leakage found in scaling, features, class weights, floors or seeding.
+- **A real run was stopped** 15 min in, because its file would have lacked (b).
+
+### Iteration 2
+
+- **Changed:** all three blocking findings and suggestions 1–7 fixed. A CV run
+  defaults to `results/baseline_cv<K>.json`. Fold records keep provenance and
+  importances, and constant fields are lifted onto pooled rows. `run_arms` is
+  spied on for leaks. Per-video gaps come with an exact sign test (ties counted
+  as ties), on macro F1 over present classes and on accuracy. `--cv` with
+  `--include-v6` is refused, and too many folds is a CLI error. The caveat is
+  printed with the intervals. A test pins the single-split key order.
+- **Test:** 179 passing. Mutations: the reviewer's whole-corpus leak fails 2
+  tests; dropping `pretrained_from` fails the suite (KeyError, exit 1); counting
+  ties as disagreement fails 1. The single-split JSON is still identical.
+- **Security:** no new file, network or deserialisation path. Each fold still
+  goes through `load_pretrained`, so the sha256 is re-verified per fold.
+
+### Residual risk
+
+- The pooled clip-level interval is too narrow (within-video correlation,
+  between-fold variance). The per-video sign test is the check. With 9 videos,
+  its floor is p = 0.0039.
+- The V1 fold trains without 39% of the corpus, so absolute CV scores are not
+  comparable to the single split. Compare gaps, not levels.

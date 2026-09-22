@@ -608,5 +608,172 @@ def _pp_run(seed):
 check("ST-GCN++ is deterministic for a fixed seed -- the reproduction check "
       "depends on it", _pp_run(5) == _pp_run(5))
 
+print("\n--- 24. leave-videos-out cross-validation ---")
+# The real per-video clip counts (V6 excluded), so the fold assignment the
+# reported run will use is pinned here and any change to it is visible.
+_SIZES = {"V1": 1865, "V2": 232, "V3": 811, "V4": 560, "V5": 595,
+          "V7": 195, "V8": 199, "V9": 149, "V10": 151}
+
+
+def _vclips(sizes, label_fn=lambda v, i: i % 6):
+    return [Clip(kp(3), label_fn(v, i), "", source=v)
+            for v, n in sizes.items() for i in range(n)]
+
+
+_real_like = _vclips(_SIZES)
+_f = data.group_folds(_real_like, 3)
+check("the 3 folds on the real video sizes are the ones the run will use",
+      _f == [("V1",), ("V2", "V3", "V8", "V10"), ("V4", "V5", "V7", "V9")], str(_f))
+check("every video lands in exactly one fold",
+      sorted(v for f in _f for v in f) == sorted(_SIZES))
+_relabelled = _vclips(_SIZES, lambda v, i: (i * 7 + int(v[1:])) % 6)
+check("folds are label-blind: relabelling every clip moves no video",
+      data.group_folds(_relabelled, 3) == _f)
+check("folds are deterministic", data.group_folds(list(reversed(_real_like)), 3) == _f)
+raises("k=1 is refused", lambda: data.group_folds(_real_like, 1))
+raises("more folds than videos is refused", lambda: data.group_folds(_real_like, 10))
+raises("a clip with no group id is refused, not merged",
+       lambda: data.group_folds(_vclips({"V1": 3}) + [Clip(kp(3), 0, "", "")], 2))
+
+_splits = data.cv_splits(_real_like, 3)
+check("no video is on both sides of any fold",
+      all(not ({c.source for c in tr} & {c.source for c in te}) for _h, tr, te in _splits))
+check("every clip is tested exactly once",
+      sum(len(te) for _h, _tr, te in _splits) == len(_real_like)
+      and len({id(c) for _h, _tr, te in _splits for c in te}) == len(_real_like))
+# V1 holds the only clips of class 5 here: holding it out leaves a model that
+# can never predict class 5, and its zero would be read as a finding.
+_starved = _vclips({"V1": 12, "V2": 10, "V3": 10},
+                   lambda v, i: 5 if v == "V1" else i % 5)
+raises("a fold whose training side lacks a class is refused",
+       lambda: data.cv_splits(_starved, 3))
+
+with tempfile.TemporaryDirectory() as _d:
+    _out = Path(_d) / "cv.json"
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        run_baseline.main(["--synthetic", "--allow-synthetic", "--cv", "3",
+                           "--epochs", "1", "--bootstrap", "50",
+                           "--out", str(_out)])
+    _cv = json.loads(_out.read_text(encoding="utf-8"))
+    _n = len(synthetic.make_corpus(seed=0))
+    check("a CV run scores every clip once, pooled",
+          _cv["n_val_clips"] == _n and _cv["n_train_clips"] is None,
+          f"{_cv['n_val_clips']} vs {_n}")
+    check("... and is stamped synthetic and says it is CV",
+          _cv["synthetic"] is True and "cross-validation" in _cv["split"])
+    _tg = [g for f in _cv["cv"]["folds"] for g in f["test_groups"]]
+    check("... with the test folds partitioning the subjects",
+          sorted(_tg) == sorted({c.subject for c in synthetic.make_corpus(seed=0)})
+          and len(_tg) == len(set(_tg)))
+    # If labels and predictions were concatenated in different orders the
+    # pooled confusion would stop being the sum of the per-fold ones.
+    _ok = True
+    for _r in _cv["results"]:
+        _sum = np.sum([f["models"][_r["model"]]["confusion"]
+                       for f in _cv["cv"]["folds"]], axis=0)
+        _ok &= bool(np.array_equal(_sum, np.array(_r["confusion"])))
+    check("pooled predictions stay aligned with pooled labels, every model", _ok)
+    _rf_conf = np.array(next(r for r in _cv["results"]
+                             if r["model"] == "random-forest")["confusion"])
+    check("... and that check is not vacuous: the forest predicts more than one class",
+          int((_rf_conf.sum(axis=0) > 0).sum()) > 1)
+    check("each fold keeps the forest's own feature importances",
+          all("top_features" in f["models"]["random-forest"] for f in _cv["cv"]["folds"]))
+    check("per-video gaps and a sign test are recorded for the headline",
+          "sign_test_p" in _cv["cv"]["video_gaps"]
+          ["gap_st_gcn_minus_random_forest"]["macro_f1"])
+    check("per-fold gaps are recorded for the headline interval",
+          len(_cv["cv"]["fold_gaps"]["gap_st_gcn_minus_random_forest"]
+              ["macro_f1"]["gaps"]) == 3)
+_code, _msg = _exit_code(["--synthetic", "--cv", "1"])
+check("--cv 1 is refused at the CLI", _code == 2 and "--cv" in _msg, _msg[-200:])
+_code, _msg = _exit_code(["--synthetic", "--cv", "25"])
+check("more folds than subjects is a CLI error, not a traceback",
+      _code == 2 and "--cv 25" in _msg, _msg[-200:])
+_code, _msg = _exit_code(["--data", ".", "--cv", "3", "--include-v6"])
+check("--cv with --include-v6 is refused before any data is read",
+      _code == 2 and "V6" in _msg, _msg[-200:])
+check("a CV run defaults to its own results file, never the headline one",
+      run_baseline.build_parser().parse_args(["--synthetic"]).out is None)
+
+# The leak that matters is at the point models are fitted, not in cv_splits:
+# spy on what run_cv actually hands to run_arms.
+_spy_calls = []
+
+
+def _spy_arms(train, test, a, spec):
+    _spy_calls.append(({c.source for c in train}, {c.source for c in test},
+                       len(train), len(test)))
+    y = np.array([c.label for c in test])
+    return [{"model": "st-gcn++ pretrained", "_pred": y.tolist(),
+             "macro_f1": 1.0, "accuracy": 1.0, "confusion": [[0]],
+             "params": 7, "t_out": 50,
+             "pretrained_from": {"sha256": "c6e0-fake"}}]
+
+
+_real_arms = run_baseline.run_arms
+run_baseline.run_arms = _spy_arms
+try:
+    import argparse
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        _pooled, _yall, _gall, _folds = run_baseline.run_cv(
+            _real_like, argparse.Namespace(cv=3), None, lambda c: c.source)
+finally:
+    run_baseline.run_arms = _real_arms
+check("run_arms is never given a video on both its train and test side",
+      len(_spy_calls) == 3 and all(not (tr & te) for tr, te, _a, _b in _spy_calls))
+check("... every fold trains on everything it does not test",
+      all(n_tr + n_te == len(_real_like) for _a, _b, n_tr, n_te in _spy_calls))
+check("pooled group ids line up with pooled labels",
+      len(_gall) == len(_yall) == len(_real_like)
+      and [g for g in dict.fromkeys(_gall.tolist())]
+      == [v for f in _f for v in f])
+check("the checkpoint's sha256 survives into every fold record and the pooled row",
+      all(f["models"]["st-gcn++ pretrained"]["pretrained_from"]["sha256"] == "c6e0-fake"
+          for f in _folds)
+      and _pooled[0]["pretrained_from"]["sha256"] == "c6e0-fake"
+      and _pooled[0]["t_out"] == 50)
+
+from boxingvi.stats import per_group_gaps, sign_test_p  # noqa: E402
+from sklearn.metrics import accuracy_score  # noqa: E402
+
+check("sign test: 9 of 9 agreeing gives p = 2/512", abs(sign_test_p(9, 0) - 2 / 512) < 1e-12)
+check("sign test: a 1-1 split gives p = 1", sign_test_p(1, 1) == 1.0)
+check("sign test: no untied groups gives p = 1, not a crash", sign_test_p(0, 0) == 1.0)
+_pg = per_group_gaps([0, 1, 0, 1], [0, 1, 0, 0], [0, 1, 0, 1], ["A", "A", "B", "B"],
+                     lambda y, p: float(accuracy_score(y, p)))
+check("per-video gaps: a zero gap is a tie, not a disagreement",
+      _pg["ties"] == 1 and _pg["negative"] == 1 and _pg["positive"] == 0, str(_pg))
+raises("per-video gaps refuse misaligned groups",
+       lambda: per_group_gaps([0, 1], [0, 1], [0, 1], ["A"], accuracy_score))
+check("per-fold macro F1 ignores a class the fold does not contain",
+      run_baseline.present_class_macro_f1(np.array([0, 0, 1]), np.array([0, 4, 1]))
+      == run_baseline.present_class_macro_f1(np.array([0, 0, 1]), np.array([0, 2, 1])))
+
+with tempfile.TemporaryDirectory() as _d:
+    _single = Path(_d) / "single.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        run_baseline.main(["--synthetic", "--allow-synthetic", "--epochs", "1",
+                           "--bootstrap", "20", "--out", str(_single)])
+    _sj = json.loads(_single.read_text(encoding="utf-8"))
+    check("a single-split results file keeps exactly its old keys, in order",
+          list(_sj) == ["synthetic", "seed", "epochs", "split", "balanced",
+                        "n_train_clips", "n_val_clips", "train_videos", "val_videos",
+                        "include_v6", "gap_st_gcn_minus_random_forest",
+                        "gap_st_gcn_minus_random_forest_accuracy",
+                        "gap_st_gcn_minus_static_pose",
+                        "gap_st_gcn_minus_static_pose_accuracy", "stgcnpp",
+                        "gap_stgcnpp_pretrained_minus_random_forest",
+                        "gap_stgcnpp_pretrained_minus_scratch",
+                        "gap_stgcnpp_scratch_minus_random_forest",
+                        "stgcnpp_epochs", "environment", "intervals", "results"],
+          str(list(_sj)))
+check("... and the forest still reports its feature importances",
+      "top_features" in next(r for r in _sj["results"] if r["model"] == "random-forest"))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
