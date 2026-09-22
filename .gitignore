@@ -11,7 +11,10 @@ Dataset/
 results/
 runs/
 *.pt
+*.pth
 *.ckpt
+# Pretrained third-party weights: fetched and verified, never committed.
+weights/
 __pycache__/
 *.py[cod]
 .pytest_cache/

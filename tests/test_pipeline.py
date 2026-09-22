@@ -360,5 +360,253 @@ _s1 = stratified_subsample(_yc, 0.5, seed=3)
 _s2 = stratified_subsample(_yc, 0.5, seed=3)
 check("same seed gives the same subsample", _s1.tolist() == _s2.tolist())
 
+print("\n--- 19. ST-GCN++ port: architecture pinned to PYSKL ---")
+from boxingvi.stgcnpp import (STGCNPP, coco_spatial_adjacency,  # noqa: E402
+                              load_pretrained, prepare_input)
+
+_A = coco_spatial_adjacency()
+check("adjacency is three 17x17 subsets", _A.shape == (3, N_JOINTS, N_JOINTS))
+check("first subset is the identity", np.allclose(_A[0], np.eye(N_JOINTS)))
+_cols = _A[1].sum(0)
+check("inward subset is column-normalised",
+      np.allclose(_cols[_cols > 0], 1.0), str(_cols))
+_pp = STGCNPP()
+check("parameter count matches PYSKL's ST-GCN++ (~1.39M)",
+      1_370_000 <= _pp.n_params() <= 1_400_000, f"{_pp.n_params():,}")
+check("backbone exposes 690 tensors, the PYSKL key count",
+      sum(k.startswith("backbone.") for k in _pp.state_dict()) == 690)
+_pp.eval()
+check("ST-GCN++ output shape",
+      _pp(torch.zeros(3, 1, 50, N_JOINTS, 3)).shape == (3, data.N_CLASSES))
+raises("forward rejects a 4-D tensor",
+       lambda: _pp(torch.zeros(3, 50, N_JOINTS, 3)))
+raises("forward rejects the wrong joint count",
+       lambda: _pp(torch.zeros(3, 1, 50, 25, 3)))
+
+print("\n--- 20. ST-GCN++ input preparation ---")
+_x = np.zeros((2, MAX_FRAMES, N_JOINTS, 3), np.float32)
+_x[:, :5, :, 0] = 0.0          # x at the left edge
+_x[:, :5, :, 1] = 1.0          # y at the bottom edge
+_x[:, :5, :, 2] = 1.0          # five real frames, twenty of padding
+_x[0, :5, 3, 2] = 0.0          # joint 3 never observed in clip 0
+_t = prepare_input(_x, t_out=40)
+check("shape is (N, persons=1, t_out, V, C)", tuple(_t.shape) == (2, 1, 40, N_JOINTS, 3))
+check("x in [0,1] maps to 2x-1", float(_t[1, 0, :, 0, 0].max()) == -1.0)
+check("y in [0,1] maps to 2y-1", float(_t[1, 0, :, 0, 1].min()) == 1.0)
+check("no padding frame is ever sampled -- every output frame is observed",
+      bool((_t[1, 0, :, :, 2] == 1).all()))
+check("an unobserved joint is zeroed, as PYSKL zeroes low-score joints",
+      bool((_t[0, 0, :, 3, :] == 0).all()))
+check("the validity flag becomes the score channel",
+      bool((_t[0, 0, :, 0, 2] == 1).all()))
+raises("rejects the wrong joint count",
+       lambda: prepare_input(np.zeros((1, 10, 12, 3), np.float32)))
+raises("rejects the wrong channel count",
+       lambda: prepare_input(np.zeros((1, 10, N_JOINTS, 2), np.float32)))
+raises("rejects a 3-D array",
+       lambda: prepare_input(np.zeros((10, N_JOINTS, 3), np.float32)))
+_nan = _x.copy()
+_nan[0, 0, 0, 0] = np.nan
+raises("rejects NaN rather than propagating it", lambda: prepare_input(_nan))
+raises("rejects a clip with no observed frame",
+       lambda: prepare_input(np.zeros((1, 10, N_JOINTS, 3), np.float32)))
+_px = _x.copy()
+_px[:, :5, :, 0] = 640.0
+raises("rejects pixel-space coordinates instead of feeding nonsense to the weights",
+       lambda: prepare_input(_px))
+raises("rejects a non-positive t_out", lambda: prepare_input(_x, t_out=0))
+_edge = _x.copy()
+_edge[:, :5, 0, 0] = -0.05     # a wrist a little past the left edge
+_edge[:, :5, 1, 1] = 1.08      # an ankle a little below the frame
+check("accepts joints slightly outside the frame -- estimators produce them",
+      prepare_input(_edge).shape[0] == 2)
+
+print("\n--- 21. Pretrained checkpoint is untrusted input ---")
+import hashlib  # noqa: E402
+_SENTINEL = Path(tempfile.gettempdir()) / "boxingvi_unsafe_unpickle_ran"
+
+
+def _pwn(path):  # would only run if the checkpoint were unpickled unsafely
+    Path(path).write_text("executed", encoding="utf-8")
+    return {}
+
+
+class _Evil:
+    def __reduce__(self):
+        return (_pwn, (str(_SENTINEL),))
+
+
+with tempfile.TemporaryDirectory() as _d:
+    _d = Path(_d)
+    _src = STGCNPP(n_classes=60)
+    for _p in _src.parameters():                # make the weights distinguishable
+        torch.nn.init.normal_(_p, std=0.05)
+    _good = _d / "good.pth"
+    torch.save({"meta": {"note": "pyskl"}, "state_dict": _src.state_dict()}, _good)
+
+    _dst = STGCNPP()
+    _head_before = _dst.cls_head.fc_cls.weight.clone()
+    _rep = load_pretrained(_dst, _good, allow_unpinned=True)
+    check("a well-formed checkpoint loads", _rep["loaded_tensors"] == 690, str(_rep))
+    check("backbone weights actually arrive",
+          torch.equal(_dst.backbone.gcn[4].gcn.conv.weight,
+                      _src.backbone.gcn[4].gcn.conv.weight))
+    check("the source head is not copied -- it has a different label set",
+          torch.equal(_dst.cls_head.fc_cls.weight, _head_before)
+          and _dst.cls_head.fc_cls.out_features == data.N_CLASSES)
+    check("the source class count is reported", _rep["source_classes"] == 60)
+    check("a sha256 is reported for pinning", len(_rep["sha256"]) == 64)
+
+    raises("no spec and no opt-out: an unpinned checkpoint is refused",
+           lambda: load_pretrained(STGCNPP(), _good))
+    raises("a spec with md5 but no sha256 is refused as unpinned",
+           lambda: load_pretrained(STGCNPP(), _good,
+                                   {"md5": hashlib.md5(_good.read_bytes()).hexdigest()}))
+    raises("a missing file is an error",
+           lambda: load_pretrained(STGCNPP(), _d / "nope.pth", allow_unpinned=True), FileNotFoundError)
+    raises("a size mismatch is refused",
+           lambda: load_pretrained(STGCNPP(), _good, {"size": 123}, allow_unpinned=True))
+    raises("an md5 mismatch is refused",
+           lambda: load_pretrained(STGCNPP(), _good, {"md5": "0" * 32}, allow_unpinned=True))
+    raises("a sha256 mismatch is refused",
+           lambda: load_pretrained(STGCNPP(), _good, {"sha256": "0" * 64}))
+
+    _sd = _src.state_dict()
+    _miss = {k: v for k, v in _sd.items() if k != "backbone.gcn.3.gcn.A"}
+    torch.save({"state_dict": _miss}, _d / "missing.pth")
+    raises("a missing backbone tensor is refused, not silently left random",
+           lambda: load_pretrained(STGCNPP(), _d / "missing.pth", allow_unpinned=True))
+
+    torch.save({"state_dict": {**_sd, "backbone.extra.weight": torch.zeros(1)}},
+               _d / "extra.pth")
+    raises("an unexpected backbone tensor is refused -- wrong architecture",
+           lambda: load_pretrained(STGCNPP(), _d / "extra.pth", allow_unpinned=True))
+
+    _shape = dict(_sd)
+    _shape["backbone.data_bn.weight"] = torch.zeros(75)
+    torch.save({"state_dict": _shape}, _d / "shape.pth")
+    raises("a shape mismatch is refused (25-joint NTU weights, say)",
+           lambda: load_pretrained(STGCNPP(), _d / "shape.pth", allow_unpinned=True))
+
+    torch.save({"state_dict": {**_sd, "backbone.data_bn.weight": [1, 2, 3]}},
+               _d / "notensor.pth")
+    raises("a payload that is not tensors is refused -- full key set, one list value",
+           lambda: load_pretrained(STGCNPP(), _d / "notensor.pth", allow_unpinned=True))
+
+    if _SENTINEL.exists():
+        _SENTINEL.unlink()
+    torch.save({"state_dict": _Evil()}, _d / "evil.pth")
+    raises("a checkpoint carrying arbitrary code is refused by the safe loader",
+           lambda: load_pretrained(STGCNPP(), _d / "evil.pth", allow_unpinned=True))
+    check("and the embedded code never ran", not _SENTINEL.exists())
+
+    print("\n--- 22. The verified bytes are the loaded bytes ---")
+
+    from boxingvi import stgcnpp as _pp  # noqa: E402
+    _blob = _good.read_bytes()
+    _pin = {"size": len(_blob), "md5": hashlib.md5(_blob).hexdigest(),
+            "sha256": hashlib.sha256(_blob).hexdigest()}
+    check("a checkpoint matching its pinned size, md5 and sha256 loads",
+          load_pretrained(STGCNPP(), _good, _pin)["sha256"] == _pin["sha256"])
+
+    # If the loader re-opened the file after hashing it, a swap in between
+    # would load unverified bytes. Record what torch.load is actually handed.
+    _seen = []
+    _real_load = torch.load
+
+    def _spy(f, *a, **k):
+        _seen.append(f.getvalue() if hasattr(f, "getvalue") else f)
+        return _real_load(f, *a, **k)
+
+    _pp.torch.load = _spy
+    try:
+        load_pretrained(STGCNPP(), _good, _pin)
+    finally:
+        _pp.torch.load = _real_load
+    check("torch.load is handed the in-memory bytes that were hashed, not the path",
+          len(_seen) == 1 and isinstance(_seen[0], bytes)
+          and hashlib.sha256(_seen[0]).hexdigest() == _pin["sha256"])
+    _cap = _pp.MAX_CHECKPOINT_BYTES
+    _reads = []
+    _real_read = Path.read_bytes
+    _pp.MAX_CHECKPOINT_BYTES = 10
+    Path.read_bytes = lambda self: _reads.append(self) or _real_read(self)
+    try:
+        raises("a file over the size ceiling is refused",
+               lambda: load_pretrained(STGCNPP(), _good, allow_unpinned=True))
+    finally:
+        _pp.MAX_CHECKPOINT_BYTES = _cap
+        Path.read_bytes = _real_read
+    check("... and refused before a single byte is read", _reads == [])
+
+print("\n--- 23. run_baseline: seeds, intervals, and pinning ---")
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import run_baseline  # noqa: E402
+
+check("--seed is accepted and parsed",
+      run_baseline.build_parser().parse_args(["--synthetic", "--seed", "2"]).seed == 2)
+_models = ["random-forest", "st-gcn", "static-pose",
+           "st-gcn++ pretrained", "st-gcn++ scratch"]
+_cmp = {k: (hi, lo) for k, _l, hi, lo in
+        run_baseline.interval_comparisons([{"model": m} for m in _models])}
+_want = {
+    "gap_st_gcn_minus_random_forest": ("st-gcn", "random-forest"),
+    "gap_st_gcn_minus_static_pose": ("st-gcn", "static-pose"),
+    "gap_stgcnpp_pretrained_minus_random_forest": ("st-gcn++ pretrained", "random-forest"),
+    "gap_stgcnpp_pretrained_minus_scratch": ("st-gcn++ pretrained", "st-gcn++ scratch"),
+    "gap_stgcnpp_scratch_minus_random_forest": ("st-gcn++ scratch", "random-forest"),
+}
+check("all five intervals exist, each with the named model on the higher side",
+      {k: (hi["model"], lo["model"]) for k, (hi, lo) in _cmp.items()} == _want,
+      str(_cmp))
+_cmp_off = {k: (hi, lo) for k, _l, hi, lo in run_baseline.interval_comparisons(
+    [{"model": m} for m in _models[:3]])}
+check("without ST-GCN++ its intervals carry None and are skipped, not faked",
+      _cmp_off["gap_stgcnpp_scratch_minus_random_forest"][0] is None)
+
+
+def _exit_code(argv):
+    import contextlib
+    import io
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            run_baseline.main(argv)
+    except SystemExit as e:
+        return e.code, err.getvalue()
+    return 0, err.getvalue()
+
+
+with tempfile.TemporaryDirectory() as _d:
+    _fake = Path(_d) / "w.pth"
+    _fake.write_bytes(b"x")
+    _code, _msg = _exit_code(["--synthetic", "--stgcnpp", "pretrained", "--pretrained",
+                              str(_fake), "--pretrained-spec", "ntu60_xsub_hrnet_j"])
+    check("a checkpoint spec with no pinned sha256 is refused at the CLI, for that reason",
+          _code == 2 and "no pinned sha256" in _msg, _msg[-200:])
+
+_sc = synthetic.make_corpus(n_train=36, n_val=12, seed=4)
+_str, _sva = data.split_by_subject(_sc)
+_xtr, _ytr = data.to_arrays(_str)
+_xva, _yva = data.to_arrays(_sva)
+
+
+def _rf(seed):
+    return run_baseline.run_interpretable(
+        [c.keypoints for c in _str], _ytr, [c.keypoints for c in _sva], _yva,
+        seed)[0]["_pred"]
+
+
+check("the random forest is deterministic for a fixed seed", _rf(3) == _rf(3))
+
+
+def _pp_run(seed):
+    r = run_baseline.run_stgcnpp(_xtr, _ytr, _xva, _yva, epochs=1, seed=seed, t_out=8)
+    return r["_pred"], r["train_macro_f1"]
+
+
+check("ST-GCN++ is deterministic for a fixed seed -- the reproduction check "
+      "depends on it", _pp_run(5) == _pp_run(5))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
