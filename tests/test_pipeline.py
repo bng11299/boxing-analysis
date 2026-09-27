@@ -775,5 +775,203 @@ with tempfile.TemporaryDirectory() as _d:
 check("... and the forest still reports its feature importances",
       "top_features" in next(r for r in _sj["results"] if r["model"] == "random-forest"))
 
+print("\n--- V6 continuous track, alignment and the wrist-speed punch finder ---")
+from boxingvi import align, punchfind  # noqa: E402
+from boxingvi.data import Span, Track  # noqa: E402
+
+
+def _track(n=240, fps=24.0, ids=None, punches=(), hand=1, dur_s=0.25, amp=1.0):
+    """A still body (torso 100px) whose wrist moves out and back for each punch
+    start in `punches` (seconds). Coordinates in pixels."""
+    t = np.arange(n) / fps
+    xy = np.zeros((n, N_JOINTS, 2))
+    xy[:, 5] = (400, 300); xy[:, 6] = (500, 300)      # shoulders
+    xy[:, 11] = (400, 400); xy[:, 12] = (500, 400)    # hips: torso = 100px
+    xy[:, 9] = (400, 350); xy[:, 10] = (500, 350)     # wrists at rest
+    for p in punches:
+        phase = np.clip((t - p) / dur_s, 0, 1)
+        xy[:, 9 + hand, 0] += amp * 100 * np.sin(np.pi * phase)
+    f = np.arange(n) if ids is None else np.asarray(ids)
+    return Track(frame_ids=f.astype(np.int64), xy=xy, fps=fps)
+
+
+_t = _track()
+raises("track refuses non-increasing frame ids",
+       lambda: Track(np.array([0, 2, 1]), np.zeros((3, N_JOINTS, 2)), 24.0))
+raises("track refuses NaN coordinates",
+       lambda: Track(np.arange(3), np.full((3, N_JOINTS, 2), np.nan), 24.0))
+raises("track refuses a non-positive frame rate",
+       lambda: Track(np.arange(3), np.zeros((3, N_JOINTS, 2)), 0.0))
+raises("track refuses xy that does not match the frame count",
+       lambda: Track(np.arange(4), np.zeros((3, N_JOINTS, 2)), 24.0))
+check("segments split exactly at gaps",
+      Track(np.array([3, 4, 5, 9, 10, 20]), np.zeros((6, N_JOINTS, 2)), 24.0).segments()
+      == [(0, 3), (3, 5), (5, 6)])
+raises("body scale refuses a collapsed skeleton",
+       lambda: punchfind.body_scale(Track(np.arange(3), np.zeros((3, N_JOINTS, 2)), 24.0)))
+
+# A wrist that is simply in a different place on either side of a pose gap must
+# not read as a punch: nothing may be differenced across the gap.
+_g = _track(n=40, ids=np.r_[np.arange(20), np.arange(100, 120)])
+_g.xy[20:, 10, 0] += 300
+check("no speed is computed across a pose gap",
+      punchfind.wrist_signal(_g, "relative").max() < 1e-9)
+
+# The same motion must give the same speed in body lengths per second at 24
+# and at 60 fps -- the reason the rule is in seconds (O54).
+_s24 = punchfind.wrist_signal(_track(n=240, fps=24.0, punches=[4.0]), "relative").max()
+_s60 = punchfind.wrist_signal(_track(n=600, fps=60.0, punches=[4.0]), "relative").max()
+check("peak speed agrees within 15% at 24 and 60 fps", abs(_s24 / _s60 - 1) < 0.15,
+      f"{_s24:.3f} vs {_s60:.3f}")
+_s_far = punchfind.wrist_signal(_track(punches=[4.0], amp=0.5), "relative").max()
+check("speed is in body lengths: half the reach, half the speed",
+      abs(_s_far / _s24 - 0.5) < 0.02, f"{_s_far:.3f} vs {_s24:.3f}")
+raises("unknown rule variant refused", lambda: punchfind.wrist_signal(_t, "sideways"))
+
+_p = _track(n=480, punches=[2.0, 6.0, 12.0])
+_sig = punchfind.wrist_signal(_p, "relative")
+_det, _hand = punchfind.detect(_p, _sig, threshold=1.0, min_gap_s=0.4)
+_gt = [Span(int(s * 24), int((s + 0.25) * 24), 0) for s in (2.0, 6.0, 12.0)]
+check("three planted punches give exactly three detections",
+      len(_det) == 3, str(_det))
+check("... each inside its span, with the right hand",
+      len(punchfind.match(_det, _gt, 0)) == 3 and set(_hand.tolist()) == {1})
+check("a still body gives no detections",
+      len(punchfind.detect(_t, punchfind.wrist_signal(_t), 0.5, 0.4)[0]) == 0)
+raises("detect refuses a signal that does not match the track",
+       lambda: punchfind.detect(_t, np.zeros((5, 2)), 1.0, 0.4))
+
+# Matching is one-to-one and maximal.
+check("two detections in one span count once",
+      len(punchfind.match([5, 6], [Span(0, 10, 0)], 0)) == 1)
+check("one detection in two overlapping spans counts once",
+      len(punchfind.match([5], [Span(0, 10, 0), Span(4, 6, 0)], 0)) == 1)
+check("matching is maximal where first-come would not be",
+      len(punchfind.match([5, 9], [Span(0, 10, 0), Span(5, 6, 0)], 0)) == 2)
+check("tolerance extends a span by exactly tol frames",
+      len(punchfind.match([12], [Span(0, 10, 0)], 2)) == 1
+      and len(punchfind.match([13], [Span(0, 10, 0)], 2)) == 0)
+raises("negative tolerance refused", lambda: punchfind.match([1], [Span(0, 1, 0)], -1))
+_sc = punchfind.score([5, 50, 500], [Span(0, 10, 0), Span(45, 55, 0), Span(400, 410, 0)],
+                      0, (0, 100))
+check("scoring ignores detections and spans outside the window",
+      (_sc["n_detected"], _sc["n_labelled"], _sc["tp"]) == (2, 2, 2), str(_sc))
+_fl = punchfind.random_floor(3, _gt, 0, (0, 479), _p.frame_ids, n_rep=50, seed=1)
+check("random floor is deterministic and below a perfect score",
+      _fl == punchfind.random_floor(3, _gt, 0, (0, 479), _p.frame_ids, n_rep=50, seed=1)
+      and _fl["f1_mean"] < 1.0)
+_bb = punchfind.block_bootstrap(_det, _gt, 0, (0, 479), block=48, n_boot=200)
+check("block bootstrap of a perfect detector is [1, 1], empty draws dropped not zeroed",
+      _bb["f1"] == [1.0, 1.0] and _bb["n_undefined_dropped"] > 0, str(_bb))
+raises("block bootstrap refuses when most draws are undefined",
+       lambda: punchfind.block_bootstrap([5], [Span(400, 410, 0)], 0, (0, 479),
+                                         block=4, n_boot=200))
+
+# Alignment checks must FIND an offset that is there, not just report zero.
+_q = _track(n=2400, punches=list(np.arange(2.0, 95.0, 3.0)))
+_speed = punchfind.wrist_signal(_q).max(axis=1)
+_late = [Span(int(s * 24) + 12, int((s + 0.25) * 24) + 12, 0) for s in np.arange(2.0, 95.0, 3.0)]
+_scan = align.label_shift_scan(_q, _late, _speed, range(-20, 21))
+check("shift scan finds labels planted 12 frames late",
+      max(_scan, key=_scan.get) in (-13, -12, -11), str(max(_scan, key=_scan.get)))
+_energy = np.zeros(2500)
+_mot = np.r_[0, np.linalg.norm(np.diff(_q.xy, axis=0), axis=-1).sum(1)]
+_energy[3:3 + len(_mot)] = _mot                    # video runs 3 frames behind
+_xc = align.skeleton_video_xcorr(_q, _energy, range(-6, 7))
+check("video cross-correlation finds a planted 3-frame offset",
+      max(_xc, key=_xc.get) == 3, str(max(_xc, key=_xc.get)))
+raises("motion energy refuses a missing video",
+       lambda: align.video_motion_energy(Path("no/such/video.mp4")), FileNotFoundError)
+
+# The V6 loaders are the trust boundary for the continuous data.
+with tempfile.TemporaryDirectory() as _d:
+    import pandas as pd
+    _ann = Path(_d)
+
+    def _xlsx(rows):
+        pd.DataFrame(rows, columns=["start", "end", "class"]).to_excel(
+            _ann / "V6.xlsx", index=False)
+
+    _xlsx([[10, 20, "Lead Hook"], [5, 8, "Rear Uppercut"], [None, None, None]])
+    _sp = data.load_v6_spans(_ann)
+    check("V6 spans: empty rows dropped, the rest sorted by start",
+          [(s.start, s.label) for s in _sp]
+          == [(5, data.CLASSES.index("rear_uppercut")), (10, data.CLASSES.index("lead_hook"))])
+    _xlsx([[10, 20, "Lead Hook"], [30, 25, "Rear Hook"], [40, 50, "Jab"]])
+    raises("V6 spans: a labelled row ending before it starts is an error",
+           lambda: data.load_v6_spans(_ann))
+    _xlsx([[10, 20, "Lead Hook"], [30, 40, None], [50, 60, "Rear Hook"]])
+    raises("V6 spans: frames without a label are an error, not a silent drop",
+           lambda: data.load_v6_spans(_ann))
+
+    _skel = Path(_d)
+    _arr = np.zeros((5, 1, N_JOINTS, 3))
+    _arr[:, 0, :, 0] = np.arange(157, 162)[:, None]
+    _arr[:, 0, :, 1:] = 0.5
+    np.save(_skel / "V6.npy", _arr)
+    _tr = data.load_v6_track(_skel)
+    check("V6 track: channel 0 read as frame ids, x/y scaled to pixels",
+          _tr.frame_ids.tolist() == [157, 158, 159, 160, 161]
+          and np.allclose(_tr.xy[0, 0], [960, 540]) and abs(_tr.fps - 23.976) < 1e-3)
+    _arr[2, 0, 4, 0] = 999
+    np.save(_skel / "V6.npy", _arr)
+    raises("V6 track: refuses a channel 0 that is not one id per frame",
+           lambda: data.load_v6_track(_skel))
+
+    _arr[2, 0, 4, 0] = 159
+    _arr[3, 0, 9, 1:] = 0.0
+    np.save(_skel / "V6.npy", _arr)
+    raises("V6 track: refuses dropped joints at (0, 0) instead of differencing them",
+           lambda: data.load_v6_track(_skel))
+    np.save(_skel / "V6.npy", np.array([object()] * 3), allow_pickle=True)
+    raises("V6 track: refuses a pickled (object) array",
+           lambda: data.load_v6_track(_skel))
+
+# Short pose segments at 60 fps: shorter than the smoothing window.
+_short = Track(np.r_[0, 1, 10, 11, 12, np.arange(20, 60)],
+               _track(n=45).xy, 60.0)
+check("segments shorter than the smoothing window do not crash, and score finite",
+      np.all(np.isfinite(punchfind.wrist_signal(_short))))
+
+check("a detection exactly on the window's last frame counts; one past it does not",
+      punchfind.score([100], [Span(95, 100, 0)], 2, (0, 100))["tp"] == 1
+      and punchfind.score([101], [Span(95, 100, 0)], 2, (0, 100))["n_detected"] == 0)
+
+# Shift floor: detections that hit every span only at the right time.
+_sf = punchfind.shift_floor(_det, _gt, 0, (0, 479), min_shift=48, n_rep=100)
+check("shift floor keeps the detector's count and scores far below it",
+      _sf["n_detections"] == 3 and _sf["f1_p97_5"] < 0.7, str(_sf))
+raises("shift floor refuses a minimum shift that leaves nothing to draw",
+       lambda: punchfind.shift_floor(_det, _gt, 0, (0, 479), min_shift=300))
+
+# The tune/test separation the headline depends on.
+import run_punch_finder  # noqa: E402
+
+_qs = [Span(int(s * 24), int((s + 0.25) * 24), 0) for s in np.arange(2.0, 95.0, 3.0)]
+_cut = run_punch_finder.cut_point(_q, _qs, _qs[0].start, _qs[-1].end)
+check("cut point lies inside no span",
+      not any(s.start <= _cut <= s.end for s in _qs), str(_cut))
+raises("cut point refuses when every frame is inside a span",
+       lambda: run_punch_finder.cut_point(_q, [Span(0, 100, 0)], 0, 100))
+_tw = (_qs[0].start, _cut - 1)
+_tuned = run_punch_finder.tune(_q, _qs, _tw, 2)
+_tuned_blind = run_punch_finder.tune(_q, [s for s in _qs if s.start < _cut], _tw, 2)
+_tuned_moved = run_punch_finder.tune(
+    _q, [s for s in _qs if s.start < _cut]
+    + [Span(s.start + 7, s.end + 7, 0) for s in _qs if s.start >= _cut], _tw, 2)
+check("tuning is blind to the test half: deleting or moving its labels changes nothing",
+      _tuned == _tuned_blind == _tuned_moved)
+check("... and tuning found the planted punches", _tuned["overall"]["tune"]["f1"] > 0.9,
+      str(_tuned["overall"]["tune"]))
+_, _fails = run_punch_finder.alignment_gate(_q, _qs, None)
+check("alignment gate passes aligned labels", _fails == [], str(_fails))
+_, _fails = run_punch_finder.alignment_gate(
+    _q, [Span(s.start + 48, s.end + 48, 0) for s in _qs], None)
+check("alignment gate fails labels 48 frames late (the row-index misreading)",
+      len(_fails) > 0)
+
+check("native frame rates cover every video, and none is 30 exactly",
+      set(data.NATIVE_FPS) == set(data.VIDEOS) and 30.0 not in data.NATIVE_FPS.values())
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
