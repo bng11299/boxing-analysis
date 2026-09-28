@@ -695,8 +695,29 @@ check("more folds than subjects is a CLI error, not a traceback",
 _code, _msg = _exit_code(["--data", ".", "--cv", "3", "--include-v6"])
 check("--cv with --include-v6 is refused before any data is read",
       _code == 2 and "V6" in _msg, _msg[-200:])
-check("a CV run defaults to its own results file, never the headline one",
-      run_baseline.build_parser().parse_args(["--synthetic"]).out is None)
+# Run main() for real, in an empty working directory, with no --out: the file
+# it writes must be the CV one, and the headline file must not appear.
+import os  # noqa: E402
+with tempfile.TemporaryDirectory() as _d:
+    _cwd = os.getcwd()
+    os.chdir(_d)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_baseline.main(["--synthetic", "--allow-synthetic", "--cv", "3",
+                               "--epochs", "1", "--bootstrap", "20"])
+        check("a CV run with no --out writes results/baseline_cv3.json ...",
+              (Path(_d) / "results" / "baseline_cv3.json").is_file())
+        check("... and never the single-split headline file",
+              not (Path(_d) / "results" / "baseline.json").exists())
+    finally:
+        os.chdir(_cwd)
+_code, _msg = _exit_code(["--synthetic", "--cv", "3", "--out", "results/baseline.json"])
+check("--cv refuses an explicit --out naming the headline file",
+      _code == 2 and "headline" in _msg, _msg[-200:])
+_code, _msg = _exit_code(["--synthetic", "--cv", "3", "--out",
+                          str(Path("results/baseline.json").resolve())])
+check("... also when it is given as an absolute path",
+      _code == 2 and "headline" in _msg, _msg[-200:])
 
 # The leak that matters is at the point models are fitted, not in cv_splits:
 # spy on what run_cv actually hands to run_arms.
@@ -750,9 +771,11 @@ check("per-video gaps: a zero gap is a tie, not a disagreement",
       _pg["ties"] == 1 and _pg["negative"] == 1 and _pg["positive"] == 0, str(_pg))
 raises("per-video gaps refuse misaligned groups",
        lambda: per_group_gaps([0, 1], [0, 1], [0, 1], ["A"], accuracy_score))
-check("per-fold macro F1 ignores a class the fold does not contain",
-      run_baseline.present_class_macro_f1(np.array([0, 0, 1]), np.array([0, 4, 1]))
-      == run_baseline.present_class_macro_f1(np.array([0, 0, 1]), np.array([0, 2, 1])))
+# Classes 0 and 1 present; a stray prediction of absent class 4 must not add a
+# zero to the average. Plain macro F1 over {0, 1, 4} would give 0.5556.
+_pf = run_baseline.present_class_macro_f1(np.array([0, 0, 1]), np.array([0, 4, 1]))
+check("per-fold macro F1 averages only the classes the fold contains",
+      abs(_pf - (2 / 3 + 1) / 2) < 1e-12, f"{_pf:.4f}")
 
 with tempfile.TemporaryDirectory() as _d:
     _single = Path(_d) / "single.json"
@@ -774,6 +797,45 @@ with tempfile.TemporaryDirectory() as _d:
           str(list(_sj)))
 check("... and the forest still reports its feature importances",
       "top_features" in next(r for r in _sj["results"] if r["model"] == "random-forest"))
+# Beyond the top-level keys: the rows, their order and their fields, and the
+# split bookkeeping. Floats are not pinned (they vary across torch builds);
+# the value-for-value comparison with main is gate evidence in the loop log.
+# Pinned to main's own output (generated from main, 2026-09-28), not to this
+# branch's: rows, their order, every field in order, and the split bookkeeping.
+_base = ["model", "accuracy", "macro_f1", "per_class_f1", "confusion"]
+_fit = _base + ["train_accuracy", "train_macro_f1", "generalisation_gap", "params",
+                "train_seconds"]
+check("single split: models and their fields exactly as on main",
+      [(r["model"], list(r)) for r in _sj["results"]]
+      == [("majority-class", _base), ("weighted-random", _base),
+          ("random-forest", _base + ["top_features"]), ("svm-rbf", _base),
+          ("static-pose", _fit), ("st-gcn", _fit)],
+      str([(r["model"], list(r)) for r in _sj["results"]]))
+check("single split: split bookkeeping exactly as on main",
+      (_sj["n_train_clips"], _sj["n_val_clips"], _sj["train_videos"], _sj["val_videos"])
+      == (900, 240, ["synthetic"], ["synthetic"]))
+
+# Constant fields are checked across folds before being lifted (nit).
+_fold_n = [0]
+
+
+def _spy_arms_swap(train, test, a, spec):
+    _fold_n[0] += 1
+    y = np.array([c.label for c in test])
+    return [{"model": "st-gcn++ pretrained", "_pred": y.tolist(), "macro_f1": 1.0,
+             "accuracy": 1.0, "confusion": [[0]], "params": 7, "t_out": 50,
+             "pretrained_from": {"sha256": f"fold{_fold_n[0]}"}}]
+
+
+run_baseline.run_arms = _spy_arms_swap
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        raises("a checkpoint that differs between folds is refused, not reported "
+               "as the first fold's", lambda: run_baseline.run_cv(
+                   _real_like, argparse.Namespace(cv=3), None, lambda c: c.source),
+               RuntimeError)
+finally:
+    run_baseline.run_arms = _real_arms
 
 print("\n--- V6 continuous track, alignment and the wrist-speed punch finder ---")
 from boxingvi import align, punchfind  # noqa: E402

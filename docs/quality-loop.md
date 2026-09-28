@@ -116,11 +116,64 @@ picked to flatter a result.
 - **Security:** no new file, network or deserialisation path. Each fold still
   goes through `load_pretrained`, so the sha256 is re-verified per fold.
 
+### Iteration 3 — 2026-09-28
+
+- **Why:** iteration 2's fixes were never re-reviewed, and no gate reproduction
+  was recorded.
+- **Clean clone:** cloned from GitHub at `bc00dbf`, the suite gave 179/0, which
+  matches iteration 2's count.
+- **Review** (fresh code-reviewer subagent, on `main..bc00dbf`): FIX FIRST.
+  **No leakage found.** It checked the scaler, features, class weights, floors,
+  epochs, the pretrained head and seeds. It checked the sign test against a
+  brute-force binomial, and the alignment of pooled predictions. But:
+  - (B1) the test for blocking finding (a) could not fail: it checked a parser
+    default, not what `main` writes;
+  - (S2) the present-class macro-F1 test gave the same answer under plain macro
+    F1;
+  - (S3) the sign test treats videos as independent, but with K=3, videos in a
+    fold share one model;
+  - (S4) "single split unchanged" was pinned on key order only;
+  - (S5) an explicit `--cv 3 --out results/baseline.json` still overwrote the
+    headline;
+  - nits: constant fields were never checked across folds, a missing-class fold
+    ended in a traceback, `p=0.000` formatting, and "every clip scored once"
+    was not asserted.
+- **Changed:**
+  - `main` is tested from an empty working directory with no `--out`.
+  - The macro-F1 value is asserted directly.
+  - `CV_INTERVAL_NOTE` states that the sign test is optimistic, and that one
+    fold per group makes it less so but not exact.
+  - Model order, per-row fields and the split bookkeeping are pinned **to main's
+    own output**, generated in a worktree of main.
+  - `--cv` refuses an `--out` resolving to the headline file.
+  - Constant fields are checked across folds, or `run_cv` raises.
+  - A fold missing a class is a CLI error.
+  - The console prints both sign tests, with p formatted `.2g`.
+  - `run_cv` asserts that every clip, group and prediction is scored exactly
+    once.
+- **Test:** 185/0.
+  - **Mutations,** each caught: the CV default going back to the headline (2
+    tests); plain macro F1 (1); the headline refusal removed (2); the
+    constant-field check removed (1).
+  - **Main vs branch:** main's full synthetic single-split JSON equals this
+    branch's value for value (minus `environment` and `train_seconds`).
+- **Re-review:** APPROVE. It tried to slip past the headline guard with case
+  changes, backslashes and a trailing dot, and every attempt was refused. Its
+  wording nits on the sign-test note were applied.
+- **Security:** no new surface. The only new file behaviour is a refusal. The
+  test's `chdir` is confined to a temp directory and restored in `finally`.
+
 ### Residual risk
 
 - The pooled clip-level interval is too narrow (within-video correlation,
-  between-fold variance). The per-video sign test is the check. With 9 videos,
-  its floor is p = 0.0039.
+  between-fold variance). The per-video sign test is the check, but it is
+  itself optimistic at K=3: videos sharing a fold share a model, so there are
+  fewer than 9 independent units. Its floor of p = 0.0039 is a best case.
+- The headline guard, like the default path, is relative to the working
+  directory, so running from outside the repo root can still reach the
+  headline file by an absolute path. Run from the repo root.
+- Seed 2's CV run never finished: the log stops mid-fold 3 on 2026-09-22 and
+  there is no JSON. The PR body's "seeds 1–2 are running" is out of date.
 - The V1 fold trains without 39% of the corpus, so absolute CV scores are not
   comparable to the single split. Compare gaps, not levels.
 
