@@ -202,8 +202,15 @@ def block_bootstrap(det_frames, spans, tol: int, window, block: int,
 
     Punches within seconds of each other are not independent -- combinations,
     fatigue, one camera angle -- so frames are grouped into `block`-frame
-    chunks and whole chunks are resampled. The matching is done once, globally,
-    and each hit is credited to the block its span starts in.
+    chunks and whole chunks are resampled. The matching is done once, globally.
+
+    A hit is credited TWICE: to its detection's block for precision, and to its
+    span's block for recall. With one shared credit, a hit whose detection and
+    span fall in different blocks could be drawn without its detection, and
+    precision could exceed 1.
+
+    Draws with no detections or no labels are dropped as undefined, so the
+    interval is conditional on draws containing at least one punch.
     """
     if block < 1:
         raise ValueError("block must be >= 1 frame")
@@ -211,22 +218,22 @@ def block_bootstrap(det_frames, spans, tol: int, window, block: int,
     sp = [s for s in spans if window[0] <= s.start <= window[1]]
     pairs = match(det, sp, tol)
     n_blocks = (window[1] - window[0]) // block + 1
-    bid = lambda f: (np.asarray(f) - window[0]) // block  # noqa: E731
+    bid = lambda f: (np.asarray(f, dtype=np.int64) - window[0]) // block  # noqa: E731
     n_det = np.bincount(bid(det), minlength=n_blocks)
     n_gt = np.bincount(bid([s.start for s in sp]), minlength=n_blocks)
-    tp = np.bincount(bid([sp[i].start for i, _ in pairs]) if pairs else np.zeros(0, int),
-                     minlength=n_blocks)
+    tp_det = np.bincount(bid([det[j] for _, j in pairs]), minlength=n_blocks)
+    tp_span = np.bincount(bid([sp[i].start for i, _ in pairs]), minlength=n_blocks)
     rng = np.random.default_rng(seed)
     stats = np.full((n_boot, 3), np.nan)
     for b in range(n_boot):
         idx = rng.integers(0, n_blocks, size=n_blocks)
-        t, d, g = tp[idx].sum(), n_det[idx].sum(), n_gt[idx].sum()
+        d, g = n_det[idx].sum(), n_gt[idx].sum()
         # A draw with no detections, or no labels, has no precision or recall
         # -- it is undefined, not zero. Scoring it 0 drags the interval down
         # whenever the footage has stretches with no punches.
         if d == 0 or g == 0:
             continue
-        p, r = t / d, t / g
+        p, r = tp_det[idx].sum() / d, tp_span[idx].sum() / g
         stats[b] = (p, r, 2 * p * r / (p + r) if p + r else 0.0)
     kept = stats[~np.isnan(stats[:, 0])]
     if len(kept) < n_boot // 2:

@@ -364,8 +364,9 @@ def _load_v6(skel: Path, ann: Path):
 #     -6..+6 (exact values: results/punch_finder_v6.json). The 208 frames the array lacks against the video's 46,705 are
 #     three gaps with no pose (0-156, 601-648, 46489-46491), not drift.
 #   * V6.xlsx `start`/`end` are video frame ids in the same space, inclusive.
-#     Read as skeleton row numbers instead, they would sit 48 frames late after
-#     frame 649, and the wrist-speed peak around them vanishes.
+#     Read as skeleton ROW numbers instead, they would point 157 frames late
+#     before the gap at 601-648 and 205 frames late after it, and the
+#     wrist-speed peak around them vanishes.
 #   * 804 rows, of which 685 carry a label; the other 119 are empty. Four
 #     classes only -- lead/rear hook and lead/rear uppercut. V6 has no jabs or
 #     crosses, so nothing measured on it says anything about straight punches.
@@ -466,7 +467,8 @@ def load_v6_spans(ann: Path) -> "list[Span]":
             if np.isfinite(s) or np.isfinite(e):
                 raise ValueError(f"V6 row {i}: frames without a punch label")
             continue
-        if not (np.isfinite(s) and np.isfinite(e)) or e < s or s != int(s) or e != int(e):
+        if (not (np.isfinite(s) and np.isfinite(e)) or s < 0 or e < s
+                or s != int(s) or e != int(e)):
             raise ValueError(f"V6 row {i}: unusable span {s!r}..{e!r}")
         spans.append(Span(int(s), int(e), CLASSES.index(name)))
     if not spans:

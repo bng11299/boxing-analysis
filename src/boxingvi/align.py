@@ -67,8 +67,13 @@ def peri_event_peak(track: Track, spans, speed: np.ndarray, half: int = 40) -> d
     if not prof:
         raise ValueError("no span has a full window of consecutive pose around it")
     mean = np.mean(prof, axis=0)
+    med = float(np.median(mean))
+    # Median 0 (a body at rest for most of the window): a positive peak over it
+    # is as prominent as a peak can be, and an all-zero profile has none.
+    peak = float(mean.max())
+    ratio = peak / med if med > 0 else (float("inf") if peak > 0 else 0.0)
     return {"peak_lag": int(lags[mean.argmax()]), "n_spans": len(prof),
-            "peak_over_median": float(mean.max() / np.median(mean))}
+            "peak_over_median": ratio}
 
 
 def video_motion_energy(path: Path, size=(96, 54)) -> np.ndarray:

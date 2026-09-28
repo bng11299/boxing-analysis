@@ -868,9 +868,13 @@ raises("block bootstrap refuses when most draws are undefined",
                                          block=4, n_boot=200))
 
 # Alignment checks must FIND an offset that is there, not just report zero.
-_q = _track(n=2400, punches=list(np.arange(2.0, 95.0, 3.0)))
+# Irregular punch times, like real boxing: a strictly periodic fixture would
+# line up with itself at a one-period shift and fool any shift scan.
+_PUNCH_S = 2.0 + np.cumsum(np.random.default_rng(7).uniform(1.6, 4.4, 40))
+_PUNCH_S = _PUNCH_S[_PUNCH_S < 95.0]
+_q = _track(n=2400, punches=list(_PUNCH_S))
 _speed = punchfind.wrist_signal(_q).max(axis=1)
-_late = [Span(int(s * 24) + 12, int((s + 0.25) * 24) + 12, 0) for s in np.arange(2.0, 95.0, 3.0)]
+_late = [Span(int(s * 24) + 12, int((s + 0.25) * 24) + 12, 0) for s in _PUNCH_S]
 _scan = align.label_shift_scan(_q, _late, _speed, range(-20, 21))
 check("shift scan finds labels planted 12 frames late",
       max(_scan, key=_scan.get) in (-13, -12, -11), str(max(_scan, key=_scan.get)))
@@ -947,7 +951,7 @@ raises("shift floor refuses a minimum shift that leaves nothing to draw",
 # The tune/test separation the headline depends on.
 import run_punch_finder  # noqa: E402
 
-_qs = [Span(int(s * 24), int((s + 0.25) * 24), 0) for s in np.arange(2.0, 95.0, 3.0)]
+_qs = [Span(int(s * 24), int((s + 0.25) * 24), 0) for s in _PUNCH_S]
 _cut = run_punch_finder.cut_point(_q, _qs, _qs[0].start, _qs[-1].end)
 check("cut point lies inside no span",
       not any(s.start <= _cut <= s.end for s in _qs), str(_cut))
@@ -963,12 +967,159 @@ check("tuning is blind to the test half: deleting or moving its labels changes n
       _tuned == _tuned_blind == _tuned_moved)
 check("... and tuning found the planted punches", _tuned["overall"]["tune"]["f1"] > 0.9,
       str(_tuned["overall"]["tune"]))
-_, _fails = run_punch_finder.alignment_gate(_q, _qs, None)
+_, _fails = run_punch_finder.alignment_gate(_q, _qs, None, 2)
 check("alignment gate passes aligned labels", _fails == [], str(_fails))
 _, _fails = run_punch_finder.alignment_gate(
-    _q, [Span(s.start + 48, s.end + 48, 0) for s in _qs], None)
-check("alignment gate fails labels 48 frames late (the row-index misreading)",
+    _q, [Span(s.start + 48, s.end + 48, 0) for s in _qs], None, 2)
+check("alignment gate fails labels 48 frames late",
       len(_fails) > 0)
+
+# Quality-loop iteration 1 (review 2026-09-28): the gate must fail on offsets it
+# does not happen to scan, on offsets just beyond the scoring tolerance, and on
+# labels that bear no relation to the motion.
+for _off in (4, -4, 20, 200):
+    _, _fails = run_punch_finder.alignment_gate(
+        _q, [Span(s.start + _off, s.end + _off, 0) for s in _qs], None, 2)
+    check(f"alignment gate fails labels {_off:+d} frames off", len(_fails) > 0)
+for _off in (3, -3):   # tol + 1: the scan's off-centre peak must not hide it
+    _, _fails = run_punch_finder.alignment_gate(
+        _q, [Span(s.start + _off, s.end + _off, 0) for s in _qs], None, 2)
+    check(f"alignment gate fails labels {_off:+d} frames off (one past tolerance)",
+          len(_fails) > 0)
+
+
+def _swaying(amp):
+    """The irregular-punch body, plus a constant sway of both wrists: a
+    non-zero speed baseline, so peak prominence is actually tested."""
+    tr = _track(n=2400, punches=list(_PUNCH_S), amp=amp)
+    tr.xy[:, 9:11, 1] += 40 * np.sin(2 * np.pi * 1.3 * np.arange(2400) / 24.0)[:, None]
+    return tr
+
+
+_, _fails = run_punch_finder.alignment_gate(_swaying(1.0), _qs, None, 2)
+check("alignment gate passes clear punches over a swaying baseline", _fails == [],
+      str(_fails))
+_, _fails = run_punch_finder.alignment_gate(_swaying(0.2), _qs, None, 2)
+check("alignment gate fails punches barely above a swaying baseline (prominence)",
+      any("averaged speed peak" in f for f in _fails), str(_fails))
+check("json_safe turns non-finite floats into strings, so the file stays JSON",
+      json.dumps(run_punch_finder.json_safe(
+          {"a": [float("inf"), 1.0], "b": float("nan")}), allow_nan=False)
+      == '{"a": ["inf", 1.0], "b": "nan"}')
+_rs = np.random.default_rng(3).integers(50, 2300, len(_qs))
+_, _fails = run_punch_finder.alignment_gate(
+    _q, sorted([Span(int(s), int(s) + 6, 0) for s in _rs], key=lambda s: s.start), None, 2)
+check("alignment gate fails labels placed at random", len(_fails) > 0)
+_rep, _ = run_punch_finder.alignment_gate(_q, _qs, None, 2)
+check("a gate run without video records the video check as SKIPPED",
+      _rep["video"] == "SKIPPED")
+
+# The video check demands a clear peak, not just its position.
+_mot0 = np.r_[0, np.linalg.norm(np.diff(_q.xy, axis=0), axis=-1).sum(1)]
+_e_ok = np.zeros(2500); _e_ok[:len(_mot0)] = _mot0
+_e_ok += np.random.default_rng(4).normal(0, _mot0.std() * 0.3, 2500)
+_lags = range(-run_punch_finder.XCORR_MAX_LAG, run_punch_finder.XCORR_MAX_LAG + 1)
+check("video check passes a skeleton aligned with its video",
+      run_punch_finder.video_failures(align.skeleton_video_xcorr(_q, _e_ok, _lags)) == [])
+_n_pass = 0
+for _seed in range(100):
+    _e_bad = np.abs(np.random.default_rng(100 + _seed).normal(size=2500))
+    _n_pass += not run_punch_finder.video_failures(
+        align.skeleton_video_xcorr(_q, _e_bad, _lags))
+check("video check passes an unrelated video in none of 100 draws", _n_pass == 0,
+      f"{_n_pass} passed")
+_e_late = np.zeros(2500); _e_late[20:20 + len(_mot0)] = _mot0
+check("video check fails a skeleton 20 frames off its video",
+      len(run_punch_finder.video_failures(
+          align.skeleton_video_xcorr(_q, _e_late, _lags))) > 0)
+check("video check fails a lag-0 peak that is weak or not clear of far lags",
+      len(run_punch_finder.video_failures({-7: 0.5, -1: 0.5, 0: 0.55, 1: 0.5, 7: 0.5})) > 0
+      and len(run_punch_finder.video_failures({-7: 0.05, 0: 0.2, 7: 0.05})) > 0)
+check("video check fails when no far lag was scanned",
+      len(run_punch_finder.video_failures({-1: 0.1, 0: 0.9, 1: 0.1})) > 0)
+check("peri-event prominence of a peak over a resting (zero-median) body is infinite",
+      align.peri_event_peak(_q, _qs, punchfind.wrist_signal(_q).max(axis=1))
+      ["peak_over_median"] > run_punch_finder.PERI_MIN_PROMINENCE)
+
+# The bootstrap must never report precision or recall above 1 (review B3): a
+# hit whose detection and span fall in different blocks.
+_bb2 = punchfind.block_bootstrap([10 * k + 11 for k in range(40)],
+                                 [Span(10 * k + 8, 10 * k + 9, 0) for k in range(40)],
+                                 2, (0, 409), block=10, n_boot=500)
+check("block bootstrap intervals stay within [0, 1]",
+      all(0.0 <= v <= 1.0 for k in ("precision", "recall", "f1") for v in _bb2[k]),
+      str({k: _bb2[k] for k in ("precision", "recall", "f1")}))
+
+# cut_point: a span wholly before the window, and the guard band (review S1, S2).
+check("cut point ignores spans that end before the window",
+      abs(run_punch_finder.cut_point(_q, [Span(0, 5, 0), Span(100, 110, 0)], 50, 200)
+          - 125) <= 1)
+# Unguarded, the frame nearest the middle (100) is free but 1 frame from a span;
+# with a 2-frame guard the only clean cut is past the second span's guard.
+_gs = [Span(0, 97, 0), Span(101, 160, 0)]
+check("cut point without a guard takes the free frame nearest the middle",
+      run_punch_finder.cut_point(_q, _gs, 0, 200) == 100)
+_cg = run_punch_finder.cut_point(_q, _gs, 0, 200, guard=2)
+check("cut point keeps the guard distance from every span", _cg == 163, str(_cg))
+raises("cut point refuses when the guard leaves no clean frame",
+       lambda: run_punch_finder.cut_point(_q, [Span(0, 97, 0), Span(101, 200, 0)],
+                                          0, 200, guard=2))
+
+check("peri-event prominence is 0, not a division error, on a flat-zero profile",
+      align.peri_event_peak(_track(n=200), [Span(100, 105, 0)],
+                            np.zeros(200))["peak_over_median"] == 0.0)
+
+# main() end to end on synthetic V6 files: fail closed, write nothing.
+with tempfile.TemporaryDirectory() as _d:
+    import pandas as pd
+    _root = Path(_d)
+    (_root / "Skeleton_data").mkdir(); (_root / "Annotation_files").mkdir()
+    _xyn = _q.xy.copy()
+    _unset = np.all(_xyn == 0, axis=-1)
+    _xyn[_unset] = (450.0, 250.0)          # the loader refuses joints at (0, 0)
+    _arr = np.zeros((len(_q.frame_ids), 1, N_JOINTS, 3))
+    _arr[:, 0, :, 0] = _q.frame_ids[:, None]
+    _arr[:, 0, :, 1:] = _xyn / np.array(data.SOURCE_SIZE)
+    np.save(_root / "Skeleton_data" / "V6.npy", _arr)
+
+    def _write_spans(spans):
+        pd.DataFrame([[s.start, s.end, "Lead Hook"] for s in spans],
+                     columns=["start", "end", "class"]).to_excel(
+            _root / "Annotation_files" / "V6.xlsx", index=False)
+
+    def _main(*extra):
+        try:
+            return run_punch_finder.main(["--data", str(_root), *extra])
+        except SystemExit as e:
+            return ("usage", e.code)
+
+    _out = _root / "out.json"
+    _write_spans(_qs)
+    check("main refuses to run without --video or --no-video-check",
+          _main("--out", str(_out)) == ("usage", 2) and not _out.exists())
+    check("main refuses a no-video run that would write the default results file",
+          _main("--no-video-check") == ("usage", 2))
+    check("... including when the default file is named by its absolute path",
+          _main("--no-video-check", "--out",
+                str(run_punch_finder.DEFAULT_OUT.resolve())) == ("usage", 2))
+    _write_spans([Span(_qs[0].start, 5000, 0)] + _qs[1:])
+    check("main exits 2 when an early-starting span ends past the pose",
+          _main("--no-video-check", "--out", str(_out)) == 2 and not _out.exists())
+    _write_spans([Span(s.start + 20, s.end + 20, 0) for s in _qs])
+    check("main exits 2 and writes nothing when the labels are misaligned",
+          _main("--no-video-check", "--out", str(_out), "--bootstrap", "200") == 2
+          and not _out.exists())
+    _write_spans(_qs + [Span(5000, 5006, 0)])
+    check("main exits 2 when labels run past the pose",
+          _main("--no-video-check", "--out", str(_out)) == 2 and not _out.exists())
+    _write_spans(_qs)
+    _rc = _main("--no-video-check", "--out", str(_out), "--bootstrap", "200")
+    _res = json.loads(_out.read_text(encoding="utf-8")) if _out.exists() else {}
+    check("main scores aligned labels and stamps the skipped video check",
+          _rc == 0 and _res.get("video_check") == "SKIPPED", str(_rc))
+    _write_spans([Span(-3, 4, 0)] + _qs)
+    raises("V6 spans: a negative start frame is an error",
+           lambda: data.load_v6_spans(_root / "Annotation_files"))
 
 check("native frame rates cover every video, and none is 30 exactly",
       set(data.NATIVE_FPS) == set(data.VIDEOS) and 30.0 not in data.NATIVE_FPS.values())
