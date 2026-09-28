@@ -253,7 +253,12 @@ CV_INTERVAL_NOTE = (
     "CV intervals are a paired clip-level bootstrap on pooled out-of-fold "
     "predictions from K different models. They ignore within-video correlation "
     "and between-fold training variance, so they are too narrow; read them "
-    "with the per-video gaps and sign test, which treat the video as the unit.")
+    "with the per-group gaps and sign test, which treat the group (video, or "
+    "subject for synthetic fixtures) as the unit. The sign test is itself "
+    "optimistic: groups in one fold are scored by the same model, so they are "
+    "not independent, and the effective sample size lies between K and the "
+    "number of groups. One fold per group makes it less optimistic, not exact "
+    "-- those models still share nearly all their training data.")
 
 
 # Per-fold fields worth keeping; predictions are pooled instead. Provenance
@@ -262,8 +267,13 @@ CV_INTERVAL_NOTE = (
 _FOLD_FIELDS = ("accuracy", "train_accuracy", "train_macro_f1",
                 "generalisation_gap", "train_seconds", "params", "t_out",
                 "pretrained_from", "top_features", "confusion")
-# Identical in every fold by construction, so safe to lift onto the pooled row.
+# Identical in every fold by construction -- and checked, before being lifted
+# onto the pooled row, because a checkpoint swapped mid-run would otherwise be
+# reported as the first fold's sha256.
 _CONSTANT_FIELDS = ("params", "t_out", "pretrained_from")
+
+
+SINGLE_SPLIT_OUT = "results/baseline.json"
 
 
 def present_class_macro_f1(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -318,12 +328,23 @@ def run_cv(clips, a, spec, key):
         folds.append(rec)
 
     y_all = np.concatenate(ys)
+    # Every clip scored exactly once, by every model: enforced here, not only
+    # assumed from how cv_splits is built.
+    if len(y_all) != len(clips) or len(groups) != len(clips):
+        raise RuntimeError(f"CV scored {len(y_all)} clips of {len(clips)}")
+    if {key(c) for c in clips} != set(groups):
+        raise RuntimeError("CV left a group out of every test fold")
     pooled = []
     for name in order:
+        if len(preds[name]) != len(y_all):
+            raise RuntimeError(f"{name}: {len(preds[name])} predictions for "
+                               f"{len(y_all)} clips")
         r = evaluate(name, y_all, np.array(preds[name]))
         first = folds[0]["models"][name]
         for f in _CONSTANT_FIELDS:
             if f in first:
+                if any(fd["models"][name].get(f) != first[f] for fd in folds):
+                    raise RuntimeError(f"{name}: {f} differs between folds")
                 r[f] = first[f]
         fold_f1 = [f["models"][name]["macro_f1"] for f in folds]
         r["fold_macro_f1"] = fold_f1
@@ -433,7 +454,10 @@ def main(argv: list[str] | None = None) -> int:
                  "into the headline; run them separately")
     if a.out is None:
         a.out = Path(f"results/baseline_cv{a.cv}.json" if a.cv
-                     else "results/baseline.json")
+                     else SINGLE_SPLIT_OUT)
+    elif a.cv and a.out.resolve() == Path(SINGLE_SPLIT_OUT).resolve():
+        ap.error(f"--cv may not write {SINGLE_SPLIT_OUT}: that file is the "
+                 "single-split headline")
     spec = None
     if a.stgcnpp in ("pretrained", "both"):
         from boxingvi.stgcnpp import PRETRAINED
@@ -491,9 +515,11 @@ def main(argv: list[str] | None = None) -> int:
               "(inverse frequency, n / (k * count_k))")
     folds = None
     if a.cv:
-        from boxingvi.data import group_folds
+        from boxingvi.data import cv_splits
         try:
-            group_folds(clips, a.cv, group_key)
+            # Builds the folds (group_folds) and checks no fold is missing a
+            # class; either failure is a CLI error, not a traceback.
+            cv_splits(clips, a.cv, group_key)
         except ValueError as e:
             ap.error(f"--cv {a.cv}: {e}")
         results, y_eval, g_eval, folds = run_cv(clips, a, spec, group_key)
@@ -532,8 +558,9 @@ def main(argv: list[str] | None = None) -> int:
         if folds:
             # A pooled interval can exclude zero on the strength of one large
             # fold (V1 is 39% of the corpus), so the direction is also checked
-            # fold by fold and -- the unit that actually varies independently
-            # -- video by video, on both metrics.
+            # fold by fold and video by video, on both metrics. Videos sharing
+            # a fold share a model, so they are not fully independent either;
+            # see CV_INTERVAL_NOTE.
             from boxingvi.stats import METRICS, per_group_gaps
             fold_gaps[key] = {}
             video_gaps[key] = {}
@@ -567,11 +594,12 @@ def main(argv: list[str] | None = None) -> int:
     if folds:
         print(f"  NOTE: {CV_INTERVAL_NOTE}")
         for key, vg in video_gaps.items():
-            v = vg["macro_f1"]
+            v, va = vg["macro_f1"], vg["accuracy"]
             print(f"  {key}: per-fold macro-F1 "
                   + " ".join(f"{x:+.3f}" for x in fold_gaps[key]["macro_f1"]["gaps"])
-                  + f" | videos +{v['positive']}/-{v['negative']}/={v['ties']}"
-                  f", sign test p={v['sign_test_p']:.3f}")
+                  + f" | videos macro-F1 +{v['positive']}/-{v['negative']}/={v['ties']}"
+                  f" p={v['sign_test_p']:.2g}; accuracy +{va['positive']}/"
+                  f"-{va['negative']}/={va['ties']} p={va['sign_test_p']:.2g}")
 
     if a.synthetic and not a.allow_synthetic:
         print("\nnot written: synthetic run without --allow-synthetic")
