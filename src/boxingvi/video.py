@@ -99,28 +99,40 @@ def iter_frames(path, info: "VideoInfo | None" = None, max_frames: "int | None" 
     path = Path(path).resolve()
     info = info or probe(path)
     w, h = info.width, info.height
-    cmd = [_tool("ffmpeg"), "-v", "error", "-i", str(path), "-fps_mode", "passthrough",
-           "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
-    n, stopped_early = 0, False
+    frame_bytes = w * h * 3
+    # -map 0:v:0 decodes the stream `probe` measured. Without it ffmpeg picks its
+    # own "best" stream, and a file whose default stream is a different size
+    # yields chopped-up frames of the wrong stream with no error.
+    cmd = [_tool("ffmpeg"), "-v", "error", "-i", str(path), "-map", "0:v:0",
+           "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    n, at_eof, tail = 0, False, b""
     # stderr is discarded rather than piped: an unread pipe fills on a corrupt
     # file and deadlocks ffmpeg while we wait on stdout (same reasoning as align.py).
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
         try:
             while max_frames is None or n < max_frames:
-                buf = proc.stdout.read(w * h * 3)
-                if len(buf) < w * h * 3:
+                buf = proc.stdout.read(frame_bytes)
+                if len(buf) < frame_bytes:
+                    at_eof, tail = True, buf
                     break
                 n += 1
                 yield np.frombuffer(buf, np.uint8).reshape(h, w, 3).copy()
-            else:
-                stopped_early = True
         finally:
-            if stopped_early or proc.poll() is None:
+            # Kill only when WE stopped (max_frames, or the caller closed us). At EOF
+            # ffmpeg is still shutting down, and killing it there discards its exit code.
+            if not at_eof:
                 proc.kill()
-                stopped_early = True
-            proc.wait()
-    if not stopped_early and proc.returncode != 0:
+            try:
+                proc.wait(timeout=PROBE_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                raise RuntimeError(f"ffmpeg did not exit after the last frame of {path.name}")
+    if at_eof and proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed on {path.name} (exit {proc.returncode})")
+    if tail:  # a partial frame: decoded size is not the probed size, so every frame is suspect
+        raise RuntimeError(f"{path.name}: decoder output is not a whole number of "
+                           f"{w}x{h} frames ({len(tail)} stray bytes after frame {n})")
 
 
 class VideoWriter:

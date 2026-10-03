@@ -325,3 +325,20 @@ directory that gets committed (`results/` and `*.mp4` are gitignored).
   bystander handling (no second person in the clip); fast-punch blur.
 - **Weights:** `yolo11m-pose.pt` sha256 `29b17eaf...6eb2` is trust-on-first-use; GitHub
   publishes no asset digest, so it is NOT yet checked against an independent source.
+
+### Iteration 3 -- review fixes in `iter_frames` (2026-10-03)
+
+- **Bug 1, stream mismatch:** `probe` measured `v:0` but ffmpeg decoded its own pick.
+  A file with a larger second stream marked default gave 250 chopped "frames" from a
+  10-frame file, silently. Fixed with `-map 0:v:0`.
+- **Bug 2, exit code never read:** ffmpeg is still alive at stdout EOF (20/20 runs),
+  so the old `poll() is None` test always killed it and the failure check was dead
+  code. Now it kills only when we stopped early, waits at EOF, and raises on a
+  non-zero exit or a partial trailing frame.
+- **Test:** 69 ingest (8 new), 260 pipeline, all passing in `.venv`. Against the old
+  `video.py` the 4 tests aimed at the two bugs FAIL, so they can fail.
+- **Real-world fact:** a 4 s stream-copied V6 excerpt decodes to EOF as 96 frames,
+  equal to ffprobe's `-count_frames`; V6 with `max_frames=300` gives 300, no error.
+- **Still open (from the review):** the `usable` gate does not require wrists, and
+  `to_track` drops confidence; VFR detection misses a 60-nominal / 59.946-average
+  clip; `render_overlay` does not refuse a pose longer than the video.

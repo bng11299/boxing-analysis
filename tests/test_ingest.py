@@ -84,6 +84,57 @@ check("rotation flag: probe reports the DISPLAYED size",
 check("rotation flag: decoded frames match the probed size",
       rframes[0].shape == (rinfo.height, rinfo.width, 3), str(rframes[0].shape))
 
+# Two video streams, the larger one marked default: ffmpeg's own choice. probe
+# measures v:0 (64x48 red), so the decoder must read v:0 too -- before the fix it
+# decoded the 320x240 blue stream as 250 chopped "frames" of a 10-frame file.
+two = tmp / "two.mp4"
+ffmpeg("-f", "lavfi", "-i", "color=c=red:s=64x48:r=30", "-f", "lavfi",
+       "-i", "color=c=blue:s=320x240:r=30", "-map", "0", "-map", "1",
+       "-frames:v:0", "10", "-frames:v:1", "10", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+       "-disposition:v:0", "0", "-disposition:v:1", "default", str(two))
+tinfo = video.probe(two)
+tframes = list(video.iter_frames(two, tinfo))
+check("two video streams: probe measures v:0", (tinfo.width, tinfo.height) == (64, 48), str(tinfo))
+check("two video streams: decoder reads the SAME stream (frame count)",
+      len(tframes) == 10, str(len(tframes)))
+check("two video streams: decoder reads the SAME stream (content is red, not blue)",
+      all(f[..., 0].mean() > 200 and f[..., 2].mean() < 50 for f in tframes))
+
+
+def fake_ffmpeg(payload_frames: float, exit_code: int):
+    """Swap ffmpeg for a process that writes `payload_frames` WxH frames and exits."""
+    real = subprocess.Popen
+    script = (f"import sys; sys.stdout.buffer.write(bytes({int(payload_frames * W * H * 3)}));"
+              f" sys.stdout.flush(); sys.exit({exit_code})")
+    return real, lambda cmd, **kw: real([sys.executable, "-c", script], **kw)
+
+
+def decode_with(payload_frames, exit_code, max_frames=None):
+    real, fake = fake_ffmpeg(payload_frames, exit_code)
+    video.subprocess.Popen = fake
+    try:
+        return len(list(video.iter_frames(clip, info, max_frames)))
+    finally:
+        video.subprocess.Popen = real
+
+
+# The exit code was never read: ffmpeg is still alive at stdout EOF (20/20 runs),
+# so the old poll() test always killed it and the failure check was dead code.
+check("control: whole frames and exit 0 decode cleanly", decode_with(3, 0) == 3)
+raises("ffmpeg exiting non-zero after its frames is an error, not a short video",
+       lambda: decode_with(3, 1), RuntimeError)
+raises("a partial trailing frame is an error, not silently dropped",
+       lambda: decode_with(2.5, 0), RuntimeError)
+check("max_frames reached before a failing exit: no error (we stopped it)",
+      decode_with(3, 1, max_frames=2) == 2)
+gen = video.iter_frames(clip, info)
+next(gen)
+try:
+    gen.close()  # caller abandons the stream mid-file
+    check("closing the generator early kills ffmpeg without raising", True)
+except Exception as e:
+    check("closing the generator early kills ffmpeg without raising", False, repr(e))
+
 raises("a missing video is FileNotFoundError", lambda: video.probe(tmp / "nope.mp4"),
        FileNotFoundError)
 junk = tmp / "junk.mp4"
