@@ -3,8 +3,9 @@
 Pure numpy drawing (no OpenCV): a skeleton drawn on your own footage is the
 fastest honest check that the pose model sees what you think it sees, so the
 renderer is kept small enough to trust by reading it. Frames with no usable
-pose (none found, or too few confident joints) get a red border instead of silently showing bare video, and every frame
-carries its index so a bad stretch can be quoted to the pose code by number.
+pose (none found, too few confident joints, or a wrist or shoulder unsure) get a
+red border, with whatever WAS found still drawn so the reason is visible, and
+every frame carries its index so a bad stretch can be quoted by number.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import numpy as np
 
 from .data import EDGES, N_JOINTS
 from .pose_yolo import PoseSequence
-from .video import VideoWriter, iter_frames, probe
+from .video import VideoInfo, VideoWriter, iter_frames, probe
 
 LEFT = {1, 3, 5, 7, 9, 11, 13, 15}   # COCO-17 odd indices
 RIGHT = {2, 4, 6, 8, 10, 12, 14, 16}
@@ -83,26 +84,36 @@ def _border(frame: np.ndarray, color, t: int = 6) -> None:
 
 
 def render_overlay(video, pose: PoseSequence, out, min_conf: float = 0.3,
-                   max_frames: "int | None" = None) -> int:
-    """Write `out` with the skeleton drawn on `video`; return frames written."""
+                   max_frames: "int | None" = None, info: "VideoInfo | None" = None) -> int:
+    """Write `out` with the skeleton drawn on `video`; return frames written.
+    `info` is `probe(video)`, passed in to spare a second packet scan."""
     video, out = Path(video).resolve(), Path(out).resolve()
     if out == video:
         raise ValueError("refusing to overwrite the input video with its own overlay")
-    info = probe(video)
+    info = info or probe(video)
     if (info.width, info.height) != (pose.width, pose.height):
         raise ValueError(f"pose is for {pose.width}x{pose.height}, video is "
                          f"{info.width}x{info.height}; not drawing a misaligned skeleton")
+    if abs(pose.fps - info.fps) > 1e-6:
+        raise ValueError(f"pose is at {pose.fps:.3f} fps, video at {info.fps:.3f}; "
+                         "it was extracted from a different video")
     good = pose.usable(min_conf)
     n = 0
     with VideoWriter(out, info.width, info.height, info.fps_frac) as vw:
         for i, frame in enumerate(iter_frames(video, info, max_frames)):
             if i >= len(pose):
                 raise ValueError(f"video has more frames than the pose ({len(pose)})")
-            if good[i]:
-                draw_skeleton(frame, pose.xy[i], pose.conf[i], min_conf)
-            else:  # undetected OR too few solid joints: never show bare video unmarked
+            if pose.detected[i]:  # draw what was found, even when it is not usable:
+                draw_skeleton(frame, pose.xy[i], pose.conf[i], min_conf)  # shows WHY
+            if not good[i]:  # undetected, too few solid joints, or a wrist/shoulder missing
                 _border(frame, C_MISS)
             draw_number(frame, i)
             vw.write(frame)
             n += 1
+        # Inside the `with`, so a refusal deletes the half-written file. Stopping at
+        # max_frames is a prefix the caller asked for; ending early otherwise means
+        # the pose belongs to a longer video.
+        if n < len(pose) and (max_frames is None or n < max_frames):
+            raise ValueError(f"pose has {len(pose)} frames, video only {n}; "
+                             "it was extracted from a different video")
     return n

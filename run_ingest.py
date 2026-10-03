@@ -55,18 +55,25 @@ def main(argv=None, predict=None) -> int:
     print(f"{a.video.name}: {info.width}x{info.height} @ {info.fps:.3f} fps"
           + ("  [VARIABLE FRAME RATE - timing-based features are suspect]" if info.vfr else "")
           + ("  [BELOW 60 fps - see the camera-chain check]" if info.fps < 59 else ""))
+    t = info.timing
+    print("timing: UNMEASURABLE (no readable packet timestamps)" if t is None else
+          f"timing: {t.n_frames} frames, median interval {t.median_dt * 1000:.2f} ms, "
+          f"{t.n_irregular} irregular, intervals {t.min_gap:.2f}-{t.max_gap:.2f}x the median, "
+          f"drift {t.max_drift:.2f} intervals")
     a.out_dir.mkdir(parents=True, exist_ok=True)
-    pose = pose_yolo.extract(a.video, predict, name, a.max_frames)
+    pose = pose_yolo.extract(a.video, predict, name, a.max_frames, info)
     npz = a.out_dir / f"{a.video.stem}.pose.npz"
     pose.save(npz)
-    rate = pose.detected.mean()
+    n = len(pose)
+    joints = pose.usable(a.min_conf, required=())
     good = pose.usable(a.min_conf)
-    print(f"person found in {int(pose.detected.sum())}/{len(pose)} frames ({rate:.1%}); "
-          f"USABLE (>= {pose_yolo.USABLE_MIN_JOINTS} joints at conf >= {a.min_conf}): "
-          f"{int(good.sum())} ({good.mean():.1%}) -> {npz}")
+    print(f"person found in {int(pose.detected.sum())}/{n} frames ({pose.detected.mean():.1%}); "
+          f">= {pose_yolo.USABLE_MIN_JOINTS} joints at conf >= {a.min_conf}: "
+          f"{int(joints.sum())} ({joints.mean():.1%}); USABLE (and both wrists and "
+          f"shoulders): {int(good.sum())} ({good.mean():.1%}) -> {npz}")
     if not a.no_overlay:
         mp4 = a.out_dir / f"{a.video.stem}.overlay.mp4"
-        print(f"overlay: {overlay.render_overlay(a.video, pose, mp4, a.min_conf, a.max_frames)} "
+        print(f"overlay: {overlay.render_overlay(a.video, pose, mp4, a.min_conf, a.max_frames, info)} "
               f"frames -> {mp4}")
     return 0
 

@@ -26,10 +26,19 @@ from pathlib import Path
 import numpy as np
 
 from .data import N_JOINTS, Track
+from .punchfind import L_SHOULDER, L_WRIST, R_SHOULDER, R_WRIST
 from .video import VideoInfo, iter_frames, probe
 
 USABLE_MIN_CONF = 0.3   # same default as the overlay, so "drawn" and "usable" agree
 USABLE_MIN_JOINTS = 8   # of 17; below this the pose is a guess, not a measurement
+# The joints the wrist-speed rule differences. Eight solid joints say nothing if
+# the wrists are among the guessed ones: a guessed wrist that jumps reads as a punch.
+# Hips are read too (`body_scale`), but only through a median over the whole
+# track, which a few guessed hips cannot move, so they are not required per frame.
+# Requiring BOTH wrists also drops frames where only the far one is hidden (common
+# in a three-quarter view); per-hand masking in the punch finder would recover the
+# visible hand's punches, and `Track.conf` is carried so that it can.
+REQUIRED_JOINTS = (L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST)
 PERSON_IOU_KEEP = 0.3   # a box overlapping last frame's by this much is "the same boxer"
 CONTINUITY_BONUS = 2.0  # ... and its area counts double, so a bigger bystander can't steal the track
 
@@ -65,23 +74,31 @@ class PoseSequence:
             raise ValueError("width and height must be positive")
         if not np.all(np.isfinite(self.xy[self.detected])):
             raise ValueError("a frame marked detected has non-finite coordinates")
+        if not np.all((self.conf >= 0) & (self.conf <= 1)):  # a loaded file is untrusted; NaN fails
+            raise ValueError("joint confidence must lie in [0, 1]")
 
     def __len__(self) -> int:
         return len(self.detected)
 
     def usable(self, min_conf: float = USABLE_MIN_CONF,
-               min_joints: int = USABLE_MIN_JOINTS) -> np.ndarray:
-        """Frames worth trusting: detected AND at least `min_joints` joints at or above
-        `min_conf`. `detected` only says a box was found -- on the first real clip 15%
-        of detected frames had under 5 solid joints (a blurred lens, a partial body).
+               min_joints: int = USABLE_MIN_JOINTS,
+               required: "tuple[int, ...]" = REQUIRED_JOINTS) -> np.ndarray:
+        """Frames worth trusting: detected, at least `min_joints` joints at or above
+        `min_conf`, AND every joint in `required` (both shoulders and wrists) among
+        them. `detected` only says a box was found -- on the first real clip 15% of
+        detected frames had under 8 solid joints (a blurred lens, a partial body).
         Downstream code should gate on this, not on `detected`."""
-        return self.detected & ((self.conf >= min_conf).sum(axis=1) >= min_joints)
+        solid = self.conf >= min_conf
+        return (self.detected & (solid.sum(axis=1) >= min_joints)
+                & solid[:, list(required)].all(axis=1))
 
-    def to_track(self, usable_only: bool = False) -> Track:
-        """Detected frames (or only `usable` ones); gaps survive as jumps in `frame_ids`."""
-        ids = np.flatnonzero(self.usable() if usable_only else self.detected)
+    def to_track(self, usable_only: bool = True, min_conf: float = USABLE_MIN_CONF) -> Track:
+        """Usable frames by default (deny by default); `usable_only=False` keeps every
+        detected frame. Gaps survive as jumps in `frame_ids`; confidence travels along.
+        Pass the same `min_conf` the run reported with, or the two sets differ."""
+        ids = np.flatnonzero(self.usable(min_conf) if usable_only else self.detected)
         return Track(frame_ids=ids, xy=self.xy[ids].astype(np.float64), fps=self.fps,
-                     source=self.source)
+                     source=self.source, conf=self.conf[ids].astype(np.float64))
 
     def save(self, path) -> None:
         np.savez_compressed(path, xy=self.xy, conf=self.conf, detected=self.detected,
@@ -165,10 +182,12 @@ def yolo_predictor(model, conf: float = 0.25, device: str = "cpu"):
     return predict
 
 
-def extract(video, predict, model_name: str = "", max_frames: "int | None" = None) -> PoseSequence:
-    """Run `predict` over every frame and keep one person per frame."""
+def extract(video, predict, model_name: str = "", max_frames: "int | None" = None,
+            info: "VideoInfo | None" = None) -> PoseSequence:
+    """Run `predict` over every frame and keep one person per frame. `info` is
+    `probe(video)`, passed in to spare a second packet scan."""
     video = Path(video).resolve()
-    info: VideoInfo = probe(video)
+    info = info or probe(video)
     xs, cs, det = [], [], []
     prev = None
     for frame in iter_frames(video, info, max_frames):

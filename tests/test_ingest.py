@@ -75,6 +75,106 @@ check("frames arrive in file order",
       all(abs(int(f.mean()) - (20 + 10 * i)) <= 2 for i, f in enumerate(frames)))
 check("max_frames stops early without error", len(list(video.iter_frames(clip, info, 5))) == 5)
 
+print("video timing (VFR is measured, not inferred)")
+check("a constant-rate clip is measured and not flagged",
+      info.timing is not None and info.timing.n_frames == N and info.timing.n_irregular == 0
+      and not info.vfr, str(info.timing))
+# The case the old metadata test missed: nominal 60, one frame dropped in 600, so
+# the average is 59.9 -- within the old 0.5 fps tolerance of the nominal rate.
+drop = tmp / "drop.mp4"
+ffmpeg("-f", "lavfi", "-i", f"color=c=gray:s={W}x{H}:r=60", "-frames:v", "600",
+       "-vf", "select='not(eq(n\\,300))'", "-fps_mode", "passthrough",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", str(drop))
+dinfo = video.probe(drop)
+check("control: the dropped-frame clip's average rate is within 0.5 fps of 60 "
+      "(the old check would pass it)", abs(dinfo.fps - 60) < 0.5, str(dinfo.fps))
+check("a dropped frame at 60 fps is flagged VFR", dinfo.vfr, str(dinfo.timing))
+check("... as exactly one irregular interval, two frames long",
+      dinfo.timing.n_irregular == 1 and abs(dinfo.timing.max_gap - 2.0) < 0.05, str(dinfo.timing))
+# Millisecond timestamps make 60 fps intervals alternate 16/17 ms (V6 does the same
+# at 41/42 ms). That is rounding, not a variable rate, and must not be flagged.
+jit = tmp / "jitter.mp4"
+ffmpeg("-f", "lavfi", "-i", f"color=c=gray:s={W}x{H}:r=60", "-frames:v", "120",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-video_track_timescale", "1000", str(jit))
+jinfo = video.probe(jit)
+check("control: the jitter clip really has unequal intervals",
+      jinfo.timing is not None and jinfo.timing.min_gap < 0.99, str(jinfo.timing))
+check("millisecond rounding jitter is not flagged VFR", not jinfo.vfr, str(jinfo.timing))
+# A phone dropping 30 -> 24 fps in low light: every interval is only 0.25x off the
+# median, so the per-interval check alone passes it (found in review, iteration 2).
+sw = tmp / "switch.mp4"
+ffmpeg("-f", "lavfi", "-i", f"color=c=gray:s={W}x{H}:r=30", "-frames:v", "240",
+       # Without a 1/600 time base in the filter AND the encoder, 1/24 s rounds to 1/15.
+       "-vf", "settb=1/600,setpts='if(lt(N\\,120)\\,N/30\\,4+(N-120)/24)/TB'",
+       "-fps_mode", "passthrough", "-enc_time_base:v", "1/600", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-video_track_timescale", "600", str(sw))
+swinfo = video.probe(sw)
+check("control: a 30 -> 24 fps switch has no irregular interval",
+      swinfo.timing is not None and swinfo.timing.n_irregular == 0, str(swinfo.timing))
+check("a 30 -> 24 fps switch is flagged VFR, by drift", swinfo.vfr
+      and swinfo.timing.max_drift > video.MAX_DRIFT, str(swinfo.timing))
+# A stream-copy cut at a non-keyframe keeps the earlier frames as discard packets.
+gop = tmp / "gop.mp4"
+ffmpeg("-f", "lavfi", "-i", f"color=c=gray:s={W}x{H}:r=60", "-frames:v", "300", "-g", "120",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", str(gop))
+cut = tmp / "cut.mp4"
+ffmpeg("-ss", "1.5", "-i", str(gop), "-c", "copy", str(cut))
+packets = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+                          "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(cut)],
+                         capture_output=True, text=True).stdout.strip()
+cinfo = video.probe(cut)
+decoded = sum(1 for _ in video.iter_frames(cut, cinfo))
+check("control: the cut clip holds more packets than it decodes to",
+      int(packets) > decoded, f"{packets} packets, {decoded} decoded")
+check("discard packets are excluded: timing counts the frames actually decoded",
+      cinfo.timing is not None and cinfo.timing.n_frames == decoded and not cinfo.vfr,
+      f"{cinfo.timing} vs {decoded} decoded")
+
+
+def timing_from(stdout: bytes, rc: int = 0):
+    real = video.subprocess.run
+    video.subprocess.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, rc, stdout, b"")
+    try:
+        return video.frame_timing(clip)
+    finally:
+        video.subprocess.run = real
+
+
+check("control: well-formed timestamps parse", timing_from(b"0.0\n0.5\n1.0\n") is not None)
+check("missing timestamps (N/A) -> unmeasurable, not a guess",
+      timing_from(b"0.0\nN/A\n1.0\n") is None)
+check("duplicated timestamps -> unmeasurable", timing_from(b"1.0\n1.0\n1.0\n") is None)
+check("non-text ffprobe output -> unmeasurable", timing_from(b"\xff\xfe\x00junk") is None)
+check("ffprobe failing -> unmeasurable", timing_from(b"0.0\n0.5\n1.0\n", rc=1) is None)
+check("infinite timestamps -> unmeasurable", timing_from(b"0.0\ninf\n1.0\n") is None)
+skew = timing_from("\n".join(f"{round(i * 0.0417, 3):.3f}" for i in range(2000)).encode())
+check("control: constant skew puts the median (42 ms) off the true rate (41.7 ms)",
+      abs(skew.median_dt - 0.042) < 1e-9, str(skew))
+check("constant skew is regular: drift is measured at the mean rate, not the median",
+      skew.regular and skew.max_drift < 0.1, str(skew))
+check("packets flagged D are left out of the timing",
+      timing_from(b"-1.0,KD_\n0.0,K__\n0.5,___\n1.0,___\n").n_frames == 3)
+real_cap = video.MAX_TIMING_PACKETS
+video.MAX_TIMING_PACKETS = 3
+try:
+    check("more packets than the cap -> refused unparsed, so unmeasurable",
+          timing_from(b"0.0\n0.5\n1.0\n1.5\n") is None
+          and timing_from(b"0.0\n0.5\n1.0\n") is not None)
+finally:
+    video.MAX_TIMING_PACKETS = real_cap
+real_ft = video.frame_timing
+video.frame_timing = lambda p: None
+try:
+    check("probe treats unmeasurable timing as VFR (deny by default)", video.probe(clip).vfr)
+finally:
+    video.frame_timing = real_ft
+off = video.Timing(N, 1 / 60, 0, 1.0, 1.0, 0.0, 60 * 1.01)  # regular, but 1% off the container
+video.frame_timing = lambda p: off
+try:
+    check("a regular clip whose measured rate is 1% off the container's average is VFR",
+          off.regular and video.probe(clip).vfr)
+finally:
+    video.frame_timing = real_ft
+
 rot = tmp / "rot.mp4"
 ffmpeg("-display_rotation", "90", "-i", str(clip), "-c", "copy", str(rot))
 rinfo = video.probe(rot)
@@ -211,6 +311,8 @@ check("predictor received frames in RGB file order", seen == sorted(seen) and le
 trk = ps.to_track()
 check("to_track keeps only detected frames, gaps as frame-id jumps",
       list(trk.frame_ids) == [0, 1, 2, 5, 6, 8, 9, 10, 11] and trk.fps == 60.0)
+check("to_track carries joint confidence, row for row",
+      trk.conf is not None and trk.conf.shape == (9, N_JOINTS) and np.allclose(trk.conf, 0.9))
 f = tmp / "p.npz"
 ps.save(f)
 back = PoseSequence.load(f)
@@ -223,6 +325,23 @@ raises("a 'detected' frame with NaN coordinates is refused",
                             np.ones(2, bool), 30, 9, 9))
 raises("fps of zero is refused",
        lambda: PoseSequence(np.zeros((2, 17, 2)), np.zeros((2, 17)), np.ones(2, bool), 0, 9, 9))
+raises("confidence above 1 is refused",
+       lambda: PoseSequence(np.zeros((2, 17, 2)), np.full((2, 17), 2.0), np.ones(2, bool), 30, 9, 9))
+raises("NaN confidence is refused",
+       lambda: PoseSequence(np.zeros((2, 17, 2)), np.full((2, 17), np.nan), np.ones(2, bool), 30, 9, 9))
+badconf = tmp / "badconf.npz"
+np.savez(badconf, xy=ps.xy, conf=np.full_like(ps.conf, -1.0), detected=ps.detected, fps=60.0,
+         width=W, height=H, source="x", model="x")
+raises("a pose file with out-of-range confidence is refused on load",
+       lambda: PoseSequence.load(badconf))
+from boxingvi.data import Track  # noqa: E402
+raises("a Track with confidence of the wrong shape is refused",
+       lambda: Track(np.arange(3), np.zeros((3, N_JOINTS, 2)), 30.0, conf=np.ones((3, 5))))
+raises("a Track with NaN confidence is refused",
+       lambda: Track(np.arange(3), np.zeros((3, N_JOINTS, 2)), 30.0,
+                     conf=np.full((3, N_JOINTS), np.nan)))
+check("a Track with no confidence (V6) is still accepted",
+      Track(np.arange(3), np.zeros((3, N_JOINTS, 2)), 30.0).conf is None)
 pickled = tmp / "evil.npz"
 np.savez(pickled, xy=np.array([{"a": 1}], dtype=object))
 raises("a pickled array in a pose file is refused (allow_pickle off)",
@@ -249,16 +368,27 @@ except (RuntimeError, Exception) as e:  # ...then fails in ultralytics (absent o
 print("usable vs detected")
 cu = np.full((N, N_JOINTS), 0.9)
 cu[1, :] = 0.05                    # detected, but a blurred lens: nothing solid
-cu[2, :10] = 0.05                  # 7 solid joints: just under the bar
-cu[5, :9] = 0.05                   # 8 solid joints: exactly at the bar
+# The count bar, tested with shoulders (5, 6) and wrists (9, 10) kept solid so the
+# required-joint rule cannot be what decides these two frames.
+cu[2, [0, 1, 2, 3, 4, 7, 8, 11, 12, 13]] = 0.05   # 7 solid joints: just under the bar
+cu[5, [0, 1, 2, 3, 4, 7, 8, 11, 12]] = 0.05       # 8 solid joints: exactly at the bar
+cu[6, 9] = 0.05                    # 16 solid joints, but the LEFT WRIST is a guess
+cu[8, 6] = 0.05                    # 16 solid joints, but the RIGHT SHOULDER is a guess
 pu = PoseSequence(np.where(ps.detected[:, None, None], ps.xy, 0.0), cu, ps.detected, 60.0, W, H)
 u = pu.usable()
 check("a detected frame with no solid joints is NOT usable", pu.detected[1] and not u[1])
 check("7 solid joints is not usable; 8 is", not u[2] and u[5])
+check("16 solid joints with an unsure wrist is NOT usable", pu.detected[6] and not u[6])
+check("16 solid joints with an unsure shoulder is NOT usable", pu.detected[8] and not u[8])
+check("... and both are usable when no joint is required (the old, count-only rule)",
+      pu.usable(required=())[6] and pu.usable(required=())[8])
 check("an undetected frame is never usable", not u[3] and not u[4] and not u[7])
 check("usable is a subset of detected", not (u & ~pu.detected).any())
-check("to_track(usable_only) drops the shaky frames, plain to_track keeps them",
-      1 in pu.to_track().frame_ids and 1 not in pu.to_track(usable_only=True).frame_ids)
+check("to_track drops unusable frames by default; usable_only=False keeps every detected one",
+      {1, 2, 6, 8}.isdisjoint(pu.to_track().frame_ids)
+      and {1, 2, 6, 8} <= set(pu.to_track(usable_only=False).frame_ids))
+check("to_track honours the run's min_conf (0.04 admits the 0.05 frames)",
+      {1, 2, 6, 8} <= set(pu.to_track(min_conf=0.04).frame_ids))
 
 print("overlay")
 img = np.zeros((H, W, 3), np.uint8)
@@ -302,13 +432,32 @@ short = PoseSequence(ps.xy[:5], ps.conf[:5], ps.detected[:5], 60.0, W, H, "x", "
 raises("overlay refuses a pose shorter than the video",
        lambda: overlay.render_overlay(clip, short, tmp / "short.mp4"))
 check("... and leaves no half-written file behind", not (tmp / "short.mp4").exists())
+long_ = PoseSequence(np.concatenate([ps.xy, ps.xy[:5]]), np.concatenate([ps.conf, ps.conf[:5]]),
+                     np.concatenate([ps.detected, ps.detected[:5]]), 60.0, W, H, "x", "x")
+raises("overlay refuses a pose LONGER than the video (it belongs to another video)",
+       lambda: overlay.render_overlay(clip, long_, tmp / "long.mp4"))
+check("... and leaves no half-written file behind", not (tmp / "long.mp4").exists())
+check("a max_frames prefix of a longer pose is allowed (the caller asked for it)",
+      overlay.render_overlay(clip, long_, tmp / "pre.mp4", max_frames=5) == 5)
+raises("max_frames past the end of both does not excuse a longer pose",
+       lambda: overlay.render_overlay(clip, long_, tmp / "past.mp4", max_frames=10 * N))
+check("max_frames past the end of both, equal lengths: every frame written",
+      overlay.render_overlay(clip, ps, tmp / "past2.mp4", max_frames=10 * N) == N)
+slow = PoseSequence(ps.xy, ps.conf, ps.detected, 30.0, W, H, "x", "x")
+raises("overlay refuses a pose at a different frame rate",
+       lambda: overlay.render_overlay(clip, slow, tmp / "slow.mp4"))
 
 ovb = tmp / "ovb.mp4"
 overlay.render_overlay(clip, pu, ovb)
 bf = list(video.iter_frames(ovb, video.probe(ovb)))
 red = lambda f: f[2, 40, 0] > 150 and f[2, 40, 1] < 90
-check("overlay borders a detected-but-unusable frame (nothing drawn there)",
-      red(bf[1]) and red(bf[2]) and not red(bf[5]) and not red(bf[0]))
+check("overlay borders every unusable frame (no joints, too few, unsure wrist or shoulder)",
+      red(bf[1]) and red(bf[2]) and red(bf[6]) and red(bf[8]) and not red(bf[5])
+      and not red(bf[0]))
+sx, sy = np.round(GT[5]).astype(int)  # left shoulder: solid on frame 6, well inside the border
+check("an unusable frame still shows what WAS found (skeleton drawn under the border)",
+      bf[6][sy, sx, 2] > 180 and frames[6][sy, sx, 2] < 120,
+      f"overlay {bf[6][sy, sx]} vs source {frames[6][sy, sx]}")
 
 print("run_ingest CLI")
 d = tmp / "outdir"

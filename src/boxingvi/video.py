@@ -24,6 +24,44 @@ import numpy as np
 
 MAX_PIXELS = 3840 * 2160  # one 4K frame; anything bigger is refused, not resized
 PROBE_TIMEOUT_S = 30
+TIMING_TIMEOUT_S = 300   # a packet scan reads no pixels: 46,705 packets take ~2 s
+# ~9 h at 60 fps; beyond this the scan is refused, not parsed. This bounds the parse,
+# not the capture: ffprobe's output is buffered whole first, so a crafted file with
+# tens of millions of packets costs memory until the timeout. Accepted -- the input
+# is our own footage, and such a file would itself be enormous.
+MAX_TIMING_PACKETS = 2_000_000
+MAX_RATE_MISMATCH = 0.001  # measured mean rate vs the container's average rate
+IRREGULAR_DT = 0.5       # an interval this many median intervals off is a drop or a duplicate
+MAX_DRIFT = 1.0          # ... and no frame may sit more than one interval off constant-rate time
+
+
+@dataclass(frozen=True)
+class Timing:
+    """Measured frame timing, from the packet timestamps of the probed stream.
+
+    Two checks, because each misses what the other catches. Per interval: a
+    dropped frame (2x) or a duplicate (0x) is far outside IRREGULAR_DT, while
+    rounding jitter (V6 alternates 41 and 42 ms) is far inside it. Cumulative: a
+    rate change (a phone dropping 30 -> 24 fps in low light) moves each interval
+    only 0.25x, but frames drift seconds away from i / fps, which is what every
+    per-second feature assumes. Drift is measured against the clip's own MEAN
+    rate (the line through its first and last frame), not the median: V6's median
+    is 42 ms against a true 41.7 ms, and i x median drifts ~325 frames over V6.
+
+    Not detectable here: a slow-motion export already retimed onto a regular
+    timeline (its timestamps are regular; only the motion is slowed).
+    """
+    n_frames: int       # frames the decoder will output (packets flagged discard excluded)
+    median_dt: float    # seconds
+    n_irregular: int    # intervals more than IRREGULAR_DT median intervals off the median
+    max_gap: float      # longest interval, in median intervals (2.0 = one frame missing)
+    min_gap: float      # shortest, likewise (0.0 = a duplicated timestamp)
+    max_drift: float    # worst |t_i - constant-rate t_i|, in median intervals
+    mean_fps: float     # (n - 1) / (last pts - first pts): the rate drift is measured at
+
+    @property
+    def regular(self) -> bool:
+        return self.n_irregular == 0 and self.max_drift <= MAX_DRIFT
 
 
 @dataclass(frozen=True)
@@ -33,7 +71,8 @@ class VideoInfo:
     fps_frac: Fraction  # average rate, kept exact so 59.94 stays 60000/1001
     nb_frames: "int | None"  # container's claim; None when absent. A hint only.
     rotation: int       # degrees, as stored; already applied by the decoder
-    vfr: bool           # average and nominal rates disagree
+    vfr: bool           # frame i is NOT at time i / fps: irregular intervals, or unmeasurable
+    timing: "Timing | None" = None  # None when the timestamps could not be read
 
     @property
     def fps(self) -> float:
@@ -88,10 +127,57 @@ def probe(path) -> VideoInfo:
     if w <= 0 or h <= 0 or w * h > MAX_PIXELS:
         raise ValueError(f"{path.name}: frame size {w}x{h} is outside 1..{MAX_PIXELS} pixels")
     avg = _rate(s.get("avg_frame_rate", "0/0")).limit_denominator(1001)  # 23.976..., not 23.97603269
-    nominal = _rate(s.get("r_frame_rate", s.get("avg_frame_rate", "0/0")))
     nb = s.get("nb_frames")
     nb = int(nb) if str(nb).isdigit() else None
-    return VideoInfo(w, h, avg, nb, rot, abs(float(avg - nominal)) > 0.5)
+    # VFR is MEASURED, not inferred from metadata. The old test (average vs nominal
+    # rate differ by > 0.5 fps) passed the first phone clip: nominal 60, average
+    # 59.946. Every timing feature assumes frame i sits at i / fps, so anything we
+    # cannot confirm counts as variable (deny by default).
+    timing = frame_timing(path)
+    # Drift is measured against the clip's measured mean rate, but every consumer
+    # times frames with `avg` (the container's figure), so the two must agree too.
+    off_rate = timing is not None and abs(timing.mean_fps / float(avg) - 1) > MAX_RATE_MISMATCH
+    return VideoInfo(w, h, avg, nb, rot, timing is None or not timing.regular or off_rate, timing)
+
+
+def frame_timing(path) -> "Timing | None":
+    """Timing statistics of stream v:0, from packet timestamps (no decoding).
+
+    Returns None when the timestamps are missing or unreadable. Packets arrive in
+    decode order, so they are sorted by presentation time first. Packets flagged
+    D (discard) are dropped: a stream-copy cut at a non-keyframe keeps the frames
+    before the cut, with negative pts, for decoding only -- one 600-packet cut
+    decoded to 510 frames.
+    """
+    path = Path(path).resolve()
+    cmd = [_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path)]
+    try:
+        done = subprocess.run(cmd, capture_output=True, timeout=TIMING_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        lines = done.stdout.decode("ascii").split()
+        if len(lines) > MAX_TIMING_PACKETS:
+            return None
+        rows = [ln.split(",") for ln in lines]
+        pts = np.sort(np.array([float(r[0]) for r in rows if len(r) < 2 or "D" not in r[1]]))
+    except (ValueError, UnicodeDecodeError):  # "N/A", or not ffprobe's output at all
+        return None
+    if len(pts) < 3 or not np.all(np.isfinite(pts)):
+        return None
+    dt = np.diff(pts)
+    med = float(np.median(dt))
+    if not med > 0:
+        return None
+    off = np.abs(dt - med) / med
+    line = np.linspace(pts[0], pts[-1], len(pts))  # constant rate at the clip's mean
+    return Timing(len(pts), med, int((off > IRREGULAR_DT).sum()),
+                  float(dt.max() / med), float(dt.min() / med),
+                  float(np.abs(pts - line).max() / med),
+                  float((len(pts) - 1) / (pts[-1] - pts[0])))
 
 
 def iter_frames(path, info: "VideoInfo | None" = None, max_frames: "int | None" = None):
