@@ -287,3 +287,29 @@ so the gate has to be as trustworthy as the number.
 - The chance floor's shifted detections can land in pose gaps, and the uniform
   floor cannot. The effect is small on V6 (51 of 44k frames).
 - Everything here is one athlete, hooks and uppercuts only. See the output's caveats.
+
+## `feat/yolo-ingest-overlay` — 2026-10-02
+
+**Acceptance criteria.** (1) A video becomes a `PoseSequence` (one row per frame, gaps
+kept) and a skeleton overlay, with COCO-17 order so it converts to a `data.Track`.
+(2) The video is untrusted: size capped before allocation, rotation honoured, no
+shell, garbage and empty files refused. (3) The YOLO checkpoint is a pickle:
+refused without a pinned sha256. (4) No dependency added to the base install.
+
+**Threat sketch.** Assets: this machine and participant footage. Entry points: the
+video file, the checkpoint, the pose `.npz`. Top threats: a hostile container or
+checkpoint reaching a parser/unpickler; participant video leaking via an output
+directory that gets committed (`results/` and `*.mp4` are gitignored).
+
+### Iteration 1
+
+- **Test:** `tests/test_ingest.py`, 55 passing; `test_pipeline.py` unchanged at 260.
+- **Review (self, adversarial):** found by the tests -- `select_person` accepted a box
+  with inverted corners (positive area); fixed by testing the sides. Two of my own
+  tests could not fail (collinear joints made a bone check vacuous; a continuity case
+  the design rightly loses) -- rewritten so the precondition is asserted.
+- **Real-fact check:** BoxingVI V6/V1 probe to 23.976/24.0 fps at 1920x1080, matching
+  `NATIVE_FPS`; 300 frames decoded each.
+- **NOT verified:** the YOLO11-pose path itself (`load_yolo`, `yolo_predictor`) has not
+  run -- no ultralytics or CUDA on this machine. It is tested only through an injected
+  predictor. Needs a first run on the GPU machine with real footage.
