@@ -195,6 +195,20 @@ except (RuntimeError, Exception) as e:  # ...then fails in ultralytics (absent o
     check("correct hash (any case) passes the gate; junk then fails in the loader",
           "sha256" not in str(e), str(e))
 
+print("usable vs detected")
+cu = np.full((N, N_JOINTS), 0.9)
+cu[1, :] = 0.05                    # detected, but a blurred lens: nothing solid
+cu[2, :10] = 0.05                  # 7 solid joints: just under the bar
+cu[5, :9] = 0.05                   # 8 solid joints: exactly at the bar
+pu = PoseSequence(np.where(ps.detected[:, None, None], ps.xy, 0.0), cu, ps.detected, 60.0, W, H)
+u = pu.usable()
+check("a detected frame with no solid joints is NOT usable", pu.detected[1] and not u[1])
+check("7 solid joints is not usable; 8 is", not u[2] and u[5])
+check("an undetected frame is never usable", not u[3] and not u[4] and not u[7])
+check("usable is a subset of detected", not (u & ~pu.detected).any())
+check("to_track(usable_only) drops the shaky frames, plain to_track keeps them",
+      1 in pu.to_track().frame_ids and 1 not in pu.to_track(usable_only=True).frame_ids)
+
 print("overlay")
 img = np.zeros((H, W, 3), np.uint8)
 overlay.draw_skeleton(img, GT, np.full(N_JOINTS, 0.9))
@@ -237,6 +251,13 @@ short = PoseSequence(ps.xy[:5], ps.conf[:5], ps.detected[:5], 60.0, W, H, "x", "
 raises("overlay refuses a pose shorter than the video",
        lambda: overlay.render_overlay(clip, short, tmp / "short.mp4"))
 check("... and leaves no half-written file behind", not (tmp / "short.mp4").exists())
+
+ovb = tmp / "ovb.mp4"
+overlay.render_overlay(clip, pu, ovb)
+bf = list(video.iter_frames(ovb, video.probe(ovb)))
+red = lambda f: f[2, 40, 0] > 150 and f[2, 40, 1] < 90
+check("overlay borders a detected-but-unusable frame (nothing drawn there)",
+      red(bf[1]) and red(bf[2]) and not red(bf[5]) and not red(bf[0]))
 
 print("run_ingest CLI")
 d = tmp / "outdir"

@@ -2,8 +2,8 @@
 
 Pure numpy drawing (no OpenCV): a skeleton drawn on your own footage is the
 fastest honest check that the pose model sees what you think it sees, so the
-renderer is kept small enough to trust by reading it. Frames with no detected
-person get a red border instead of silently showing bare video, and every frame
+renderer is kept small enough to trust by reading it. Frames with no usable
+pose (none found, or too few confident joints) get a red border instead of silently showing bare video, and every frame
 carries its index so a bad stretch can be quoted to the pose code by number.
 """
 
@@ -92,14 +92,15 @@ def render_overlay(video, pose: PoseSequence, out, min_conf: float = 0.3,
     if (info.width, info.height) != (pose.width, pose.height):
         raise ValueError(f"pose is for {pose.width}x{pose.height}, video is "
                          f"{info.width}x{info.height}; not drawing a misaligned skeleton")
+    good = pose.usable(min_conf)
     n = 0
     with VideoWriter(out, info.width, info.height, info.fps_frac) as vw:
         for i, frame in enumerate(iter_frames(video, info, max_frames)):
             if i >= len(pose):
                 raise ValueError(f"video has more frames than the pose ({len(pose)})")
-            if pose.detected[i]:
+            if good[i]:
                 draw_skeleton(frame, pose.xy[i], pose.conf[i], min_conf)
-            else:
+            else:  # undetected OR too few solid joints: never show bare video unmarked
                 _border(frame, C_MISS)
             draw_number(frame, i)
             vw.write(frame)

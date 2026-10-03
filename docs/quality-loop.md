@@ -313,3 +313,15 @@ directory that gets committed (`results/` and `*.mp4` are gitignored).
 - **NOT verified:** the YOLO11-pose path itself (`load_yolo`, `yolo_predictor`) has not
   run -- no ultralytics or CUDA on this machine. It is tested only through an injected
   predictor. Needs a first run on the GPU machine with real footage.
+
+### Iteration 2 -- first real clip (2026-10-03, RTX 3060 Laptop, YOLO11m-pose)
+
+- **Real-world fact:** a 44 s, 1080x1920, 59.946 fps phone clip: person flagged in 95.5%
+  of frames, but only 84.5% had >= 8 joints at conf >= 0.3. `detected` overstated usable
+  data -- exactly the shape-vs-substance failure the gates exist for. Added
+  `PoseSequence.usable()`; the overlay border and the run summary now follow it.
+- **Test:** 61 ingest tests, 260 pipeline, all passing.
+- **Still unverified:** left/right colour convention against a known-handed stance;
+  bystander handling (no second person in the clip); fast-punch blur.
+- **Weights:** `yolo11m-pose.pt` sha256 `29b17eaf...6eb2` is trust-on-first-use; GitHub
+  publishes no asset digest, so it is NOT yet checked against an independent source.

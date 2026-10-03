@@ -30,3 +30,6 @@ venv/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Hook audit logs
+logs/

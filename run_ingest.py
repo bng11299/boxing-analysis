@@ -60,7 +60,10 @@ def main(argv=None, predict=None) -> int:
     npz = a.out_dir / f"{a.video.stem}.pose.npz"
     pose.save(npz)
     rate = pose.detected.mean()
-    print(f"person found in {int(pose.detected.sum())}/{len(pose)} frames ({rate:.1%}) -> {npz}")
+    good = pose.usable(a.min_conf)
+    print(f"person found in {int(pose.detected.sum())}/{len(pose)} frames ({rate:.1%}); "
+          f"USABLE (>= {pose_yolo.USABLE_MIN_JOINTS} joints at conf >= {a.min_conf}): "
+          f"{int(good.sum())} ({good.mean():.1%}) -> {npz}")
     if not a.no_overlay:
         mp4 = a.out_dir / f"{a.video.stem}.overlay.mp4"
         print(f"overlay: {overlay.render_overlay(a.video, pose, mp4, a.min_conf, a.max_frames)} "

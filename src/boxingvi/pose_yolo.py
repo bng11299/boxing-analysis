@@ -28,6 +28,8 @@ import numpy as np
 from .data import N_JOINTS, Track
 from .video import VideoInfo, iter_frames, probe
 
+USABLE_MIN_CONF = 0.3   # same default as the overlay, so "drawn" and "usable" agree
+USABLE_MIN_JOINTS = 8   # of 17; below this the pose is a guess, not a measurement
 PERSON_IOU_KEEP = 0.3   # a box overlapping last frame's by this much is "the same boxer"
 CONTINUITY_BONUS = 2.0  # ... and its area counts double, so a bigger bystander can't steal the track
 
@@ -67,9 +69,17 @@ class PoseSequence:
     def __len__(self) -> int:
         return len(self.detected)
 
-    def to_track(self) -> Track:
-        """Detected frames only; gaps survive as jumps in `frame_ids`."""
-        ids = np.flatnonzero(self.detected)
+    def usable(self, min_conf: float = USABLE_MIN_CONF,
+               min_joints: int = USABLE_MIN_JOINTS) -> np.ndarray:
+        """Frames worth trusting: detected AND at least `min_joints` joints at or above
+        `min_conf`. `detected` only says a box was found -- on the first real clip 15%
+        of detected frames had under 5 solid joints (a blurred lens, a partial body).
+        Downstream code should gate on this, not on `detected`."""
+        return self.detected & ((self.conf >= min_conf).sum(axis=1) >= min_joints)
+
+    def to_track(self, usable_only: bool = False) -> Track:
+        """Detected frames (or only `usable` ones); gaps survive as jumps in `frame_ids`."""
+        ids = np.flatnonzero(self.usable() if usable_only else self.detected)
         return Track(frame_ids=ids, xy=self.xy[ids].astype(np.float64), fps=self.fps,
                      source=self.source)
 
