@@ -1,0 +1,38 @@
+<!--
+  Punch labelling for solo footage (shadowboxing, bag work). Label Studio 1.23.
+
+  Label the OVERLAY video (results/ingest/<clip>.overlay.mp4), not the phone
+  original: it is H.264 at a constant frame rate, which browsers play reliably
+  (phone .mov files are often HEVC), and its true frame number is burned into
+  the top-left corner of every frame.
+
+  frameRate MUST equal the video's rate. Label Studio's default is 24, and a
+  wrong rate shifts every exported frame number without anything looking wrong
+  on screen. 59.946 is the iPhone rate measured on IMG_4395 and IMG_4406; for
+  any other camera, change it to what `run_ingest.py` prints.
+
+  How to label (scripts/import_labels.py checks all of this on import):
+    1. FRAME CHECK first: step to the frame whose burned-in number reads 100,
+       press f and click once on the timeline (a single-frame region). Do the
+       same at 2000. The importer uses the two to work out Label Studio's frame
+       numbering and to confirm frameRate; it refuses the export without them.
+    2. Each punch: one region from the first frame the fist moves toward the
+       target to the frame it is fully extended or lands. One region per punch;
+       a combination is several regions.
+    3. lead_ / rear_ name the hand: jab = lead straight, cross = rear straight.
+       A punch you cannot name: "unclear" (it still counts as a punch).
+-->
+<View>
+  <Header value="Label every punch, one region each. Mark frame-check at burned-in frames 100 and 2000 first."/>
+  <Video name="video" value="$video" frameRate="59.946" height="720" timelineHeight="140"/>
+  <TimelineLabels name="punches" toName="video">
+    <Label value="jab" hotkey="1" background="#1f77b4"/>
+    <Label value="cross" hotkey="2" background="#d62728"/>
+    <Label value="lead_hook" hotkey="3" background="#17becf"/>
+    <Label value="rear_hook" hotkey="4" background="#ff7f0e"/>
+    <Label value="lead_uppercut" hotkey="5" background="#2ca02c"/>
+    <Label value="rear_uppercut" hotkey="6" background="#9467bd"/>
+    <Label value="unclear" hotkey="u" background="#7f7f7f"/>
+    <Label value="frame-check" hotkey="f" background="#000000"/>
+  </TimelineLabels>
+</View>
