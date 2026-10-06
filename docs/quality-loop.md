@@ -446,3 +446,14 @@ Tooling to bring the GPU laptop to the same state as SLOTMACHINE: `scripts/setup
   the 2.2.6 pin (churn, not a failure); unpinned transitive packages may differ between
   machines; `-NoPose` after a full run stops checking pose packages (documented).
   Not run here: the CUDA path end to end -- that is the laptop's first bootstrap.
+
+### 2026-10-06 -- first run on the laptop (MSI, RTX 3060 Laptop, driver 617.14)
+- **The CUDA path, end to end:** `bootstrap.ps1` on a fresh pull ended `ENVIRONMENT OK`, so
+  `check_env --torch cu130 --pose` passed: torch 2.13.0+cu130, ultralytics 8.4.171, numpy
+  2.2.6, a CUDA tensor op and `torchvision.ops.nms` on the GPU. Closes the residual
+  "not run here: the CUDA path".
+- **YOLO11m-pose weights no longer trust-on-first-use:** the laptop's sha256 `29b17eaf...6eb2`
+  equals GitHub's server-computed digest for the asset in Ultralytics release `v8.4.0`
+  (42,459,307 bytes). Pinned in `docs/MACHINE-SYNC.md` section 4.
+- **Fixed:** the bootstrap summary printed the full profile path (the username); it is now
+  shortened to `~` like the inventory. Checked: 0 occurrences in the summary.

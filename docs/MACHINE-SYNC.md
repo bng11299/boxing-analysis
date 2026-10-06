@@ -61,8 +61,14 @@ All three are gitignored, so nothing Syncthing writes can reach a commit.
 Every checkpoint is a pickle and is loaded only against a pinned sha256. After a
 sync, re-run the inventory on the receiving machine and compare the hashes it
 prints with the pins. ST-GCN++: `c6e07421...` (pinned in code). YOLO11m-pose:
-trust-on-first-use from the laptop, **not yet pinned in the repo** — record the
-full hash here once read from the laptop.
+
+    yolo11m-pose.pt  sha256 29b17eaf3a3117cbea906090dbedf9159f7c6a49db58ec8b99ed2dfde1cf6eb2
+
+Independently checked 2026-10-06: equal to the server-computed digest GitHub
+publishes for the asset in the Ultralytics `v8.4.0` release
+(`api.github.com/repos/ultralytics/assets/releases`, 42,459,307 bytes). That says
+the file is byte-identical to what Ultralytics published, not that it is benign;
+the loader still refuses it unless this hash is passed and matches.
 
 ## Participant footage: not in these folders yet
 

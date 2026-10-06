@@ -41,8 +41,11 @@ if (-not $NoSetup) {
 }
 
 Write-Host "`n=== summary ===" -ForegroundColor Cyan
-Write-Host "repo:        $repo (branch $(git -C $repo branch --show-current))"
-Write-Host ("inventory:   {0}  -> {1}" -f $(if ($invCode -eq 0) { 'done' } else { "FAILED (exit $invCode)" }), $inv)
+# Pasted into chat like the inventory, so the profile path (the username) is shortened here too.
+$home_ = $env:USERPROFILE.TrimEnd('\')
+$short = { param($p) $p -replace [regex]::Escape($home_), '~' }
+Write-Host "repo:        $(& $short $repo) (branch $(git -C $repo branch --show-current))"
+Write-Host ("inventory:   {0}  -> {1}" -f $(if ($invCode -eq 0) { 'done' } else { "FAILED (exit $invCode)" }), (& $short $inv))
 if ($NoSetup) { Write-Host 'environment: skipped (-NoSetup)' }
 elseif ($envCode -eq 0) { Write-Host 'environment: ENVIRONMENT OK' -ForegroundColor Green }
 else { Write-Host "environment: BROKEN (exit $envCode) -- the lines above say what" -ForegroundColor Red }
