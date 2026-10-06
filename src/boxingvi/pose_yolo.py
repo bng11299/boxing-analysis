@@ -182,6 +182,129 @@ def yolo_predictor(model, conf: float = 0.25, device: str = "cpu"):
     return predict
 
 
+@dataclass
+class PoseTable:
+    """EVERY tracked person in every frame, one row per (frame, track id).
+
+    Two-boxer footage holds more people than boxers (a referee in the ring,
+    coaches at the side), and ByteTrack can split one person into several ids
+    across a clinch. So nothing here decides who the boxers are: that is decided
+    later, from labels (Olympic Boxing) or by the caller. Coordinates in pixels.
+    """
+
+    frame: np.ndarray       # (N,) int64 video frame index
+    track_id: np.ndarray    # (N,) int64 ByteTrack id
+    box: np.ndarray         # (N, 4) x1, y1, x2, y2
+    xy: np.ndarray          # (N, 17, 2)
+    conf: np.ndarray        # (N, 17)
+    n_frames: int
+    fps: float
+    width: int
+    height: int
+    source: str = ""
+    model: str = ""
+
+    def __post_init__(self) -> None:
+        n = len(self.frame)
+        if (self.track_id.shape != (n,) or self.box.shape != (n, 4)
+                or self.xy.shape != (n, N_JOINTS, 2) or self.conf.shape != (n, N_JOINTS)):
+            raise ValueError("pose table arrays do not have matching shapes")
+        if self.n_frames < 1 or not (np.isfinite(self.fps) and self.fps > 0) or self.width <= 0 or self.height <= 0:
+            raise ValueError("pose table needs positive frame count, fps and size")
+        if n and (self.frame.min() < 0 or self.frame.max() >= self.n_frames):
+            raise ValueError("a row's frame is outside the video")
+        if not (np.isfinite(self.xy).all() and np.isfinite(self.box).all()):
+            raise ValueError("pose table contains non-finite coordinates")
+        if not np.all((self.conf >= 0) & (self.conf <= 1)):
+            raise ValueError("joint confidence must lie in [0, 1]")
+        if len(set(zip(self.frame.tolist(), self.track_id.tolist()))) != n:
+            raise ValueError("one track id appears twice in one frame")
+
+    def ids(self) -> "list[int]":
+        """Track ids, most-seen first."""
+        u, c = np.unique(self.track_id, return_counts=True)
+        return [int(i) for i in u[np.argsort(-c, kind="stable")]]
+
+    def track(self, tid: int) -> Track:
+        """One id as a Track (with confidence), in frame order."""
+        rows = np.flatnonzero(self.track_id == tid)
+        rows = rows[np.argsort(self.frame[rows], kind="stable")]
+        return Track(frame_ids=self.frame[rows].astype(np.int64), xy=self.xy[rows].astype(np.float64),
+                     fps=self.fps, source=f"{self.source}#{tid}", conf=self.conf[rows].astype(np.float64))
+
+    def save(self, path) -> None:
+        np.savez_compressed(path, frame=self.frame, track_id=self.track_id, box=self.box, xy=self.xy,
+                            conf=self.conf, n_frames=self.n_frames, fps=self.fps, width=self.width,
+                            height=self.height, source=self.source, model=self.model)
+
+    @classmethod
+    def load(cls, path) -> "PoseTable":
+        with np.load(path, allow_pickle=False) as z:
+            return cls(frame=z["frame"].astype(np.int64), track_id=z["track_id"].astype(np.int64),
+                       box=z["box"], xy=z["xy"], conf=z["conf"], n_frames=int(z["n_frames"]),
+                       fps=float(z["fps"]), width=int(z["width"]), height=int(z["height"]),
+                       source=str(z["source"]), model=str(z["model"]))
+
+
+TRACKER_CONFIG = Path(__file__).resolve().parents[2] / "config" / "bytetrack_50fps.yaml"
+
+
+def yolo_tracker(model, conf: float = 0.1, device: str = "cpu", tracker: "str | Path" = TRACKER_CONFIG):
+    """Wrap a loaded model as track(frame_rgb) -> (boxes, kp_xy, kp_conf, ids), keeping
+    ByteTrack's state between calls (`persist=True`). That state is never reset, so
+    use ONE freshly loaded model per video; run_ingest.py processes one video per run.
+    Detections without an id come back as -1 and are dropped by `extract_tracks`."""
+    tracker = str(tracker)
+
+    def track(frame_rgb: np.ndarray):
+        r = model.track(frame_rgb[..., ::-1], persist=True, tracker=tracker, conf=conf,
+                        device=device, verbose=False)[0]
+        if r.boxes is None or r.keypoints is None or len(r.boxes) == 0:
+            return np.zeros((0, 4)), np.zeros((0, N_JOINTS, 2)), np.zeros((0, N_JOINTS)), np.zeros(0, np.int64)
+        boxes = r.boxes.xyxy.cpu().numpy()
+        kxy = r.keypoints.xy.cpu().numpy()
+        kc = r.keypoints.conf.cpu().numpy() if r.keypoints.conf is not None else np.ones(kxy.shape[:2])
+        ids = (r.boxes.id.cpu().numpy().astype(np.int64) if r.boxes.id is not None
+               else np.full(len(boxes), -1, np.int64))
+        return boxes, kxy, kc, ids
+
+    return track
+
+
+def extract_tracks(video, track, model_name: str = "", max_frames: "int | None" = None,
+                   info: "VideoInfo | None" = None) -> PoseTable:
+    """Run `track` over every frame; keep every person who has a track id and a
+    complete, finite pose. Nothing is chosen here (see PoseTable)."""
+    video = Path(video).resolve()
+    info = info or probe(video)
+    rows = {"frame": [], "track_id": [], "box": [], "xy": [], "conf": []}
+    n = 0
+    for i, frame in enumerate(iter_frames(video, info, max_frames)):
+        n = i + 1
+        boxes, kxy, kc, ids = track(frame)
+        boxes = np.asarray(boxes, np.float64).reshape(-1, 4)
+        kxy, kc, ids = np.asarray(kxy, np.float64), np.asarray(kc, np.float64), np.asarray(ids)
+        if not (len(kxy) == len(kc) == len(ids) == len(boxes)):
+            raise ValueError(f"frame {i}: the tracker returned {len(boxes)} boxes but "
+                             f"{len(kxy)} poses and {len(ids)} ids")
+        seen = set()
+        for b, p, c, t in zip(boxes, kxy, kc, ids):
+            t = int(t)
+            if t < 0 or t in seen or p.shape != (N_JOINTS, 2) or not (np.isfinite(p).all() and np.isfinite(b).all()):
+                continue  # no id yet, a duplicate id, or a broken pose: never a guessed row
+            seen.add(t)
+            rows["frame"].append(i); rows["track_id"].append(t); rows["box"].append(b)
+            rows["xy"].append(p); rows["conf"].append(np.clip(np.nan_to_num(c), 0.0, 1.0))
+    if n == 0:
+        raise ValueError(f"{video.name}: no frames could be decoded")
+    k = len(rows["frame"])
+    return PoseTable(np.asarray(rows["frame"], np.int64), np.asarray(rows["track_id"], np.int64),
+                     np.asarray(rows["box"], np.float32).reshape(k, 4),
+                     np.asarray(rows["xy"], np.float32).reshape(k, N_JOINTS, 2),
+                     np.asarray(rows["conf"], np.float32).reshape(k, N_JOINTS),
+                     n, info.fps, info.width, info.height, source=video.name, model=model_name)
+
+
 def extract(video, predict, model_name: str = "", max_frames: "int | None" = None,
             info: "VideoInfo | None" = None) -> PoseSequence:
     """Run `predict` over every frame and keep one person per frame. `info` is

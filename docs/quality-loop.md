@@ -575,3 +575,46 @@ Strict loader for the Olympic Boxing release (`src/boxingvi/olympic.py`) and an 
 - **Test:** 33; all suites green.
 - **Open:** completeness can only be tested with pose -- fast wrist bursts far from any label --
   which needs both boxers tracked (YOLO + ByteTrack), i.e. Phase 2's tracking brought forward.
+
+## `feat/two-boxer-tracking` -- 2026-10-06
+
+Every tracked person per frame (`pose_yolo.PoseTable`, `extract_tracks`, `yolo_tracker` with
+ultralytics' ByteTrack, `config/bytetrack_50fps.yaml`), `run_ingest.py --track`, a tracks
+overlay with ids, and crediting each labelled Olympic punch to a person (`olympic.attribute`,
+`olympic_attribute.py`).
+
+- **Acceptance:** (1) nobody is chosen at extraction (the ring has a referee); (2) a punch is
+  credited without using the label's hand, so the left/right convention is TESTED; (3) blocks
+  and clinches come out ambiguous, not settled arbitrarily; (4) ids on the overlay are legible.
+- **Threat sketch:** asset: per-boxer punch sets that later train and score the finder. Entry
+  points: tracker output, CVAT boxes. Top threats: a statistic that cannot fail certifying a
+  convention; an attribution rule that quietly drops one kind of punch from the training set.
+
+### Iteration 1
+- **Test:** 28 (fake tracker: two boxers + referee, ids -1 and duplicates); 8 guards bite.
+- **Review: FIX FIRST.** Blocking: the thrower was chosen BY the labelled hand's wrist, so under
+  a mirrored convention events dropped out and "labelled hand nearer" stayed high whatever was
+  true -- a gate that could not fail. Also: first-box-only distances; 10% boxer rule shape-only;
+  ByteTrack buffer 0.6 s at 50 fps and conf 0.25 starving its second pass; overlay ids clipped
+  at the edge, border only when nobody tracked (never, with a referee present).
+
+### Iteration 2
+- **Fix:** nearest wrist of ANY person, either hand, against the per-frame interpolated glove box;
+  credit only with a margin (else ambiguous); convention = share of credited punches whose
+  nearest wrist is the labelled hand. Tracker yaml (buffer 100 frames), `--track-conf 0.1`.
+  Overlay: border under 2 people; ids clamped whole and below the frame counter.
+- **Test:** a mirrored pose model gives 0% agreement vs 100% unmirrored; restoring the old
+  choice fails it. The edge-id test was wrong twice (the id still fit; then a pixel COUNT that
+  could not separate the cases) and is now a position check.
+- **Review: SHIP**, with two biases: a one-frame defender touch vetoed credit (minimum over
+  frames), which would under-represent blocks and head shots in any credited subset; and a
+  left-sorts-first tie in the thrower's own wrists inflated agreement for left-labelled punches.
+
+### Iteration 3
+- **Fix:** rank and margin on the MEDIAN distance over the event's frames (minimum kept only for
+  "reached the glove"); punches whose thrower's two wrists are equally near give no hand evidence
+  and are counted apart; ambiguous share reported by target.
+- **Test:** 34; each of 5 attribution rules reverted fails a test. All suites green.
+- **Not yet run on real footage:** the laptop smoke run (one Olympic video, `--track
+  --max-frames 3000`) is the first real-world fact: ids, boxer co-presence, credited share,
+  the convention share, and ambiguity by target.

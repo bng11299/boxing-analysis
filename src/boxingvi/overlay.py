@@ -15,13 +15,15 @@ from pathlib import Path
 import numpy as np
 
 from .data import EDGES, N_JOINTS
-from .pose_yolo import PoseSequence
+from .pose_yolo import PoseSequence, PoseTable
 from .video import VideoInfo, VideoWriter, iter_frames, probe
 
 LEFT = {1, 3, 5, 7, 9, 11, 13, 15}   # COCO-17 odd indices
 RIGHT = {2, 4, 6, 8, 10, 12, 14, 16}
 C_LEFT, C_RIGHT, C_MID = (60, 200, 255), (255, 170, 40), (255, 255, 255)
 C_MISS = (230, 40, 40)
+ID_SCALE = 3     # track ids on the tracks overlay
+ID_TOP = 26      # ids are drawn below the frame counter (rows 6-20 at scale 3)
 
 _DIGITS = {  # 3x5 bitmap font, row-major
     "0": "111101101101111", "1": "010110010010111", "2": "111001111100111",
@@ -81,6 +83,48 @@ def draw_skeleton(frame: np.ndarray, xy: np.ndarray, conf: np.ndarray,
 
 def _border(frame: np.ndarray, color, t: int = 6) -> None:
     frame[:t], frame[-t:], frame[:, :t], frame[:, -t:] = color, color, color, color
+
+
+def render_tracks_overlay(video, table: PoseTable, out, min_conf: float = 0.3,
+                          max_frames: "int | None" = None, info: "VideoInfo | None" = None,
+                          min_people: int = 2) -> int:
+    """Every tracked person's skeleton, with their track id drawn at the top-left
+    of their box, so an id switch is visible by eye. Frames with fewer than
+    `min_people` tracked (two boxers) get the red border: with a referee in the
+    ring, "nobody tracked" almost never happens and would hide a lost boxer.
+    Refuses a table from a different video, like render_overlay."""
+    video, out = Path(video).resolve(), Path(out).resolve()
+    if out == video:
+        raise ValueError("refusing to overwrite the input video with its own overlay")
+    info = info or probe(video)
+    if (info.width, info.height) != (table.width, table.height) or abs(table.fps - info.fps) > 1e-6:
+        raise ValueError("the pose table was extracted from a different video (size or frame rate)")
+    order = np.argsort(table.frame, kind="stable")
+    starts = np.searchsorted(table.frame[order], np.arange(table.n_frames + 1))
+    n = 0
+    with VideoWriter(out, info.width, info.height, info.fps_frac) as vw:
+        for i, frame in enumerate(iter_frames(video, info, max_frames)):
+            if i >= table.n_frames:
+                raise ValueError(f"video has more frames than the pose table ({table.n_frames})")
+            rows = order[starts[i]:starts[i + 1]]
+            for r in rows:
+                draw_skeleton(frame, table.xy[r], table.conf[r], min_conf)
+                tid = int(table.track_id[r])
+                width = len(str(tid)) * 4 * ID_SCALE
+                # Whole number on screen (draw_number silently drops digits that do not
+                # fit), and below the frame counter in the top-left corner.
+                x1 = int(min(max(table.box[r, 0], 0), info.width - width - 1))
+                y1 = int(min(max(table.box[r, 1] - 18, ID_TOP), info.height - 5 * ID_SCALE - 1))
+                draw_number(frame, tid, x=x1, y=y1, scale=ID_SCALE)
+            if len(rows) < min_people:
+                _border(frame, C_MISS)
+            draw_number(frame, i)
+            vw.write(frame)
+            n += 1
+        if n < table.n_frames and (max_frames is None or n < max_frames):
+            raise ValueError(f"pose table has {table.n_frames} frames, video only {n}; "
+                             "it was extracted from a different video")
+    return n
 
 
 def render_overlay(video, pose: PoseSequence, out, min_conf: float = 0.3,
