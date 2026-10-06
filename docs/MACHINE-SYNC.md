@@ -72,16 +72,17 @@ the loader still refuses it unless this hash is passed and matches.
 
 ## Participant footage: not in these folders yet
 
-The approved protocol (FA26-22-NG, item 15) keeps data "on the researcher's
-computer" with no cloud copies. Syncthing is not cloud storage, but a second
-machine is a second computer. Until Hector confirms that is covered:
+The approved protocol (FA26-22-NG, item 15) keeps data "password-protected and
+encrypted on the researcher's computer", with no cloud copies. **Hector confirmed
+2026-10-06 that the GPU laptop counts as the researcher's computer**, so
+participant footage may live on both machines. What item 15 still requires:
 
-- participant footage lives in `~\comps-participant-data\`, **outside** every
-  synced folder, on the machine that processes it;
-- both machines need BitLocker on before it is stored anywhere (the inventory
-  reports it from an admin shell);
-- when it does sync, turn off relaying and global discovery and pair by LAN
-  address, so the traffic never transits a third-party relay (item 10: footage
-  is not sent to any third party).
+- **BitLocker on, on both machines, before any participant footage is stored.**
+  The inventory reports it from an admin shell; on 2026-10-06 neither machine had
+  been checked. Until then, participant footage lives in
+  `~\comps-participant-data\`, outside every synced folder.
+- When it syncs, turn off relaying and global discovery and pair by LAN address,
+  so the traffic never transits a third-party relay (item 10: footage is not sent
+  to any third party).
 
 Your own footage and the public datasets have none of these constraints.
