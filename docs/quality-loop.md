@@ -637,3 +637,108 @@ overlay with ids, and crediting each labelled Olympic punch to a person (`olympi
   under-represents body shots and blocks; any training set drawn from it must be reweighted or
   say so. kam4_gh099681 (95% single-keyframe labels) is 82% ambiguous: its labels give the
   median rule a single frame, at contact.
+
+## `feat/boxer-linking` -- 2026-10-07
+
+Link each Olympic Boxing video's ByteTrack ids into two boxer identities (`src/boxingvi/linking.py`,
+`olympic_link.py`, a linked overlay), then the completeness test per boxer (`completeness.py`,
+`olympic_completeness.py`). ADR-0012: link first, test completeness second.
+
+- **Acceptance:** (1) from planted scenes (two boxers each in 4 fragments with gaps, a moving referee,
+  static spectators outside the ring) exactly the two boxers' fragment sets come back; (2) a chain's
+  fragments are pairwise time-disjoint and the two chains share no fragment; (3) every parameter is
+  fixed, with its reason beside it, before any real-data number is looked at; (4) the real-data gate
+  asserts facts that can fail: how many credited punches sit inside the two identities (also with half
+  the punches held out of the linking) and whether the identities are on screen together; (5) the
+  completeness test judges nothing: it counts bursts away from labels and hands a seeded sample to a human.
+- **Threat sketch:** asset: per-boxer minutes and burst counts that decide whether the referee's labels
+  are complete. Entry points: tracks `.npz` (loaded without pickle), CVAT JSON (already strict), a GoPro id
+  from the command line that becomes part of an output file name. Top threats: (a) an identity swap or a
+  referee absorbed into a boxer's track silently moves the unexplained-burst rate (a referee waving is a
+  burst); (b) a circular gate: punches drive the linking, so "most punches are inside the identities"
+  certifies itself. Mitigations: punch evidence is required for any identity; held-out share and
+  co-presence reported beside the in-sample share; the overlay exists to see swaps by eye.
+
+### Iteration 1 -- build, test, real data (as specified)
+- **Parameters** (value and reason beside each constant in `linking.py`): max gap 2 s (ByteTrack's own
+  buffer); speed limit 5 torso lengths/s + 1 of slack; fragments under 0.2 s ignored; ring = 1st-99th
+  percentile of credited glove-box centres widened by 2 torsos; a punch is worth 10 points, a second in
+  the ring 0.5, a link 1 (+ up to 3 jump, 1 gap, 2 scale).
+- **Found by the first synthetic tests, fixed before any real run:** with a free second chain, the
+  cheapest use of it was to cut the ONLY boxer in two to save a link (`CHAIN_POINTS` = 8: more than the
+  dearest plausible link, less than one punch); a chain of ring-time alone (a lone referee) could win the
+  second slot (`MIN_CHAIN_PUNCHES` = 1); `--overlay ""` was falsy and silently skipped the id check.
+- **Real-world facts, 29 videos, as specified (`results/olympic_linking.json`):** both boxers identified in
+  50.5% of frames (frames-weighted; median video 57%), boxer A 76.6%, B 65.4%, either 91.5%.
+  **65.4% of the 2,423 credited punches are on A or B (901 / 684); 50.7% with half the punches held out of the
+  linking.** Co-presence (both identified, over the shorter identity's time) median 78%; one video
+  (GH208416) 0%: its identity B is two fragments and A starts at frame 4557. Fragments per identity: median
+  27 / 19 of a median 541 ids. Longest stretch with a boxer unidentified: median 4.2 s (A) and 13.9 s (B),
+  worst 91 s and 156 s. Diagnosis (`credited punches by fate`): of 2,423, 1,585 inside, 803 in
+  eligible fragments that overlap a chain in time (the chain was cut elsewhere), 12 unreachable, 23 outside
+  the ring or too short. A chain is one path, so a stretch longer than 2 s with the boxer untracked ends it.
+
+### Iteration 2 -- one change made AFTER seeing the real-data numbers (declared)
+- **Change:** re-acquisition links (`reacquire_s`, off by default; `--reacquire` = 60 s): across gaps
+  longer than 2 s, no speed limit (after 2 s a boxer can be anywhere in the ring), a flat price (4 points
+  + 0.05/s). Reason: the diagnosis above, not a number to hit. It was NOT tuned: one value (a round's rest)
+  was chosen and run once; no other parameter changed after seeing results.
+- **Result (`results/olympic_linking.reacquire.json`):** credited punches on A or B 81.7% (59.1% held
+  out), but both-identified falls to 44.5% (median 43%) and co-presence to 69%: the chain hops to
+  punch-bearing fragments and skips punch-less time. It buys punches, not minutes, and the A/B labels are then only
+  reliable between hops (nothing recognises a person). Hence off by default; both are reported.
+- **Held out is the honest figure.** The in-sample share is high partly because punches choose the chains.
+  Half held out, 51% (59% with re-acquisition) of the other half's credited punches are on the two identities
+  -- a lower bound, because a fragment whose only punch is held out has no evidence left.
+
+### Iteration 3 -- completeness (`results/olympic_completeness*.json`, sample `*.csv`)
+- Rule: `results/punch_finder_v6.json` "chosen" (relative speed > 3.62 body lengths/s, 0.4 s apart) on each
+  boxer's own rows, dropouts <= 0.05 s bridged, tolerance 0.1 s to ANY labelled punch of the video.
+- **As specified:** 8,135 bursts on the two identified boxers (148 identified boxer-minutes: A 79.8, B 68.2);
+  **5,506 are more than 0.1 s from any of the 4,605 labelled punches = 37.2 per identified boxer-minute**
+  (A 38.1, B 36.1), against 31.1 labelled punches per boxer-minute; 2,705 of the 4,605 labelled punches have a
+  burst within 0.1 s. With re-acquisition: 8,694 / 5,647 / 39.8 per boxer-minute, 3,035 labelled punches seen.
+- **Not a finding about the labels.** On V6's tuning half the same rule had precision 0.46, i.e. over half its
+  detections were not labelled punches; footwork, guard changes and slips move a wrist fast. "Unexplained" is an upper bound on
+  unlabelled punches until a human classifies the sample (40 bursts, seed 20261007, stratified over videos):
+  `results/olympic_completeness_sample.csv`, column `user_label` empty. Nothing was viewed or judged here.
+
+### Mutation check (each guard reverted in a copy; `tests/test_linking.py` must fail)
+| Guard reverted | Result | First failing test |
+|---|---|---|
+| gap limit (reach unbounded) | caught, 4 fail | gap limit inclusive; 3 s hole never bridged |
+| speed limit (always plausible) | caught, 6 | 139 px plausible / 141 px not |
+| forward-only: both `lo` and `gap < 1` removed | caught, 2 | overlap by 5 frames; same-frame start |
+| forward-only: either one alone | SURVIVED (redundant by design: each guards the other) | -- |
+| node capacity 2 (overlapping chains) | caught, 7 | one boxer: second identity must be empty |
+| chain start fee 0 | caught, 3 | same test (the only boxer gets cut in two) |
+| punches worth nothing | caught (crash + fails) | exact boxer sets recovered |
+| a chain needs no punch | caught, 1 | ring time valued 10x: no identity without a punch |
+| ring prior: eligibility | caught, 3 | punches wrongly credited to a spectator |
+| ring prior: share as reward weight | caught, 2 | reward = 10/punch + 0.5/s x ring share |
+| credited ids must be in the table | caught, 1 | attributions from another video refused |
+| re-acquisition: ordinary gap un-gated | caught, 5 | speed-limit tests |
+| overlay: table vs video size/rate | caught, 2 | refuses another frame rate / size |
+| overlay: linking vs table | caught, 2 | other source / other length |
+| overlay: table longer than video | caught, 1 | longer recording refused |
+| completeness: boxer rows by membership | caught (crash) | frame ids not increasing |
+| completeness: tolerance inclusive | caught, 1 | 5 frames explains, 6 do not |
+| completeness: explained flag | caught, 4 | planted bursts |
+| CLI: `--overlay` id check | caught, 5 | `../GH000001` etc. refused |
+| CLI: refuse incomplete tracks | caught, 1 | a `--max-frames` table refused |
+
+- **Test:** `tests/test_linking.py` 130 (new); all other suites unchanged and green (tracks 34, olympic 33,
+  hands 38, labels 50, ingest 109, env 36, pipeline 260, machine scripts 38).
+- **Security pass:** tracks loaded by `PoseTable.load` (`allow_pickle=False`); the only subprocesses are in
+  `video.py` (argument lists); the GoPro id is `[A-Za-z0-9]{1,32}` before it becomes a file name, the overlay
+  is written only inside `--tracks`, refuses to overwrite the input, and refuses a table or linking from
+  another video; stale attributions (ids not in the table), negative counts, NaN parameters and an incomplete
+  tracks file are refused; JSON written with `allow_nan=False`; a video that fails is reported and the exit code is 1.
+- **Residual risks:** (1) no appearance model: after two people cross with ids lost, the nearer continuation
+  wins and the boxers swap (asserted in the tests as the actual behaviour); (2) a referee fragment beside a
+  boxer's hole can be absorbed (punch evidence is the only separator), and a punch credited to the referee
+  makes his fragment worth 10 points; (3) coverage is deliberately conservative (ring time is worth 0.5/s), so
+  holes of seconds remain; (4) a burst on a bridged or fragment-handover frame is not flagged; (5) the rule is
+  V6's (AlphaPose, 24 fps, hooks/uppercuts) and untuned for 50 fps sparring; (6) the overlay for GH078416
+  (`results/ingest/olympic/GH078416.linked.overlay.mp4`) has NOT been viewed by anyone yet: identity swaps in
+  the real data are unmeasured.
