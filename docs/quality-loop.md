@@ -618,3 +618,22 @@ overlay with ids, and crediting each labelled Olympic punch to a person (`olympi
 - **Not yet run on real footage:** the laptop smoke run (one Olympic video, `--track
   --max-frames 3000`) is the first real-world fact: ids, boxer co-presence, credited share,
   the convention share, and ambiguity by target.
+
+### 2026-10-07 -- first real-world run (29 Olympic videos, RTX 3060 laptop, YOLO11m-pose + ByteTrack)
+- **Coverage:** 28 of 29 tables complete; GH088416 holds only its first 3,000 of 12,524 frames
+  (the smoke run's file: the full run's resume check tested that a file existed, not that it was
+  complete). 303,250 of 312,774 frames tracked.
+- **Crowd:** a median of 8 people per frame and 541 track ids per video (116-916): spectators,
+  judges and coaches are in view, and boxers fragment across many ids. The two most-credited ids
+  take 7-33% of a video's credited punches and are almost never on screen together, so boxer
+  identity CANNOT be read from ids yet: tracklet linking is Phase 2 work, now measured.
+- **Attribution (4,490 punches in tracked frames):** credited 2,363 (53%), too close to call ~46%,
+  no confident wrist near the glove < 1% -- the pose stage reaches almost every labelled punch.
+- **Left/right convention, tested:** the nearest wrist is on the labelled hand in **78% of 1,756**
+  credited punches with clear hand evidence (607 ties left out). A mirrored convention would sit
+  near 0%; chance is 50%. COCO's left is the boxer's left. The 22% disagreement is the size of
+  wrist confusion at contact, worth knowing before per-hand training.
+- **Ambiguity by target:** head 41%, miss 47%, body 61%, block 64%. The credited subset therefore
+  under-represents body shots and blocks; any training set drawn from it must be reweighted or
+  say so. kam4_gh099681 (95% single-keyframe labels) is 82% ambiguous: its labels give the
+  median rule a single frame, at contact.
