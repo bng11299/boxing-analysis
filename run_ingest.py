@@ -20,7 +20,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi import overlay, pose_yolo  # noqa: E402
-from boxingvi.video import probe  # noqa: E402
+from boxingvi.video import fingerprint, probe  # noqa: E402
 
 DEFAULT_OUT = Path("results/ingest")
 
@@ -74,6 +74,7 @@ def main(argv=None, predict=None, track=None) -> int:
     a.out_dir.mkdir(parents=True, exist_ok=True)
     if a.track:
         table = pose_yolo.extract_tracks(a.video, track, name, a.max_frames, info)
+        table.video_fp = fingerprint(a.video)      # binds the table to THIS recording's content
         npz = a.out_dir / f"{a.video.stem}.tracks.npz"
         table.save(npz)
         ids = table.ids()
@@ -88,6 +89,7 @@ def main(argv=None, predict=None, track=None) -> int:
                   f"frames -> {mp4}")
         return 0
     pose = pose_yolo.extract(a.video, predict, name, a.max_frames, info)
+    pose.video_fp = fingerprint(a.video)
     npz = a.out_dir / f"{a.video.stem}.pose.npz"
     pose.save(npz)
     n = len(pose)

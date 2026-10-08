@@ -16,7 +16,7 @@ import numpy as np
 
 from .data import EDGES, N_JOINTS
 from .linking import Linking
-from .pose_yolo import PoseSequence, PoseTable
+from .pose_yolo import PoseSequence, PoseTable, verify_binding
 from .video import VideoInfo, VideoWriter, iter_frames, probe
 
 LEFT = {1, 3, 5, 7, 9, 11, 13, 15}   # COCO-17 odd indices
@@ -96,13 +96,15 @@ def render_tracks_overlay(video, table: PoseTable, out, min_conf: float = 0.3,
     of their box, so an id switch is visible by eye. Frames with fewer than
     `min_people` tracked (two boxers) get the red border: with a referee in the
     ring, "nobody tracked" almost never happens and would hide a lost boxer.
-    Refuses a table from a different video, like render_overlay."""
+    Refuses a table from a different video (size, rate, file name, and the content
+    fingerprint when the table has one), like render_overlay."""
     video, out = Path(video).resolve(), Path(out).resolve()
     if out == video:
         raise ValueError("refusing to overwrite the input video with its own overlay")
     info = info or probe(video)
     if (info.width, info.height) != (table.width, table.height) or abs(table.fps - info.fps) > 1e-6:
         raise ValueError("the pose table was extracted from a different video (size or frame rate)")
+    verify_binding(table, video)      # the same size, rate and length say nothing: name, then content
     order = np.argsort(table.frame, kind="stable")
     starts = np.searchsorted(table.frame[order], np.arange(table.n_frames + 1))
     n = 0
@@ -145,6 +147,7 @@ def render_linked_overlay(video, table: PoseTable, linking: Linking, out, min_co
     info = info or probe(video)
     if (info.width, info.height) != (table.width, table.height) or abs(table.fps - info.fps) > 1e-6:
         raise ValueError("the pose table was extracted from a different video (size or frame rate)")
+    verify_binding(table, video)      # the same size, rate and length say nothing: name, then content
     if (linking.n_frames != table.n_frames or abs(linking.fps - table.fps) > 1e-6
             or linking.source != table.source or linking.membership.shape != (table.n_frames, 2)):
         raise ValueError("the linking was made from a different pose table than this one")
@@ -199,6 +202,7 @@ def render_overlay(video, pose: PoseSequence, out, min_conf: float = 0.3,
     if abs(pose.fps - info.fps) > 1e-6:
         raise ValueError(f"pose is at {pose.fps:.3f} fps, video at {info.fps:.3f}; "
                          "it was extracted from a different video")
+    verify_binding(pose, video, check_name=False)     # content only: a hand-made sequence's name is free text
     good = pose.usable(min_conf)
     n = 0
     with VideoWriter(out, info.width, info.height, info.fps_frac) as vw:
