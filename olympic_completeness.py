@@ -2,15 +2,27 @@
 
   python olympic_completeness.py --data data/olympic --tracks results/ingest/olympic
 
-For each video: link the ids into boxers A and B (olympic_link.py), run the per-hand
-wrist-speed rule on each boxer's own track (the rule in results/punch_finder_v6.json
-"chosen"), and keep every burst more than 0.1 s from ANY labelled punch of that video.
+For each video: link the ids into boxers A and B (olympic.py/olympic_link.py), run the per-hand
+wrist-speed rule on each boxer's own segments (the rule in results/punch_finder_v6.json "chosen";
+no signal crosses a join between two track ids), and match every burst ONE-TO-ONE to a labelled
+punch within 0.1 s: first to the boxer's own labels (punches credited to that boxer), then, for the
+bursts left over, to the labels nobody could be credited with. A burst no label accounts for is
+UNEXPLAINED.
 
-Writes results/olympic_completeness.json (bursts and unexplained bursts, per video and in
-total, with the rate per identified boxer-minute) and results/olympic_completeness_sample.csv:
-a seeded sample of the unexplained bursts, stratified over videos, for YOU to watch and mark
-punch / not punch in the empty `user_label` column. Nothing is judged here: a burst without a
-label is a wrist moving fast, which a feint, a guard reset or a slip also does.
+Unexplained bursts are CANDIDATES for missed labels. The rule misses punches and fires on
+non-punches, so the count is neither an upper nor a lower bound on unlabelled punches until a
+human has classified a random sample of them. Nothing is judged here.
+
+Writes results/olympic_completeness.json and results/olympic_completeness_sample.csv: a seeded
+simple random sample (every unexplained burst, all videos pooled, has inclusion probability n/N,
+printed in the `inclusion_prob` column) for YOU to watch and mark punch / not punch in the empty
+`user_label` column.
+
+Rates (all per minute of boxer-time, and each numerator over the denominator it was counted in):
+  unexplained_per_identified_boxer_min   unexplained bursts / minutes a boxer was identified
+  own_labels_per_identified_boxer_min    labels credited to an identified boxer / the same minutes
+                                         (the like-for-like comparison with the line above)
+  labels_per_video_boxer_min             ALL labels / (2 x the video's minutes)
 """
 
 from __future__ import annotations
@@ -29,7 +41,73 @@ from boxingvi import completeness, linking, olympic  # noqa: E402
 
 DEFAULT_OUT = Path("results/olympic_completeness.json")
 DEFAULT_SAMPLE = Path("results/olympic_completeness_sample.csv")
-SAMPLE_COLUMNS = ["video", "frame", "time_s", "boxer", "hand", "user_label"]
+SAMPLE_COLUMNS = ["video", "frame", "time_s", "boxer", "hand", "inclusion_prob", "user_label"]
+
+
+def _ratio(num, den):
+    return num / den if den else None
+
+
+def _round(x, nd=3):
+    """Round for OUTPUT only; aggregation always runs on the unrounded numbers."""
+    if isinstance(x, float):
+        return round(x, nd)
+    if isinstance(x, dict):
+        return {k: _round(v, nd) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_round(v, nd) for v in x]
+    return x
+
+
+def video_row(res: dict, n_events: int, video_min: float) -> dict:
+    """One video's UNROUNDED numbers from `completeness.find_bursts` output."""
+    bursts = res["bursts"]
+    row = {"video_min": video_min, "labelled_punches": n_events, "labels": res["labels"],
+           "bursts": len(bursts), "unexplained": sum(not b.explained for b in bursts),
+           "bursts_by_match": {m: sum(b.match == m for b in bursts) for m in completeness.MATCHES},
+           "boxers": {}}
+    row["bursts_hand_agrees"] = {"agree": sum(b.hand_agrees is True for b in bursts),
+                                 "disagree": sum(b.hand_agrees is False for b in bursts)}
+    for name, info in res["boxers"].items():
+        row["boxers"][name] = dict(info) | {
+            "unexplained_per_identified_min": _ratio(info["unexplained"], info["identified_min"]),
+            "unexplained_per_signal_min": _ratio(info["unexplained"], info["signal_min"]),
+            "own_labels_per_identified_min": _ratio(info["own_labels"], info["identified_min"])}
+    return row
+
+
+def totals(ok: "list[dict]") -> dict:
+    """Pool the per-video rows. Sums of unrounded durations and counts, divided once at the end."""
+    tot = {"videos": len(ok), "video_min": sum(v["video_min"] for v in ok),
+           "labelled_punches": sum(v["labelled_punches"] for v in ok),
+           "bursts": sum(v["bursts"] for v in ok), "unexplained": sum(v["unexplained"] for v in ok),
+           "bursts_by_match": {m: sum(v["bursts_by_match"][m] for v in ok) for m in completeness.MATCHES},
+           "short_segments": sum(v["boxers"][n]["short_segments"] for v in ok for n in "AB"),
+           "bodyless_segments": sum(v["boxers"][n]["bodyless_segments"] for v in ok for n in "AB"),
+           "segments": sum(v["boxers"][n]["segments"] for v in ok for n in "AB")}
+    lab = {k: sum(v["labels"][k] for v in ok) for k in ok[0]["labels"]}
+    tot["labels"] = lab | {"unattributed_share": _ratio(lab["unattributed"], lab["total"]),
+                           "matched_to_a_burst": lab["matched_own"] + lab["matched_unattributed"]}
+    for name in "AB":
+        b = [v["boxers"][name] for v in ok]
+        im, sm = sum(x["identified_min"] for x in b), sum(x["signal_min"] for x in b)
+        u, nb, ow = sum(x["unexplained"] for x in b), sum(x["bursts"] for x in b), sum(x["own_labels"] for x in b)
+        tot[name] = {"identified_min": im, "signal_min": sm,
+                     "signal_min_left": sum(x["signal_min_left"] for x in b),
+                     "signal_min_right": sum(x["signal_min_right"] for x in b),
+                     "bursts": nb, "unexplained": u, "own_labels": ow,
+                     "bursts_by_hand": {h: sum(x["bursts_by_hand"][h] for x in b) for h in completeness.HAND_NAMES},
+                     "unexplained_by_hand": {h: sum(x["unexplained_by_hand"][h] for x in b)
+                                             for h in completeness.HAND_NAMES},
+                     "unexplained_per_identified_min": _ratio(u, im), "unexplained_per_signal_min": _ratio(u, sm),
+                     "own_labels_per_identified_min": _ratio(ow, im)}
+    im = tot["A"]["identified_min"] + tot["B"]["identified_min"]
+    own = tot["A"]["own_labels"] + tot["B"]["own_labels"]
+    tot["identified_boxer_min"] = im
+    tot["unexplained_per_identified_boxer_min"] = _ratio(tot["unexplained"], im)
+    tot["own_labels_per_identified_boxer_min"] = _ratio(own, im)
+    tot["labels_per_video_boxer_min"] = _ratio(lab["total"], 2 * tot["video_min"])
+    return tot
 
 
 def main(argv=None) -> int:
@@ -57,59 +135,50 @@ def main(argv=None) -> int:
         try:
             table, _, events, attrs = olympic_link.load_video(t, a.tracks)
             lk = linking.link_video(table, attrs, params)
-            res = completeness.find_bursts(table, lk, events, rule, video=vid)
+            res = completeness.find_bursts(table, lk, events, attrs, rule, video=vid)
         except (ValueError, FileNotFoundError, RuntimeError) as e:
             videos[t.name] = {"error": str(e)}
             failed.append(t.name)
             print(f"{t.name}: FAILED, {e}")
             continue
-        bad = [b for b in res["bursts"] if not b.explained]
-        unexplained[vid] = bad
-        row = {"labelled_punches": len(events), "labelled_with_a_burst": res["events_with_burst"], "bursts": len(res["bursts"]), "unexplained": len(bad),
-               "boxers": {}}
-        for name, info in res["boxers"].items():
-            row["boxers"][name] = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in info.items()} | {
-                "unexplained_per_identified_min": round(info["unexplained"] / info["identified_min"], 2)
-                if info["identified_min"] > 0 else None,
-                "unexplained_per_signal_min": round(info["unexplained"] / info["signal_min"], 2)
-                if info["signal_min"] > 0 else None}
+        unexplained[vid] = [b for b in res["bursts"] if not b.explained]
+        row = video_row(res, len(events), table.n_frames / table.fps / 60)
+        row["video_bound"] = bool(table.video_fp)
         videos[t.name] = row
         print(f"{t.name}: {row['bursts']} bursts, {row['unexplained']} unexplained | " + " | ".join(
             f"{n}: {i['unexplained']}/{i['bursts']} in {i['identified_min']:.1f} min" for n, i in row["boxers"].items()))
     ok = [v for v in videos.values() if "error" not in v]
     if not ok:
         raise ValueError(f"nothing to test in {a.tracks} against {a.data}")
-    tot = {"videos": len(ok), "labelled_punches": sum(v["labelled_punches"] for v in ok),
-           "labelled_with_a_burst": sum(v["labelled_with_a_burst"] for v in ok),
-           "bursts": sum(v["bursts"] for v in ok), "unexplained": sum(v["unexplained"] for v in ok)}
-    for name in ("A", "B"):
-        im = sum(v["boxers"][name]["identified_min"] for v in ok)
-        sm = sum(v["boxers"][name]["signal_min"] for v in ok)
-        b = sum(v["boxers"][name]["bursts"] for v in ok)
-        u = sum(v["boxers"][name]["unexplained"] for v in ok)
-        tot[name] = {"identified_min": round(im, 2), "signal_min": round(sm, 2), "bursts": b, "unexplained": u,
-                     "unexplained_per_identified_min": round(u / im, 3) if im else None,
-                     "unexplained_per_signal_min": round(u / sm, 3) if sm else None}
-    both_min = tot["A"]["identified_min"] + tot["B"]["identified_min"]
-    tot["unexplained_per_identified_boxer_min"] = round(tot["unexplained"] / both_min, 3) if both_min else None
-    tot["labelled_punches_per_identified_boxer_min"] = round(tot["labelled_punches"] / both_min, 3) if both_min else None
-    sample = completeness.stratified_sample(unexplained, a.sample_size, a.seed)
+    tot = totals(ok)
+    sample, population = completeness.random_sample(unexplained, a.sample_size, a.seed)
+    prob = len(sample) / population if population else None
 
     a.out.parent.mkdir(parents=True, exist_ok=True)
-    a.out.write_text(json.dumps({"rule": rule, "tolerance_s": completeness.TOL_S, "reacquire": bool(a.reacquire), "videos": videos, "all": tot,
-                                 "sample": {"n": len(sample), "seed": a.seed, "file": str(a.sample_out)}},
-                                indent=1, allow_nan=False), encoding="utf-8")
+    a.out.write_text(json.dumps(
+        {"rule": rule, "tolerance_s": completeness.TOL_S, "reacquire": bool(a.reacquire),
+         "matching": "one-to-one, nearest first: own labels, then unattributed labels; hand not required",
+         "videos": _round(videos), "all": _round(tot),
+         "sample": {"n": len(sample), "population_unexplained": population, "inclusion_prob": prob,
+                    "design": "simple random sample without replacement over all unexplained bursts",
+                    "seed": a.seed, "file": str(a.sample_out)}},
+        indent=1, allow_nan=False), encoding="utf-8")
     a.sample_out.parent.mkdir(parents=True, exist_ok=True)
     with a.sample_out.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(SAMPLE_COLUMNS)
         for b in sample:
-            w.writerow([b.video, b.frame, f"{b.time_s:.2f}", b.boxer, b.hand, ""])
-    print(f"ALL: {tot['bursts']} bursts, {tot['unexplained']} more than {completeness.TOL_S} s from any of "
-          f"{tot['labelled_punches']} labelled punches; {tot['unexplained_per_identified_boxer_min']} unexplained per "
-          f"identified boxer-minute (labelled: {tot['labelled_punches_per_identified_boxer_min']} per boxer-minute; "
-          f"{tot['labelled_with_a_burst']} of them have a burst within {completeness.TOL_S} s) "
-          f"-> {a.out}; sample of {len(sample)} -> {a.sample_out}")
+            w.writerow([b.video, b.frame, f"{b.time_s:.2f}", b.boxer, b.hand, f"{prob:.6f}", ""])
+    lab = tot["labels"]
+    print(f"ALL: {tot['bursts']} bursts on {tot['identified_boxer_min']:.1f} identified boxer-minutes, "
+          f"{tot['unexplained']} unexplained (no label within {completeness.TOL_S} s that is not already matched; "
+          f"candidates for missed labels, not a count of them) = "
+          f"{tot['unexplained_per_identified_boxer_min']:.1f} per identified boxer-minute, against "
+          f"{tot['own_labels_per_identified_boxer_min']:.1f} OWN labels per identified boxer-minute "
+          f"({lab['unattributed']} of {lab['total']} labels, {lab['unattributed_share']:.0%}, are unattributed; "
+          f"{tot['labels_per_video_boxer_min']:.1f} labels per video boxer-minute over the whole video); "
+          f"{lab['matched_to_a_burst']} labels matched to a burst ({lab['matched_own']} own, "
+          f"{lab['matched_unattributed']} unattributed) -> {a.out}; sample of {len(sample)} of {population} -> {a.sample_out}")
     return 1 if failed else 0
 
 
