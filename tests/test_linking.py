@@ -26,9 +26,9 @@ sys.path.insert(0, str(ROOT))
 
 import olympic_completeness  # noqa: E402
 import olympic_link  # noqa: E402
-from boxingvi import completeness, linking, olympic, overlay, video  # noqa: E402
+from boxingvi import completeness, linking, olympic, overlay, punchfind, video  # noqa: E402
 from boxingvi.data import N_JOINTS  # noqa: E402
-from boxingvi.linking import Fragment, LinkParams, Region  # noqa: E402
+from boxingvi.linking import Fragment, LinkParams, Linking, Region  # noqa: E402
 from boxingvi.pose_yolo import PoseTable  # noqa: E402
 
 PASS = FAIL = 0
@@ -90,7 +90,7 @@ class Scene:
         cx, cy = self.people[name]["path"](f)
         return pose(cx, cy, self.ext(name, f))[0][9 + hand]
 
-    def table(self, source="GH000001.MP4", fps=FPS, conf=0.9):
+    def table(self, source="GH000001.mp4", fps=FPS, conf=0.9):
         rows = []
         for name, p in self.people.items():
             for tid, f0, f1 in p["frags"]:
@@ -310,8 +310,15 @@ check("with no punch evidence for the second boxer, the referee is NOT made an i
       lk_nob.ids(0) == A_IDS and lk_nob.identities[1] == () and not ({21, 22, 31, 32} & lk_nob.ids(1)),
       str(lk_nob.identities))
 lk_nob5 = run(nob, boxers=("A",), params=LinkParams(ring_points_per_s=5.0))[3]
-check("... even if ring time were valued 10x: a chain with no credited punch is emptied, not reported",
-      lk_nob5.ids(0) == A_IDS and lk_nob5.identities[1] == (), str(lk_nob5.identities))
+# REPLACED (was: ids(0) == A_IDS and identities[1] == ()): that encoded the old post-filter, which emptied a
+# punch-free chain AFTER solving. The punch requirement is now inside the optimisation, so with ring time
+# worth 10x the best answer may legitimately use a referee fragment as a tail of a punching chain, but never
+# as a chain of its own: every non-empty identity must hold a credited punch.
+punchy_ids = {f.tid for f in lk_nob5.fragments if f.punches > 0}
+check("... even if ring time were valued 10x: no identity is punch-free (a referee-only chain is not reported)",
+      all(set(c) & punchy_ids for c in lk_nob5.identities if c) and not any(c and set(c) <= {21, 22, 31, 32}
+                                                                           for c in lk_nob5.identities),
+      str(lk_nob5.identities))
 # The ring prior: with no second boxer and no referee, the spectators (20 s each, static, outside the
 # ring) are the only candidates for the second identity, and they carry no punches or ring time.
 spec = base_scene(boxer_b=False, referee=False)
@@ -387,6 +394,138 @@ for trial in range(12):
 check("in every random table (half with re-acquisition on), a chain's fragments are pairwise disjoint in time", ok_disjoint)
 check("... the two chains share no fragment", ok_two)
 check("... and each frame is counted once: identified frames == the rows of its fragments", ok_count)
+
+print("the punch requirement is part of the optimisation (Astra 6, finding 1)")
+
+
+def raises_as(name, fn, exc, pattern=""):
+    try:
+        fn()
+    except exc as e:
+        check(name, pattern in str(e), f"wrong reason: {e}")
+    except Exception as e:
+        check(name, False, f"raised {type(e).__name__}: {e}")
+    else:
+        check(name, False, "did not raise")
+
+
+def fq(tid, first, last, x, punches, ring_share=1.0, y=100.0, scale=40.0):
+    return Fragment(tid, first, last, last - first + 1, (x, y), (x, y), scale, True, ring_share, punches)
+
+
+# Astra's example, in the units of the model: boxer A 60 s with 10 punches, boxer B 10 s with 1 punch, a
+# referee 60 s with none, all overlapping in time and in the ring. Net of the 8-point chain fee: 122, 7, 22.
+fa, fb, fref = fq(1, 0, 2999, 100, 10), fq(2, 0, 499, 140, 1), fq(3, 0, 2999, 180, 0)
+check("the three fragments are worth 130 / 15 / 30 points (net 122 / 7 / 22 of the chain fee)",
+      [linking.reward(f, FP) for f in (fa, fb, fref)] == [130.0, 15.0, 30.0])
+ch3, obj3 = linking.solve_chains([fa, fb, fref], [], FP)
+check("A and B are chosen and the referee is not: A + B = 122 + 7 = 129 (the old post-filter returned A + an emptied slot)",
+      sorted(ch3) == [(1,), (2,)] and obj3 == 129.0, str((ch3, obj3)))
+sc3 = Scene(3000).add("A", lambda f: (150, 200), [(1, 0, 2999)]).add("B", lambda f: (250, 200), [(2, 0, 499)]).add(
+    "ref", lambda f: (350, 200), [(3, 0, 2999)])
+lk3 = linking.link(sc3.table(), {1: 10, 2: 1}, Region(0, 0, W, H))
+check("... through link(): identity A is the 60 s boxer, identity B is the 10 s boxer, nobody else",
+      lk3.identities == ((1,), (2,)) and abs(lk3.objective - 129.0) < 1e-9, str((lk3.identities, lk3.objective)))
+check("... with the solve time recorded", lk3.solve_s > 0)
+ch3n, obj3n = linking.solve_chains([fa, fref], [], FP)
+check("with no second boxer the referee still does not get the slot: A alone = 122",
+      ch3n == [(1,)] and obj3n == 122.0, str((ch3n, obj3n)))
+ch0, obj0 = linking.solve_chains([fref], [], FP)
+check("a lone punch-free fragment is no chain at all (value 0, nothing returned)", ch0 == [] and obj0 == 0.0)
+check("no usable fragment: no chains", linking.solve_chains([], [], FP) == ([], 0.0))
+# A punch-free CONNECTOR is allowed inside a chain that holds a punch (state 0 -> state 1 and 1 -> 1).
+bridge_frags = [fq(1, 0, 299, 100, 0), fq(2, 310, 500, 105, 2)]
+ch_b, _ = linking.solve_chains(bridge_frags, linking.candidate_links(bridge_frags, FP), FP)
+check("a punch-free fragment BEFORE a punching one is a legitimate head of the same chain", ch_b == [(1, 2)], str(ch_b))
+tail_frags = [fq(1, 0, 99, 100, 2), fq(2, 110, 600, 105, 0)]
+ch_t, _ = linking.solve_chains(tail_frags, linking.candidate_links(tail_frags, FP), FP)
+check("... and a punch-free tail after it (ring time pays for the link)", ch_t == [(1, 2)], str(ch_t))
+
+
+def brute(frags, links, params, require_punch=True):
+    """The optimum by enumeration: every pair of vertex-disjoint forward chains (and every single
+    chain, and none), each with >= 1 credited punch, valued exactly as the integer program values them."""
+    by = {f.tid: f for f in frags}
+    nxt = {}
+    for l in links:
+        nxt.setdefault(l.a, []).append((l.b, linking._units(l.cost)))
+    chains = []
+
+    def grow(path, val):
+        chains.append((frozenset(path), val - linking._units(params.chain_points), sum(by[t].punches for t in path)))
+        for b, c in nxt.get(path[-1], []):
+            grow(path + [b], val + linking._units(linking.reward(by[b], FP, params)) - c)
+
+    for f in frags:
+        grow([f.tid], linking._units(linking.reward(f, FP, params)))
+    good = [c for c in chains if c[2] >= 1 or not require_punch]
+    best = max([0] + [c[1] for c in good])
+    for i, c in enumerate(good):
+        for d in good[i + 1:]:
+            if not (c[0] & d[0]):
+                best = max(best, c[1] + d[1])
+    return best / linking.COST_SCALE
+
+
+rng = np.random.default_rng(20261007)
+variants = [LinkParams(), LinkParams(reacquire_s=60.0), LinkParams(chain_points=0.0),
+            LinkParams(punch_points=1.0), LinkParams(punch_points=1.0, reacquire_s=60.0, chain_points=2.0)]
+n_inst = n_exact = n_binds = n_valid = 0
+worst = 0.0
+for inst in range(800):
+    prm = variants[inst % len(variants)]
+    nf = int(rng.integers(2, 9))
+    frs = []
+    for tid in range(1, nf + 1):
+        f0 = int(rng.integers(0, 400))
+        f1 = f0 + int(rng.integers(12, 160))
+        frs.append(fq(tid, f0, f1, float(rng.uniform(100, 220)), int(rng.choice([0, 0, 1, 2, 3])),
+                      ring_share=float(rng.uniform(0.5, 1.0)), scale=float(rng.choice([36.0, 40.0, 44.0]))))
+    lks = linking.candidate_links(frs, FP, prm)
+    got_chains, got_obj = linking.solve_chains(frs, lks, FP, prm)
+    want = brute(frs, lks, prm)
+    n_inst += 1
+    worst = max(worst, abs(got_obj - want))
+    n_exact += abs(got_obj - want) <= 1e-9
+    n_binds += abs(brute(frs, lks, prm, require_punch=False) - want) > 1e-9      # instances where the punch rule matters
+    pairs_ok = {(l.a, l.b) for l in lks}
+    by_t = {f.tid: f for f in frs}
+    flat = [t for c in got_chains for t in c]
+    n_valid += (len(got_chains) <= 2 and len(flat) == len(set(flat))
+                and all(sum(by_t[t].punches for t in c) >= 1 for c in got_chains)
+                and all((a, b) in pairs_ok for c in got_chains for a, b in zip(c, c[1:])))
+check("brute force: on 800 random small instances (5 parameter sets) the integer program's objective equals the "
+      "enumerated optimum exactly", n_exact == n_inst == 800, f"{n_exact}/{n_inst}, worst difference {worst}")
+check("... and every returned solution is valid: <= 2 chains, disjoint, each with a punch, only candidate links",
+      n_valid == n_inst, f"{n_valid}/{n_inst}")
+check("... and the punch rule CHANGED the optimum in at least 20 of them (the cross-check has teeth)",
+      n_binds >= 20, str(n_binds))
+
+
+class _Stub:
+    def __init__(self, status):
+        self.status, self.success, self.x, self.fun, self.message = status, False, np.zeros(3), 0.0, "stub"
+
+
+_real_milp = linking.milp
+linking.milp = lambda *a, **k: _Stub(1)
+raises_as("a solver that stops at the time limit is an error, never an answer",
+          lambda: linking.solve_chains([fa, fb], [], FP), RuntimeError, "proven optimality")
+linking.milp = lambda *a, **k: _Stub(4)
+raises_as("... and so is any other non-optimal status", lambda: linking.solve_chains([fa, fb], [], FP), RuntimeError,
+          "proven optimality")
+linking.milp = _real_milp
+_real_min = linking.MIN_CHAIN_PUNCHES
+linking.MIN_CHAIN_PUNCHES = 2
+raises_as("the model encodes exactly '>= 1 punch': any other MIN_CHAIN_PUNCHES is refused",
+          lambda: linking.solve_chains([fa], [], FP), RuntimeError, "MIN_CHAIN_PUNCHES")
+linking.MIN_CHAIN_PUNCHES = _real_min
+raises("a link naming a fragment that is not usable is refused",
+       lambda: linking.solve_chains([fa], [linking.Link(1, 99, 5, 0.0, 1.0)], FP), "not usable")
+raises("two fragments with one id are refused", lambda: linking.solve_chains([fa, fa], [], FP), "duplicate")
+check("networkx is gone: no module in src/ or entry point mentions it, and requirements.txt does not pin it",
+      not any("networkx" in q.read_text(encoding="utf-8")
+              for q in list((ROOT / "src" / "boxingvi").glob("*.py")) + list(ROOT.glob("*.py")) + [ROOT / "requirements.txt"]))
 
 print("the ring region")
 rng = np.random.default_rng(1)
@@ -530,13 +669,15 @@ check("--reacquire runs end to end and keeps every credited punch inside the two
       rc_re == 0 and r_re["credited_in_either_share"] == 1.0, str(r_re))
 bad_trk = tmp / "bad_tracks"
 bad_trk.mkdir()
-PoseTable(table.frame, table.track_id, table.box, table.xy, table.conf, N, 25.0, W, H).save(bad_trk / "GH000001.tracks.npz")
+PoseTable(table.frame, table.track_id, table.box, table.xy, table.conf, N, 25.0, W, H,
+          source=table.source).save(bad_trk / "GH000001.tracks.npz")
 raises("a tracks file from another video (frame rate) links nothing, loudly",
        lambda: olympic_link.main(["--data", str(ds), "--tracks", str(bad_trk), "--out", str(tmp / "x.json")]), "could be linked")
 short_trk = tmp / "short_tracks"
 short_trk.mkdir()
 PoseTable(table.frame[table.frame < 500], table.track_id[table.frame < 500], table.box[table.frame < 500],
-          table.xy[table.frame < 500], table.conf[table.frame < 500], 500, FPS, W, H).save(short_trk / "GH000001.tracks.npz")
+          table.xy[table.frame < 500], table.conf[table.frame < 500], 500, FPS, W, H,
+          source=table.source).save(short_trk / "GH000001.tracks.npz")
 raises("an incomplete tracks file (a --max-frames run) is refused, not linked as if it were whole",
        lambda: olympic_link.main(["--data", str(ds), "--tracks", str(short_trk), "--out", str(tmp / "y.json")]), "could be linked")
 for bad_id in ("../GH000001", "GH000001/../../x", "GH 1", "", "GH000001.mp4"):
@@ -547,68 +688,428 @@ raises("--overlay of a video that is not in the dataset is refused",
        lambda: olympic_link.main(["--data", str(ds), "--tracks", str(trk), "--out", str(tmp / "z.json"), "--overlay", "GH123456"]),
        "no such video")
 
-print("completeness: wrist-speed bursts per linked boxer, away from every label")
+print("the held-out evaluation can fail (Astra 6, finding 7)")
+# B's last fragment (15) is only 1.2 s long and its four labelled punches all sit at ODD list positions, i.e. in the
+# held-out half. Linked on the even half alone, fragment 15 has no punch evidence and 0.6 points of ring time,
+# less than the cost of the link, so it is left out: the held-out share must be below 100%.
+HB_FR = [(11, 0, 139), (12, 150, 399), (13, 420, 700), (14, 712, 930), (15, 940, 999)]
+ho_scene = base_scene()
+ho_scene.people["B"]["frags"] = HB_FR
+ho_base = base_scene()
+ho_base.people["B"]["frags"] = HB_FR[:4]
+tab_ho = ho_scene.table()
+ev_base = ho_base.punches(("A", "B"))
+extra = []
+for f_ in (945, 960, 975, 990):
+    w_ = ho_scene.wrist("B", f_, 1)
+    extra.append(olympic.Event(f_, f_ + 2, "head", "right", (w_[0] - 8, w_[1] - 8, w_[0] + 8, w_[1] + 8), 1))
+ordered, it_b, it_x = [], iter(ev_base), list(extra)
+for pos in range(len(ev_base) + len(extra)):
+    ordered.append(it_x.pop(0) if pos % 2 == 1 and it_x else next(it_b))
+attrs_ho = olympic.attribute(ordered, tab_ho)
+check("setup: 36 punches, all credited; the four on fragment 15 are credited to it and sit at odd positions",
+      len(attrs_ho) == 36 and all(a.track_id is not None for a in attrs_ho)
+      and [i for i, a in enumerate(attrs_ho) if a.track_id == 15] == [1, 3, 5, 7],
+      str([(i, a.track_id) for i, a in enumerate(attrs_ho) if a.track_id in (15, None)]))
+lk_ho, out_ho = olympic_link.analyse(tab_ho, attrs_ho)
+train = linking.link_video(tab_ho, attrs_ho[0::2])
+check("fragment 15 is in an identity when every label is used, and NOT when only the even half is",
+      15 in (lk_ho.ids(0) | lk_ho.ids(1)) and 15 not in (train.ids(0) | train.ids(1)),
+      str((lk_ho.identities, train.identities)))
+check("the full in-sample share is 100% (36 of 36)", out_ho["credited_in_either_share"] == 1.0)
+check("the held-out share is BELOW 100%: 14 of the 18 held-out punches (the four on fragment 15 are lost)",
+      out_ho["credited_heldout"] == 18 and out_ho["credited_in_either_share_heldout"] == round(14 / 18, 4)
+      and out_ho["credited_in_either_share_heldout"] < 1.0, str(out_ho))
+leaked = linking.link_video(tab_ho, attrs_ho)
+leak_share = sum(a.track_id in leaked.ids(0) | leaked.ids(1) for a in attrs_ho[1::2]) / 18
+check("... and had all the labels leaked into the linking it would read 100%: the test can tell the difference",
+      leak_share == 1.0 and out_ho["credited_in_either_share_heldout"] < leak_share, str(leak_share))
+check("the report carries the ring the held-out linking used",
+      out_ho["ring_heldout"] == [round(v, 1) for v in (train.region.x0, train.region.y0, train.region.x1, train.region.y1)],
+      str((out_ho["ring_heldout"], train.region)))
+# Changing the held-out events' glove boxes (bigger, shifted 40 px to the right; boxer B's punches, which are the
+# rightmost) must not move the held-out ring.
+moved = []
+for i_, e_ in enumerate(ordered):
+    if i_ % 2 == 1 and attrs_ho[i_].track_id in {11, 12, 13, 14, 15}:
+        cx_, cy_ = (e_.box[0] + e_.box[2]) / 2 + 40, (e_.box[1] + e_.box[3]) / 2
+        e_ = olympic.Event(e_.first, e_.last, e_.target, e_.hand, (cx_ - 24, cy_ - 24, cx_ + 24, cy_ + 24), 1)
+    moved.append(e_)
+attrs_mv = olympic.attribute(moved, tab_ho)
+_, out_mv = olympic_link.analyse(tab_ho, attrs_mv)
+check("setup: the moved held-out punches are still credited to the same ids",
+      [a.track_id for a in attrs_mv[1::2]] == [a.track_id for a in attrs_ho[1::2]])
+check("changing the held-out events' glove boxes changes the full ring but NOT the held-out ring",
+      out_mv["ring"] != out_ho["ring"] and out_mv["ring_heldout"] == out_ho["ring_heldout"],
+      str((out_ho["ring"], out_mv["ring"], out_ho["ring_heldout"], out_mv["ring_heldout"])))
+
+print("the pose table must belong to its video (Astra 6, finding 8)")
+tk = olympic.find_tasks(ds)[0]
+other_clip = tmp / "other.mp4"
+subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=white:s={W}x{H}:r=50",
+                "-frames:v", str(N), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(other_clip)], check=True)
+fp_real, fp_other = video.fingerprint(tk.video), video.fingerprint(other_clip)
+info_real = video.probe(tk.video)
+check("setup: the other recording has the same size, rate and frame count (so the old checks cannot tell them apart), "
+      "a different fingerprint",
+      (video.probe(other_clip).width, video.probe(other_clip).height) == (info_real.width, info_real.height)
+      and video.probe(other_clip).fps == info_real.fps and video.probe(other_clip).timing.n_frames == info_real.timing.n_frames
+      and fp_real != fp_other and len(fp_real) == 64)
+
+
+def table_dir(name, **over):
+    d = tmp / name
+    d.mkdir()
+    dataclasses.replace(table, **over).save(d / "GH000001.tracks.npz")
+    return d
+
+
+raises("same size, same fps, same length, DIFFERENT NAME: refused, naming both",
+       lambda: olympic_link.load_video(tk, table_dir("t_renamed", source="GH999999.mp4")), "'GH999999.mp4', not 'GH000001.mp4'")
+raises("same name, different content, with a fingerprint: refused",
+       lambda: olympic_link.load_video(tk, table_dir("t_wrongfp", video_fp=fp_other)), "fingerprint")
+got_legacy = olympic_link.load_video(tk, table_dir("t_legacy"))
+check("a legacy table with no fingerprint is accepted on the name alone", got_legacy[0].video_fp == "" and len(got_legacy[2]) > 0)
+got_bound = olympic_link.load_video(tk, table_dir("t_bound", video_fp=fp_real))
+check("a table whose fingerprint matches is accepted, and keeps it", got_bound[0].video_fp == fp_real)
+for tag, kw, want_bound in (("t_legacy", {}, False), ("t_bound", {"video_fp": fp_real}, True)):
+    o_ = tmp / "res" / f"bind_{tag}.json"
+    olympic_link.main(["--data", str(ds), "--tracks", str(tmp / tag), "--out", str(o_)])
+    rb = json.loads(o_.read_text(encoding="utf-8"))
+    check(f"the report says video_bound = {want_bound} for {tag}",
+          rb["videos"]["task_kam2_gh000001"]["video_bound"] is want_bound
+          and rb["all"]["videos_content_bound"] == int(want_bound), str(rb["all"]))
+raises("the CLI links nothing from a renamed table, loudly",
+       lambda: olympic_link.main(["--data", str(ds), "--tracks", str(tmp / "t_renamed"), "--out", str(tmp / "x2.json")]),
+       "could be linked")
+renamed_t = dataclasses.replace(table, source="GH999999.mp4")
+wrongfp_t = dataclasses.replace(table, video_fp=fp_other)
+raises("the tracks overlay refuses a renamed table", lambda: overlay.render_tracks_overlay(tk.video, renamed_t, tmp / "b1.mp4", max_frames=5),
+       "'GH999999.mp4', not 'GH000001.mp4'")
+raises("... and a table with another recording's fingerprint",
+       lambda: overlay.render_tracks_overlay(tk.video, wrongfp_t, tmp / "b2.mp4", max_frames=5), "fingerprint")
+check("... but renders a table whose fingerprint matches",
+      overlay.render_tracks_overlay(tk.video, dataclasses.replace(table, video_fp=fp_real), tmp / "b3.mp4", max_frames=5) == 5)
+raises("the linked overlay refuses a renamed table", lambda: overlay.render_linked_overlay(tk.video, renamed_t, lk, tmp / "b4.mp4", max_frames=5),
+       "'GH999999.mp4', not 'GH000001.mp4'")
+raises("... and a table with another recording's fingerprint",
+       lambda: overlay.render_linked_overlay(tk.video, wrongfp_t, lk, tmp / "b5.mp4", max_frames=5), "fingerprint")
+check("... but renders a table whose fingerprint matches",
+      overlay.render_linked_overlay(tk.video, dataclasses.replace(table, video_fp=fp_real), lk, tmp / "b6.mp4",
+                                    max_frames=5) == 5)
+
+print("completeness: wrist-speed bursts per linked boxer, matched one-to-one to labels")
 RULE = {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4}
-# Planted bursts: A's right wrist at 100 (nothing labelled near), A's left at 300 (a label at 302-304),
-# B's right at 500 (nothing near), and the REFEREE's at 250 (not a boxer: must not be counted).
+
+
+def manual_linking(tab, chains):
+    """A Linking naming exactly these chains of track ids (no optimisation), for building scenes by hand."""
+    mem = np.full((tab.n_frames, 2), -1, np.int64)
+    for k, ch in enumerate(chains):
+        for t in ch:
+            mem[tab.frame[tab.track_id == t], k] = t
+    return Linking((tuple(chains[0]), tuple(chains[1])), mem, tab.n_frames, tab.fps, tab.source, None)
+
+
+def bursts_near(res, lo, hi):
+    return sorted((b for b in res["bursts"] if lo <= b.frame <= hi), key=lambda b: b.boxer)
+
+
+# Planted bursts: A's right wrist at 100 (nothing labelled near), A's left at 300 (a label at 302-304, thrown by
+# nobody we can credit), B's right at 500 (nothing near), and the REFEREE's at 250 (not a boxer: must not be counted).
 cs = base_scene(bursts={"A": [(100, 1), (300, 0)], "B": [(500, 1)], "ref": [(250, 0)]})
 t_c = cs.table()
 ev_c = cs.punches(("A", "B"))
-attrs_c = olympic.attribute(ev_c, t_c)
-lk_c = linking.link_video(t_c, attrs_c)
 lab = ev_c + [olympic.Event(302, 304, "head", "left", (100, 100, 116, 116), 1)]
-res = completeness.find_bursts(t_c, lk_c, lab, RULE, video="GH000001")
+attrs_lab = olympic.attribute(lab, t_c)
+lk_c = linking.link_video(t_c, attrs_lab)
+res = completeness.find_bursts(t_c, lk_c, lab, attrs_lab, RULE, video="GH000001")
 kA = "A" if lk_c.ids(0) == A_IDS else "B"      # which letter the linking gave the planted boxer A
 fa = sorted((b.frame, b.hand, b.explained) for b in res["bursts"] if b.boxer == kA)
 fb = sorted((b.frame, b.hand, b.explained) for b in res["bursts"] if b.boxer != kA)
 near = lambda got, want: len(got) == len(want) and all(abs(g[0] - w[0]) <= 6 and g[1:] == w[1:] for g, w in zip(got, want))  # noqa: E731
+check("setup: the extra label is unattributed (nobody's wrist is near it); the other 32 are credited",
+      attrs_lab[-1].track_id is None and all(a.track_id is not None for a in attrs_lab[:-1]))
 check("A: both planted bursts are found at the right frame (+-6, the speed peak is on the rise) and hand; the one next to a label is explained",
       near(fa, [(100, "right", False), (300, "left", True)]), str(fa))
 check("B: its planted burst is found and unexplained", near(fb, [(500, "right", False)]), str(fb))
+b300 = bursts_near(res, 290, 310)[0]
+check("the burst at 300 is explained by the UNATTRIBUTED label, and its hand agrees (left, left)",
+      b300.match == "unattributed" and b300.hand_agrees is True, str(b300))
 check("the referee's burst (not an identity) is not counted for anybody",
       not any(240 <= b.frame <= 260 for b in res["bursts"]))
 check("per-boxer counts and minutes: identified minutes are the identified frames, unexplained counted",
       res["boxers"][kA]["unexplained"] == 1 and res["boxers"][kA]["bursts"] == 2
-      and abs(res["boxers"][kA]["identified_min"] - int(lk_c.identified(0 if kA == "A" else 1).sum()) / FPS / 60) < 1e-9
+      and abs(res["boxers"][kA]["identified_min"] - int(lk_c.identified(0 if kA == "A" else 1).sum()) / FPS / 60) < 1e-12
       and res["boxers"][kA]["signal_min"] > 0)
-check("the labelled punches the rule also sees: exactly the one with a burst within 0.1 s",
-      res["events_with_burst"] == 1, str(res["events_with_burst"]))
+check("the label counts: 33 labels, 16 owned by each boxer, 1 unattributed; one label matched a burst (unattributed)",
+      res["labels"] == {"total": 33, "owned_a": 16, "owned_b": 16, "unattributed": 1, "matched_own": 0,
+                        "matched_unattributed": 1}, str(res["labels"]))
 check("a burst's time is its frame over the frame rate", all(abs(b.time_s - b.frame / FPS) < 1e-9 for b in res["bursts"]))
+check("per-hand counts: A threw one burst per hand, B one with the right",
+      res["boxers"][kA]["bursts_by_hand"] == {"left": 1, "right": 1} and res["boxers"][kA]["unexplained_by_hand"] == {"left": 0, "right": 1}
+      and res["boxers"]["B" if kA == "A" else "A"]["bursts_by_hand"] == {"left": 0, "right": 1})
 quiet = base_scene()
 t_q = quiet.table()
-lk_q = linking.link_video(t_q, olympic.attribute(quiet.punches(("A", "B")), t_q))
-res_q = completeness.find_bursts(t_q, lk_q, quiet.punches(("A", "B")), RULE)
+ev_q = quiet.punches(("A", "B"))
+at_q = olympic.attribute(ev_q, t_q)
+lk_q = linking.link_video(t_q, at_q)
+res_q = completeness.find_bursts(t_q, lk_q, ev_q, at_q, RULE)
 check("no planted burst, no burst: a boxer who only sways gives none", res_q["bursts"] == [])
-check("the tolerance is 0.1 s = 5 frames: a label 5 frames away explains a burst, 6 do not",
-      completeness._near_label(np.array([100]), [olympic.Event(105, 107, "head", "left", (1, 1, 2, 2), 1)], 5)[0]
-      and not completeness._near_label(np.array([100]), [olympic.Event(106, 108, "head", "left", (1, 1, 2, 2), 1)], 5)[0]
-      and completeness._near_label(np.array([100]), [olympic.Event(90, 95, "head", "left", (1, 1, 2, 2), 1)], 5)[0]
-      and not completeness._near_label(np.array([100]), [olympic.Event(80, 94, "head", "left", (1, 1, 2, 2), 1)], 5)[0])
-check("a label ANYWHERE in the video explains a burst (not just the boxer's own)",
-      completeness._near_label(np.array([300]), [olympic.Event(302, 304, "head", "left", (1, 1, 2, 2), 1)], 5)[0])
+ev5 = lambda a_, b_: olympic.Event(a_, b_, "head", "left", (1, 1, 2, 2), 1)   # noqa: E731
+check("the tolerance is 0.1 s = 5 frames: a label 5 frames away is within it, 6 are not (inside the span is 0 away)",
+      completeness.span_gap(100, ev5(105, 107)) == 5 and completeness.span_gap(100, ev5(106, 108)) == 6
+      and completeness.span_gap(100, ev5(90, 95)) == 5 and completeness.span_gap(100, ev5(80, 94)) == 6
+      and completeness.span_gap(100, ev5(95, 105)) == 0)
 raises("a linking from another table is refused", lambda: completeness.boxer_track(t_c, dataclasses.replace(lk_c, source="x"), 0),
        "different pose table")
 check("a boxer with under two identified frames has no track (None), not a crash",
       completeness.boxer_track(t_c, dataclasses.replace(lk_c, membership=np.full_like(lk_c.membership, -1)), 0) is None)
-raises("a negative tolerance is refused", lambda: completeness.find_bursts(t_c, lk_c, lab, RULE, tol_s=-1), "tol_s")
+raises("a negative tolerance is refused", lambda: completeness.find_bursts(t_c, lk_c, lab, attrs_lab, RULE, tol_s=-1), "tol_s")
+raises("attributions that are not one per event, in order, are refused",
+       lambda: completeness.find_bursts(t_c, lk_c, lab, attrs_lab[:-1], RULE), "one attribution per event")
+raises("... or are for other events", lambda: completeness.find_bursts(t_c, lk_c, lab[::-1], attrs_lab, RULE), "one attribution per event")
+raises("a Burst with an unknown match kind is refused", lambda: completeness.Burst("v", 1, 0.1, "A", "left", 5.0, "maybe"), "match")
 
-print("completeness: the random sample")
-mk = lambda v, n: [completeness.Burst(v, 10 * i, 0.2 * i, "AB"[i % 2], "left", 5.0, False) for i in range(n)]  # noqa: E731
-pool = {"V1": mk("V1", 100), "V2": mk("V2", 10), "V3": mk("V3", 1), "V4": [], "V5": mk("V5", 50)}
-s1 = completeness.stratified_sample(pool, 40, 7)
-check("the sample has exactly 40 distinct bursts", len(s1) == 40 and len({(b.video, b.frame, b.boxer) for b in s1}) == 40)
-check("every video that has an unexplained burst is in it; one with none is not",
-      {b.video for b in s1} == {"V1", "V2", "V3", "V5"} and sum(b.video == "V3" for b in s1) == 1)
-check("bigger videos get more: stratified in proportion",
-      sum(b.video == "V1" for b in s1) > sum(b.video == "V5" for b in s1) > sum(b.video == "V2" for b in s1))
+print("completeness: a label thrown by the OTHER boxer never explains this one (Astra 6, finding 2)")
+# A punches with the left hand (extended far from the referee), B with the right
+both = base_scene(bursts={"A": [(500, 0)], "B": [(500, 1)]})
+t_b = both.table()
+ev_b = both.punches(("A", "B"))
+wr = both.wrist("A", 500, 0)
+mine_ev = olympic.Event(496, 504, "head", "left", (wr[0] - 30, wr[1] - 30, wr[0] + 30, wr[1] + 30), 1)
+ev_b2 = ev_b + [mine_ev]
+attrs_b = olympic.attribute(ev_b2, t_b)
+lk_b = linking.link_video(t_b, attrs_b)
+kA_b = 0 if lk_b.ids(0) == A_IDS else 1
+check("setup: the extra label is credited to a fragment of boxer A, and the linking owns it to A",
+      attrs_b[-1].track_id in A_IDS and kA_b == 0 and completeness.event_owner(attrs_b[-1], lk_b) == 0,
+      str((attrs_b[-1].track_id, completeness.event_owner(attrs_b[-1], lk_b))))
+res_b = completeness.find_bursts(t_b, lk_b, ev_b2, attrs_b, RULE)
+nb = bursts_near(res_b, 485, 515)
+check("both boxers burst at the same moment, only A's punch is labelled: A's burst is explained by its OWN label ...",
+      len(nb) == 2 and nb[0].boxer == "A" and nb[0].match == "own" and nb[0].explained, str(nb))
+check("... and B's burst is UNEXPLAINED (the label is A's; temporal proximity is not a match)",
+      nb[1].boxer == "B" and nb[1].match == "none" and not nb[1].explained and res_b["boxers"]["B"]["unexplained"] == 1, str(nb))
+check("the label count: exactly one label matched, it is an own match",
+      res_b["labels"]["matched_own"] == 1 and res_b["labels"]["matched_unattributed"] == 0, str(res_b["labels"]))
+check("hand evidence is recorded and not required: the label says left, the burst is the left hand",
+      nb[0].hand == "left" and nb[0].hand_agrees is True and nb[1].hand_agrees is None and nb[1].hand == "right")
+ev_b3 = ev_b + [olympic.Event(496, 504, "head", "right", mine_ev.box, 1)]
+res_b3 = completeness.find_bursts(t_b, lk_b, ev_b3, olympic.attribute(ev_b3, t_b), RULE)
+nb3 = bursts_near(res_b3, 485, 515)
+check("... a label with the other hand still explains the burst (the 78% convention is not a requirement) and says so",
+      nb3[0].match == "own" and nb3[0].hand_agrees is False, str(nb3[0]))
+
+print("completeness: one-to-one (Astra 6, finding 2)")
+EV = lambda a_, b_: olympic.Event(a_, b_, "head", "left", (1, 1, 2, 2), 1)   # noqa: E731
+m1 = completeness._match([("b", 100)], [0, 1], [EV(103, 104), EV(95, 95)], 5, set())
+check("one burst between two labels matches exactly ONE of them, the nearer (3 frames, not 5)", m1 == {"b": 0}, str(m1))
+taken = set()
+m2 = completeness._match([("x", 100), ("y", 102)], [0], [EV(101, 101)], 5, taken)
+check("two bursts near one label: only one gets it (the earlier on a tie), the label is then used up",
+      m2 == {"x": 0} and taken == {0}, str(m2))
+m3 = completeness._match([("x", 100)], [0], [EV(101, 101)], 5, {0})
+check("a label already taken is not available", m3 == {})
+m4 = completeness._match([("x", 100), ("y", 101)], [0, 1], [EV(101, 101), EV(95, 95)], 5, set())
+check("greedy nearest-first: the burst on the label (gap 0) takes it; the other falls back to the farther label",
+      m4 == {"y": 0, "x": 1}, str(m4))
+# In a scene: A's left burst at 300 with two A-owned labels 5 frames either side of its speed peak.
+one = base_scene(bursts={"A": [(300, 0)]})
+t_1 = one.table()
+ev_1 = one.punches(("A", "B"))
+res_1a = completeness.find_bursts(t_1, linking.link_video(t_1, olympic.attribute(ev_1, t_1)), ev_1, olympic.attribute(ev_1, t_1), RULE)
+pk = [b for b in res_1a["bursts"] if 285 <= b.frame <= 315]
+wl = one.wrist("A", 300, 0)
+bx = (wl[0] - 10, wl[1] - 70, wl[0] + 140, wl[1] + 70)       # contains the left wrist from full extension (wl) to rest (wl + 120)
+ev_2 = ev_1 + [olympic.Event(pk[0].frame - 9, pk[0].frame - 5, "head", "left", bx, 1),
+               olympic.Event(pk[0].frame + 5, pk[0].frame + 9, "head", "left", bx, 1)]
+at_2 = olympic.attribute(ev_2, t_1)
+lk_1 = linking.link_video(t_1, at_2)
+res_1 = completeness.find_bursts(t_1, lk_1, ev_2, at_2, RULE)
+pk2 = [b for b in res_1["bursts"] if 285 <= b.frame <= 315]
+check("setup: the burst is one burst, both extra labels are A's, both exactly 5 frames from its peak",
+      len(pk) == 1 and len(pk2) == 1 and pk2[0].frame == pk[0].frame
+      and all(a.track_id in A_IDS for a in at_2[-2:])
+      and [completeness.span_gap(pk[0].frame, e) for e in ev_2[-2:]] == [5, 5], str((pk, pk2)))
+check("in the scene: that one burst is matched to exactly one of the two labels",
+      pk2[0].match == "own" and res_1["labels"]["matched_own"] == 1, str(res_1["labels"]))
+# Two boxers burst together; ONE unattributed label near both: it explains one burst, not both.
+uev = olympic.Event(494, 506, "head", "left", (100, 100, 116, 116), 1)
+ev_u = ev_b + [uev]
+at_u = olympic.attribute(ev_u, t_b)
+res_u = completeness.find_bursts(t_b, linking.link_video(t_b, at_u), ev_u, at_u, RULE)
+nu = bursts_near(res_u, 485, 515)
+check("setup: that label is unattributed", at_u[-1].track_id is None)
+check("an unattributed label near two boxers' coincident bursts is matched ONCE: one 'unattributed', one 'none'",
+      sorted(b.match for b in nu) == ["none", "unattributed"] and res_u["labels"]["matched_unattributed"] == 1
+      and sum(b.explained for b in nu) == 1, str(nu))
+check("... and the unmatched one is counted as unexplained for its boxer",
+      sum(res_u["boxers"][n]["unexplained"] for n in "AB") == 1, str(res_u["boxers"]))
+check("the hand of an unattributed label is information only: it is recorded (label left) and the match stands either way",
+      all(b.hand_agrees == (b.hand == "left") for b in nu if b.explained) and sum(b.explained for b in nu) == 1)
+
+print("completeness: no signal across a fragment join (Astra 6, finding 3)")
+
+
+def two_fragment_table(n=400, split=200, shift=40.0, burst_at=None, drop=(), left_conf=0.9, n2=None):
+    """One stationary person, id 1 until `split`, id 2 after; id 2's wrists sit `shift` px (one torso) further out
+    relative to the shoulders. `burst_at`: a real right-hand punch inside id 1."""
+    rows = []
+    for f in range(n if n2 is None else n2):
+        if f in drop:
+            continue
+        e = 120.0 * max(0.0, 1 - abs(f - burst_at) / 4) if burst_at is not None else 0.0
+        xy, box = pose(300, 200, ext=(0.0, e))
+        tid = 1 if f < split else 2
+        if tid == 2:
+            xy[9, 0] += shift
+            xy[10, 0] += shift
+        rows.append((f, tid, box, xy))
+    k = len(rows)
+    cf = np.full((k, N_JOINTS), 0.9, np.float32)
+    cf[:, 9] = left_conf
+    return PoseTable(np.array([r[0] for r in rows], np.int64), np.array([r[1] for r in rows], np.int64),
+                     np.array([r[2] for r in rows], np.float32).reshape(k, 4),
+                     np.array([r[3] for r in rows], np.float32).reshape(k, N_JOINTS, 2), cf,
+                     n, FPS, W, H, source="GH000001.mp4")
+
+
+t_j = two_fragment_table()
+lk_j = manual_linking(t_j, [(1, 2), ()])
+joined = completeness.boxer_track(t_j, lk_j, 0)
+sg_j = punchfind.wrist_signal(joined, "relative")
+jf, _ = punchfind.detect(joined, sg_j, RULE["threshold"], RULE["min_gap_s"])
+check("setup: JOINED into one track the handover reads as a punch (this is the fault: both fragments are stationary)",
+      any(195 <= int(f) <= 205 for f in jf) and sg_j.max() > 5 * RULE["threshold"] / 3, str((jf, sg_j.max())))
+res_j = completeness.find_bursts(t_j, lk_j, [], [], RULE)
+check("per SEGMENT there is no burst at all: nothing is differenced across the handover",
+      res_j["bursts"] == [] and res_j["boxers"]["A"]["segments"] == 2 and res_j["boxers"]["A"]["short_segments"] == 0,
+      str(res_j["boxers"]["A"]))
+t_r = two_fragment_table(burst_at=100)
+res_r = completeness.find_bursts(t_r, manual_linking(t_r, [(1, 2), ()]), [], [], RULE)
+check("a real punch inside one fragment is still found, exactly one, at the right frame and hand",
+      len(res_r["bursts"]) == 1 and abs(res_r["bursts"][0].frame - 100) <= 6 and res_r["bursts"][0].hand == "right"
+      and res_r["bursts"][0].boxer == "A", str(res_r["bursts"]))
+t_g = two_fragment_table(n=210, split=200, drop=(100, 101), n2=203)
+res_g = completeness.find_bursts(t_g, manual_linking(t_g, [(1, 2), ()]), [], [], RULE)
+check("a missing frame inside one id also ends a segment; a segment under the smoothing window (3 frames) is skipped and counted",
+      res_g["boxers"]["A"]["segments"] == 3 and res_g["boxers"]["A"]["short_segments"] == 1
+      and abs(res_g["boxers"]["A"]["identified_min"] - (100 + 98 + 3) / FPS / 60) < 1e-12, str(res_g["boxers"]["A"]))
+res_bl = completeness.find_bursts(dataclasses.replace(t_j, conf=np.zeros_like(t_j.conf)), lk_j, [], [], RULE)
+check("... and a segment with no confident body at all is counted as bodyless, not a crash",
+      res_bl["boxers"]["A"]["bodyless_segments"] == 2 and res_bl["bursts"] == [] and res_bl["boxers"]["A"]["signal_min"] == 0.0)
+
+print("completeness: signal minutes are elapsed minutes with EITHER hand valid (Astra 6, finding 5)")
+t_h = two_fragment_table(n=400, split=400, left_conf=0.05, burst_at=200)
+lk_h = manual_linking(t_h, [(1,), ()])
+res_h = completeness.find_bursts(t_h, lk_h, [], [], RULE)
+bi = res_h["boxers"]["A"]
+check("the left wrist is invalid all the time, the right all the time: signal minutes = the 400 elapsed frames (not half)",
+      abs(bi["signal_min"] - 400 / FPS / 60) < 1e-12 and bi["signal_min_left"] == 0.0
+      and abs(bi["signal_min_right"] - 400 / FPS / 60) < 1e-12, str(bi))
+check("... with the burst counted for the right hand only",
+      bi["bursts_by_hand"] == {"left": 0, "right": 1} and bi["unexplained_by_hand"] == {"left": 0, "right": 1}, str(bi))
+trk_h = completeness.boxer_track(t_h, lk_h, 0)
+sf = punchfind.signal_frames(trk_h)
+cov = punchfind.signal_coverage(trk_h, span=(0, 399))
+check("signal_frames agrees with signal_coverage, hand by hand (one definition of where a hand has a signal)",
+      abs(sf[:, 0].sum() / 400 - cov["left"]) < 1e-12 and abs(sf[:, 1].sum() / 400 - cov["right"]) < 1e-12 and sf[:, 1].all()
+      and not sf[:, 0].any())
+
+print("completeness: the -1 sentinel never selects rows (Astra 6, finding 9)")
+t_n = sc.table()
+t_n.track_id[t_n.track_id == 31] = -1          # a malformed table that bypassed validation: the spectator became id -1
+check("setup: the table really holds id -1 rows", int((t_n.track_id == -1).sum()) == N)
+lk_none = manual_linking(t_n, [(), ()])
+check("an EMPTY linking selects no rows for either boxer, although -1 == -1",
+      all(len(completeness.boxer_rows(t_n, lk_none, k)) == 0 for k in (0, 1)))
+res_n = completeness.find_bursts(t_n, lk_none, [], [], RULE)
+check("... so no bursts and no minutes", res_n["bursts"] == [] and res_n["boxers"]["A"]["identified_min"] == 0.0
+      and res_n["boxers"]["B"]["identified_min"] == 0.0)
+lk_real = manual_linking(t_n, [(1, 2, 3, 4), (11, 12, 13, 14)])
+check("a real linking beside -1 rows never selects one",
+      all((t_n.track_id[completeness.boxer_rows(t_n, lk_real, k)] >= 0).all() and len(completeness.boxer_rows(t_n, lk_real, k)) > 0
+          for k in (0, 1)))
+raises("PoseTable refuses a negative track id at construction",
+       lambda: dataclasses.replace(t_n), "negative track id")
+np.savez(tmp / "neg.npz", frame=np.array([0, 1]), track_id=np.array([1, -1]), box=np.zeros((2, 4), np.float32),
+         xy=np.zeros((2, N_JOINTS, 2), np.float32), conf=np.zeros((2, N_JOINTS), np.float32), n_frames=5, fps=50.0,
+         width=W, height=H, source="x", model="x")
+raises("... and loading a file that holds one", lambda: PoseTable.load(tmp / "neg.npz"), "negative track id")
+
+print("completeness: the rates use matched numerators and denominators, unrounded (Astra 6, finding 4)")
+
+
+def fake_res(ident_a, ident_b, owned_a, owned_b, unattr, n_unexpl=1):
+    z = {"signal_min": 0.0, "signal_min_left": 0.0, "signal_min_right": 0.0, "segments": 1, "short_segments": 0,
+         "bodyless_segments": 0, "note": "", "labels_matched_own": 0, "bursts_by_hand": {"left": n_unexpl, "right": 0},
+         "unexplained_by_hand": {"left": n_unexpl, "right": 0}, "bursts": n_unexpl, "unexplained": n_unexpl}
+    return {"bursts": [completeness.Burst("V", i, 0.1 * i, "A", "left", 5.0) for i in range(2 * n_unexpl)],
+            "boxers": {"A": z | {"identified_min": ident_a, "own_labels": owned_a},
+                       "B": z | {"identified_min": ident_b, "own_labels": owned_b}},
+            "labels": {"total": owned_a + owned_b + unattr, "owned_a": owned_a, "owned_b": owned_b, "unattributed": unattr,
+                       "matched_own": 0, "matched_unattributed": 0}}
+
+
+# Astra's example: a one-minute video, 60 labels, the two boxers identified for 0.1 min each; only 6 labels fall in
+# the observed boxer-time.
+row_a = olympic_completeness.video_row(fake_res(0.1, 0.1, 3, 3, 54), 60, 1.0)
+tot_a = olympic_completeness.totals([row_a])
+check("own labels per identified boxer-minute = 6 / 0.2 = 30 (NOT 60 / 0.2 = 300)",
+      abs(tot_a["own_labels_per_identified_boxer_min"] - 30.0) < 1e-9, str(tot_a["own_labels_per_identified_boxer_min"]))
+check("labels per VIDEO boxer-minute = 60 / (2 x 1 min) = 30, and 54 of 60 labels (90%) are unattributed",
+      abs(tot_a["labels_per_video_boxer_min"] - 30.0) < 1e-9 and tot_a["labels"]["unattributed"] == 54
+      and abs(tot_a["labels"]["unattributed_share"] - 0.9) < 1e-12 and tot_a["labels"]["total"] == 60)
+check("the old mismatched rate is gone from the output", "labelled_punches_per_identified_boxer_min" not in tot_a)
+# Rounding comes last: two videos with 0.0004 identified minutes each round to 0.0 at 3 decimals.
+rows_u = [olympic_completeness.video_row(fake_res(0.0004, 0.0004, 1, 1, 0), 2, 0.5) for _ in range(2)]
+tot_u = olympic_completeness.totals(rows_u)
+check("aggregation runs on UNROUNDED minutes: 4 unexplained over 0.0016 min = 2500 per boxer-minute (rounded first it would be n/a)",
+      abs(tot_u["unexplained_per_identified_boxer_min"] - 4 / 0.0016) < 1e-6, str(tot_u["unexplained_per_identified_boxer_min"]))
+check("... and only the OUTPUT is rounded", olympic_completeness._round(tot_u)["identified_boxer_min"] == 0.002
+      and olympic_completeness._round(tot_u)["unexplained_per_identified_boxer_min"] == 2500.0)
+check("the per-video rows keep floats unrounded", rows_u[0]["boxers"]["A"]["identified_min"] == 0.0004)
+
+print("completeness: the review sample is a simple random sample (Astra 6, finding 6)")
+mk = lambda v, n: [completeness.Burst(v, 10 * i, 0.2 * i, "AB"[i % 2], "left", 5.0) for i in range(n)]  # noqa: E731
+small = {"V1": mk("V1", 5), "V2": mk("V2", 3), "V3": mk("V3", 4), "V4": []}
+s1, pop1 = completeness.random_sample(small, 4, 7)
+check("the sample has exactly 4 distinct bursts out of a population of 12",
+      len(s1) == 4 and pop1 == 12 and len({(b.video, b.frame, b.boxer) for b in s1}) == 4)
 check("the same seed gives the same sample, whatever the dict order",
-      s1 == completeness.stratified_sample(dict(reversed(list(pool.items()))), 40, 7))
-check("a different seed gives a different sample", s1 != completeness.stratified_sample(pool, 40, 8))
-check("fewer bursts than the sample size: all of them, nothing invented",
-      len(completeness.stratified_sample({"V": mk("V", 5)}, 40, 7)) == 5)
-check("more videos than the sample size: still exactly n, no video twice over its supply",
-      len(completeness.stratified_sample({f"V{i}": mk(f"V{i}", 3) for i in range(60)}, 40, 7)) == 40)
-raises("a zero sample size is refused", lambda: completeness.stratified_sample(pool, 0, 7), "whole number")
+      s1 == completeness.random_sample(dict(reversed(list(small.items()))), 4, 7)[0])
+check("a different seed gives a different sample", s1 != completeness.random_sample(small, 4, 8)[0])
+cnt, vids_seen = {}, set()
+for sd in range(2000):
+    smp, _ = completeness.random_sample(small, 4, sd)
+    for b in smp:
+        cnt[(b.video, b.frame)] = cnt.get((b.video, b.frame), 0) + 1
+        vids_seen.add(b.video)
+p_ = 4 / 12
+se = (p_ * (1 - p_) / 2000) ** 0.5
+rates = {k: v / 2000 for k, v in cnt.items()}
+check("over 2000 seeds all 12 bursts appear, and every burst's inclusion rate is within 3 standard errors of n/N = 1/3",
+      len(rates) == 12 and all(abs(r - p_) <= 3 * se for r in rates.values()),
+      str(sorted((abs(r - p_) / se for r in rates.values()))[-3:]))
+check("... every video can appear (none has zero inclusion probability), and V4 with nothing never does",
+      vids_seen == {"V1", "V2", "V3"})
+# Astra's case: 60 equal videos and a sample of 40: the old quota always took the first 40 video names.
+many = {f"V{i:02d}": mk(f"V{i:02d}", 3) for i in range(60)}
+seen_many, firsts = {}, 0
+for sd in range(600):
+    smp, popm = completeness.random_sample(many, 40, sd)
+    for v in {b.video for b in smp}:
+        seen_many[v] = seen_many.get(v, 0) + 1
+check("60 videos x 3 bursts, sample 40: across seeds EVERY video is sampled, and none is sampled always or never "
+      "(the old quota gave the first 40 names every time)",
+      len(seen_many) == 60 and 0 < min(seen_many.values()) and max(seen_many.values()) < 600 and popm == 180,
+      str((len(seen_many), min(seen_many.values()), max(seen_many.values()))))
+tiny_s, tiny_n = completeness.random_sample({"V": mk("V", 5)}, 40, 7)
+check("fewer bursts than the sample size: all of them, nothing invented, population 5", len(tiny_s) == 5 and tiny_n == 5)
+check("nothing unexplained: an empty sample, population 0", completeness.random_sample({"V": []}, 40, 7) == ([], 0))
+raises("a zero sample size is refused", lambda: completeness.random_sample(small, 0, 7), "whole number")
+raises("a boolean sample size is refused", lambda: completeness.random_sample(small, True, 7), "whole number")
 
 print("olympic_completeness.py end to end")
 (task / "annotations.json").write_text(json.dumps(cvat(lab)), encoding="utf-8")
@@ -621,14 +1122,34 @@ args = ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--out",
 rc = olympic_completeness.main(args)
 comp = json.loads(cj.read_text(encoding="utf-8"))
 csv1 = cc.read_text(encoding="utf-8")
+ca = comp["all"]
 check("exit 0; the totals are the planted ones (3 bursts, 2 unexplained)",
-      rc == 0 and comp["all"]["bursts"] == 3 and comp["all"]["unexplained"] == 2, str(comp["all"]))
+      rc == 0 and ca["bursts"] == 3 and ca["unexplained"] == 2, str(ca))
 check("REAL FACT: unexplained bursts per identified boxer-minute is a positive rate from real minutes",
-      comp["all"]["unexplained_per_identified_boxer_min"] > 0 and comp["all"]["A"]["identified_min"] > 0.2)
+      ca["unexplained_per_identified_boxer_min"] > 0 and ca["A"]["identified_min"] > 0.2)
+check("REAL FACT: own labels per identified boxer-minute are the 32 credited labels over the same minutes; "
+      "whole-video labels per boxer-minute are 33 over 2 x 20 s",
+      ca["labels"]["total"] == 33 and ca["labels"]["unattributed"] == 1
+      and abs(ca["own_labels_per_identified_boxer_min"] - 32 / ca["identified_boxer_min"]) < 0.01
+      and abs(ca["labels_per_video_boxer_min"] - 33 / (2 * 1000 / FPS / 60)) < 0.01 and ca["labels"]["unattributed_share"] == round(1 / 33, 3),
+      str(ca))
+check("the bursts split by how they matched: 1 unattributed, 2 none", ca["bursts_by_match"] == {"own": 0, "unattributed": 1, "none": 2})
+check("the output no longer calls the count a bound or a recall",
+      "events_with_burst" not in json.dumps(comp) and "labelled_with_a_burst" not in json.dumps(comp)
+      and "upper bound" not in json.dumps(comp) and "recall" not in json.dumps(comp))
+check("the sample records its population and design", comp["sample"]["population_unexplained"] == 2
+      and comp["sample"]["n"] == 2 and comp["sample"]["inclusion_prob"] == 1.0 and "simple random" in comp["sample"]["design"])
+check("the report says the table is not content-bound (a legacy table)", comp["videos"]["task_kam2_gh000001"]["video_bound"] is False)
 lines = csv1.strip().splitlines()
-check("the sample file lists video, frame, time, boxer, hand and an EMPTY label column for the user",
-      lines[0] == "video,frame,time_s,boxer,hand,user_label" and len(lines) == 3
-      and all(l.endswith(",") for l in lines[1:]) and all(l.startswith("GH000001,") for l in lines[1:]), csv1)
+check("the sample file lists video, frame, time, boxer, hand, the inclusion probability and an EMPTY label column",
+      lines[0] == "video,frame,time_s,boxer,hand,inclusion_prob,user_label" and len(lines) == 3
+      and all(l.endswith(",") for l in lines[1:]) and all(l.startswith("GH000001,") for l in lines[1:])
+      and all(l.split(",")[5] == "1.000000" for l in lines[1:]), csv1)
+args1 = args[:-1] + ["1"]
+olympic_completeness.main(args1)
+csv_one = cc.read_text(encoding="utf-8").strip().splitlines()
+check("a sample of 1 from the 2 unexplained bursts has inclusion probability 1/2 in every row",
+      len(csv_one) == 2 and csv_one[1].split(",")[5] == "0.500000", str(csv_one))
 olympic_completeness.main(args)
 check("running it again writes the identical sample (reproducible)", cc.read_text(encoding="utf-8") == csv1)
 raises("a missing rule file is refused", lambda: olympic_completeness.main(args[:6] + ["--rule", str(tmp / "nope.json")] + args[8:]),

@@ -346,6 +346,20 @@ pickled = tmp / "evil.npz"
 np.savez(pickled, xy=np.array([{"a": 1}], dtype=object))
 raises("a pickled array in a pose file is refused (allow_pickle off)",
        lambda: PoseSequence.load(pickled))
+import dataclasses  # noqa: E402
+fp_ps = video.fingerprint(clip)
+bound_ps = dataclasses.replace(ps, video_fp=fp_ps)
+bound_ps.save(tmp / "bound.pose.npz")
+check("a PoseSequence's video_fp round-trips; one written without it loads as ''",
+      PoseSequence.load(tmp / "bound.pose.npz").video_fp == fp_ps and PoseSequence.load(f).video_fp == "")
+raises("a malformed fingerprint on a PoseSequence is refused", lambda: dataclasses.replace(ps, video_fp="xyz"))
+try:
+    overlay.render_overlay(clip, dataclasses.replace(ps, video_fp="0" * 64), tmp / "fpno.mp4")
+    fp_msg = ""
+except ValueError as e:
+    fp_msg = str(e)
+check("the overlay refuses a pose whose fingerprint is another recording's", "fingerprint" in fp_msg, fp_msg)
+check("... and draws one whose fingerprint matches", overlay.render_overlay(clip, bound_ps, tmp / "fpok.mp4") == N)
 none = tmp / "none.mp4"
 none.write_bytes(b"")
 raises("extract on an unreadable video fails loudly", lambda: pose_yolo.extract(none, predict_all))
@@ -466,6 +480,7 @@ check("end to end: pose file and overlay both written",
       rc == 0 and (d / "clip.pose.npz").is_file() and (d / "clip.overlay.mp4").is_file())
 rt = PoseSequence.load(d / "clip.pose.npz")
 check("the written pose is the full video, fully detected", len(rt) == N and rt.detected.all())
+check("... and carries the fingerprint of the video it came from", rt.video_fp == video.fingerprint(clip))
 d2 = tmp / "outdir2"
 run_ingest.main(["--video", str(clip), "--out-dir", str(d2), "--no-overlay"], predict=predict_all)
 check("--no-overlay writes no video", not (d2 / "clip.overlay.mp4").exists())

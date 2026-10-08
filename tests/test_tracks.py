@@ -157,12 +157,73 @@ check("each person's id is drawn at their box, below the frame counter",
 # Rows 72-86: the id sits 18 px above the box top (y 90), clear of the skeleton below.
 check("a two-digit id at the right edge is drawn whole: its second digit is on screen",
       yellow(frames[8][72:87, 313:317]) > 5, str(yellow(frames[8][72:87, 313:317])))
-wrong = PoseTable(table.frame, table.track_id, table.box, table.xy, table.conf, N, 25.0, W, H)
+wrong = PoseTable(table.frame, table.track_id, table.box, table.xy, table.conf, N, 25.0, W, H, source=table.source)
 raises("the overlay refuses a table from another video (frame rate)",
        lambda: overlay.render_tracks_overlay(clip, wrong, tmp / "no.mp4"), "different video")
-longer = PoseTable(table.frame, table.track_id, table.box, table.xy, table.conf, N + 5, 50.0, W, H)
+longer = PoseTable(table.frame, table.track_id, table.box, table.xy, table.conf, N + 5, 50.0, W, H, source=table.source)
 raises("the overlay refuses a table longer than the video",
        lambda: overlay.render_tracks_overlay(clip, longer, tmp / "no2.mp4"), "different video")
+
+print("binding a table to its video (Astra 6, finding 8) and negative ids (finding 9)")
+import dataclasses  # noqa: E402
+fp = video.fingerprint(clip)
+check("the fingerprint is a sha256 hex digest, stable between calls",
+      len(fp) == 64 and fp == video.fingerprint(clip) and all(c in "0123456789abcdef" for c in fp))
+big = tmp / "big.bin"
+blob = bytearray(np.random.default_rng(1).integers(0, 256, 12 * 1024 * 1024, dtype=np.uint8).tobytes())
+big.write_bytes(bytes(blob))
+fp0 = video.fingerprint(big)
+
+
+def fp_after(edit):
+    b2 = bytearray(blob)
+    edit(b2)
+    g = tmp / "big2.bin"
+    g.write_bytes(bytes(b2))
+    return video.fingerprint(g)
+
+
+def flip(i):
+    def f(b):
+        b[i] ^= 0xFF
+    return f
+
+
+check("it changes when a byte in the first 4 MiB changes, and in the last 4 MiB",
+      fp_after(flip(100)) != fp0 and fp_after(flip(len(blob) - 100)) != fp0)
+check("... and when the file only gets longer (the size is hashed)", fp_after(lambda b: b.extend(b"\0")) != fp0)
+check("... but NOT for an edit in the middle: it identifies the file, it is not a hash of every byte (documented)",
+      fp_after(flip(6 * 1024 * 1024)) == fp0)
+check("a different recording of the same shape has a different fingerprint", fp != video.fingerprint(big))
+bound = dataclasses.replace(table, video_fp=fp)
+bound.save(tmp / "bound.tracks.npz")
+check("video_fp round-trips through save/load", PoseTable.load(tmp / "bound.tracks.npz").video_fp == fp)
+check("a table without one saves and loads as ''", PoseTable.load(f).video_fp == "" and table.video_fp == "")
+legacy = tmp / "legacy.tracks.npz"
+with np.load(f, allow_pickle=False) as z:
+    old_fields = {k: z[k] for k in z.files if k != "video_fp"}
+np.savez(legacy, **old_fields)
+check("a file written before fingerprints existed (no video_fp field at all) loads as ''", PoseTable.load(legacy).video_fp == "")
+for bad_fp in ("abc", "G" * 64, "A" * 64, 5, "a" * 63):
+    raises(f"a malformed fingerprint {bad_fp!r} is refused at construction",
+           lambda b=bad_fp: dataclasses.replace(table, video_fp=b), "video_fp")
+bad_file = tmp / "badfp.tracks.npz"
+np.savez(bad_file, **(old_fields | {"video_fp": np.array("not-a-digest")}))
+raises("... and when loaded from a file", lambda: PoseTable.load(bad_file), "video_fp")
+check("verify_binding: right name and fingerprint -> True; right name, none stored -> False (unbound)",
+      pose_yolo.verify_binding(bound, clip) is True and pose_yolo.verify_binding(table, clip) is False)
+raises("... a different name is refused", lambda: pose_yolo.verify_binding(dataclasses.replace(table, source="other.mp4"), clip),
+       "'other.mp4', not 'GH000001.mp4'")
+raises("... a different fingerprint is refused",
+       lambda: pose_yolo.verify_binding(dataclasses.replace(table, video_fp="0" * 64), clip), "fingerprint")
+check("... and check_name=False skips only the name",
+      pose_yolo.verify_binding(dataclasses.replace(table, source="x"), clip, check_name=False) is False)
+neg_t = dataclasses.replace(table, track_id=table.track_id.copy())
+neg_t.track_id[0] = -1
+raises("a table with a negative track id is refused (-1 is 'unidentified', never a person)",
+       lambda: dataclasses.replace(neg_t), "negative track id")
+np.savez(tmp / "neg.npz", **(old_fields | {"track_id": np.where(np.arange(len(table.frame)) == 0, -1, table.track_id)}))
+raises("... also when loaded from a file", lambda: PoseTable.load(tmp / "neg.npz"), "negative track id")
 
 print("run_ingest --track")
 calls.clear()
@@ -170,6 +231,8 @@ rc = run_ingest.main(["--video", str(clip), "--out-dir", str(tmp / "o"), "--trac
 check("end to end: tracks file and overlay written",
       rc == 0 and (tmp / "o" / "GH000001.tracks.npz").is_file() and (tmp / "o" / "GH000001.tracks.overlay.mp4").is_file())
 check("... and the single-boxer pose file is not", not (tmp / "o" / "GH000001.pose.npz").exists())
+check("the tracks file written by run_ingest carries the fingerprint of the video it came from",
+      PoseTable.load(tmp / "o" / "GH000001.tracks.npz").video_fp == video.fingerprint(clip))
 
 print("crediting punches to people (Olympic): the label's hand is NOT used to choose")
 import olympic_attribute  # noqa: E402
