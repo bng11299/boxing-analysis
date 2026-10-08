@@ -10,15 +10,23 @@ whether a labelled punch plausibly accounts for it.
   * every labelled event is OWNED by boxer k when the punch was credited
     (olympic.attribute) to a track id that is boxer k's identity somewhere in the
     event's frames, otherwise it is UNATTRIBUTED (ambiguous, unreached, or credited
-    to someone who is not an identified boxer);
+    to a track that is not one of the two selected boxer identities: no owner among them);
   * each boxer's bursts are matched first to that boxer's OWN labels, each label to at
-    most one burst, within TOL_S of the label's frames, as an OPTIMAL assignment (most
-    bursts explained, then least total frame gap; a greedy nearest-first pass can spend a
-    broad label on one burst and strand the next); a label thrown by the other boxer never
-    explains this boxer's burst;
+    most one burst, within TOL_S of the label's frames, as an assignment that is OPTIMAL
+    WITHIN THIS PHASE (most bursts explained, then least total frame gap; a greedy
+    nearest-first pass can spend a broad label on one burst and strand the next); a label
+    thrown by the other boxer never explains this boxer's burst;
   * the bursts still unmatched, of both boxers together, are then matched in the same way,
-    one-to-one, to the UNATTRIBUTED labels (each used once across both boxers; on an exact
-    tie the burst that sorts first by (frame, boxer) gets the label);
+    one-to-one, to the UNATTRIBUTED labels (each used once across both boxers), again
+    optimal within the phase;
+  * the composition of the two phases is NOT necessarily the global maximum of explained
+    bursts: an owned label may take a burst that an unattributed label could also have
+    explained, stranding another burst only the owned label could reach (tolerance 5, bursts
+    at 100 and 120, owned label [99,120], unattributed label [95,95]: the owned phase takes
+    100 and 120 stays unexplained; the reverse split explains both). That is the documented
+    policy (ownership first) and a test pins it;
+  * exact ties go to the burst that sorts first by (frame, boxer), which is A on a
+    simultaneous tie, so ties favour A;
   * what is left is "unexplained": a burst no label accounts for.
 
 An unexplained burst is a CANDIDATE for a missed label, nothing more. The rule misses
@@ -39,7 +47,7 @@ different detections of the same body, a torso apart) is never read as wrist spe
 EXPOSURE. A burst is only seen where the linking identified the boxer, in a segment long
 enough for the rule, with a confident wrist. Those frames (bridged ones included) are the
 boxer's exposure, an explicit mask (see `find_bursts`), and it is the ONE denominator of every
-rate: bursts, unexplained bursts and the boxer's own labels are all counted against it, and a
+rate of the bursts and of the own labels that touch it: those are all counted against it, and a
 burst outside it is an error. Identified minutes (all rows the linking names) are descriptive
 only; whole-video label density is another population and is never compared with these rates.
 
@@ -153,10 +161,13 @@ def span_gap(frame: int, event) -> int:
 
 
 def _match(bursts: "list[tuple]", labels: "list[int]", events, tol: int, taken: set) -> "dict[int, int]":
-    """One-to-one matching of bursts to labels that MAXIMISES the number of matched pairs, then
-    minimises their total span gap (an optimal assignment, `scipy.optimize.linear_sum_assignment`),
-    so a broad label is never spent on a burst that a narrow one could have explained when that
-    leaves another burst unexplained. `bursts` is [(key, frame)], `labels` indexes into `events`;
+    """One-to-one matching of bursts to the labels offered in THIS call that MAXIMISES the number
+    of matched pairs, then minimises their total span gap (an optimal assignment,
+    `scipy.optimize.linear_sum_assignment`), so within the call a broad label is never spent on a
+    burst that a narrow one could have explained when that leaves another burst unexplained.
+    `find_bursts` calls it once per phase (own labels per boxer, then unattributed labels), so the
+    result is optimal within each phase and not necessarily the global maximum (see the module
+    docstring). `bursts` is [(key, frame)], `labels` indexes into `events`;
     labels already in `taken` are unavailable and the used ones are added to it. Only pairs within
     `tol` frames are feasible. Returns {burst key: label index}.
 
@@ -198,7 +209,7 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
     """Bursts per boxer, matched one-to-one to labels (see the module docstring), the EXPOSURE
     they were looked for in, and the labels each boxer owns.
 
-    EXPOSURE (the one denominator for every rate): per boxer, a mask over the video's frames
+    EXPOSURE (the denominator of the burst rates and of the exposure-qualified own-label rate): per boxer, a mask over the video's frames
     that is True on every frame of every PROCESSED segment (not skipped as too short, not
     bodyless) where the bridged track has a valid signal for at least one hand
     (`punchfind.signal_frames(track).any(axis=1)`). Policy: frames that `punchfind.bridge`

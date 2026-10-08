@@ -195,8 +195,9 @@ def main(argv=None) -> int:
                f"{lab['matched_unattributed']} unattributed) -> {a.out}; sample of {len(sample)} of {population} -> {a.sample_out}")
     out_json = json.dumps(
         {"rule": rule, "tolerance_s": completeness.TOL_S, "reacquire": bool(a.reacquire),
-         "matching": "one-to-one optimal assignment (most matches, then least total gap): own labels, then unattributed "
-                     "labels; hand not required",
+         "matching": "one-to-one; optimal within each phase (most matches, then least total gap), own labels first, then "
+                     "unattributed labels, so not necessarily the global maximum; ties to the burst that sorts first "
+                     "(frame, boxer); hand not required",
          "exposure": "frames of processed segments with a valid signal for at least one hand, bridged frames included",
          "videos": _round(videos), "all": _round(tot),
          "sample": {"n": len(sample), "population_unexplained": population, "inclusion_prob": prob,
