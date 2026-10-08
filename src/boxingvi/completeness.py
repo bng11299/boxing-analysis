@@ -106,14 +106,19 @@ def boxer_track(table: PoseTable, linking: Linking, k: int) -> "Track | None":
     return _track_of(table, rows, f"{table.source}#boxer{'AB'[k]}")
 
 
-def boxer_segments(table: PoseTable, linking: Linking, k: int) -> "list[np.ndarray]":
+def boxer_segments(table: PoseTable, linking: Linking, k: int, max_gap: int = 0) -> "list[np.ndarray]":
     """Boxer k's rows split into SEGMENTS (arrays of row indices, frame order): a new segment
-    starts wherever the track id changes or the frame number jumps by more than one."""
+    starts wherever the track id changes (a handover: two detections of possibly different
+    poses, never differenced) or the frames of ONE id are more than `max_gap` missing frames
+    apart. A shorter hole inside one id is the same person and is left for `punchfind.bridge`,
+    as on the footage the rule was tuned on."""
+    if isinstance(max_gap, bool) or not isinstance(max_gap, (int, np.integer)) or max_gap < 0:
+        raise ValueError("max_gap must be a whole number >= 0")
     rows = boxer_rows(table, linking, k)
     if len(rows) == 0:
         return []
     tid, fr = table.track_id[rows], table.frame[rows]
-    cut = np.flatnonzero((np.diff(tid) != 0) | (np.diff(fr) != 1)) + 1
+    cut = np.flatnonzero((np.diff(tid) != 0) | (np.diff(fr) > max_gap + 1)) + 1
     return [rows[a:b] for a, b in zip(np.r_[0, cut], np.r_[cut, len(rows)])]
 
 
@@ -184,7 +189,7 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
         boxers["AB"[k]] = info
         valid = np.zeros(2)                          # frames with a valid signal: left, right
         either = 0
-        for seg in boxer_segments(table, linking, k):
+        for seg in boxer_segments(table, linking, k, max_gap=bridge):
             info["segments"] += 1
             if len(seg) < min_rows:
                 info["short_segments"] += 1

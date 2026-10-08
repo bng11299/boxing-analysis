@@ -736,9 +736,13 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
   tests still fail for their own reason and not for the new name check.
 
 **Decisions that differ from or sharpen the brief**
-- Segments break on a missing frame as the brief says, so a 2-3 frame dropout inside ONE id also ends a
-  segment (the old code bridged it). Conservative; 549 of 3,542 segments are shorter than 5 frames and are
-  skipped (default linking). A hand hole of up to 0.05 s inside a segment is still bridged by `wrist_signal`.
+- Segments break at every id change. As first built (the brief's wording) they also broke on ANY missing
+  frame inside one id, which dropped the 0.05 s pose bridge the rule was tuned with and skipped 549 of 3,542
+  segments as too short. **Changed in review (a reviewer, after a second reviewer's report):** inside ONE id a hole of up to
+  `BRIDGE_S` (2 frames at 50 fps) is the same person and is bridged by `punchfind.bridge` as before; only a
+  longer hole ends the segment. Now 262 of 2,945 segments are under 5 frames (default linking). Tests: a 2-frame
+  hole is bridged (its frames count as signal), a 3-frame hole splits, an id change splits even with no hole;
+  mutations "strict split" (1 fail) and "no id split" (6 fail) are caught.
 - A segment is "too short" under 5 frames (0.1 s at 50 fps = the smoothing window); this value was set
   before the real run.
 - Greedy nearest-first matching, ties by frame, boxer, label index: deterministic, not a maximum matching.
@@ -773,13 +777,13 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
 | `--reacquire`: both identified, median / frame-weighted | 43.5% / 44.5% | 43.5% / 44.5% |
 | videos whose fragments in A / B changed | | 0 of 29 (and 0 of 29 with `--reacquire`) |
 | MILP solve time per video (full-label linking) | | default: max 0.09 s, total 1.3 s; `--reacquire`: max 2.6 s, total 30 s; none near 60 s |
-| bursts / unexplained | 8,135 / 5,506 | 7,994 / 5,783 (own 979, unattributed 1,232, none 5,783) |
-| unexplained per identified boxer-minute | 37.2 | 39.1 (148.1 identified boxer-minutes) |
+| bursts / unexplained | 8,135 / 5,506 | 7,984 / 5,772 (own 973, unattributed 1,239, none 5,772) |
+| unexplained per identified boxer-minute | 37.2 | 39.0 (148.1 identified boxer-minutes) |
 | own labels per identified boxer-minute | (31.1 = ALL labels over the same minutes, wrong) | 10.7 |
 | labels per video boxer-minute (all labels / 2 x 104.3 min) | | 22.1 |
 | unattributed labels | | 3,020 of 4,605 (65.6%); 57.0% with `--reacquire` |
-| labels matched to a burst | 2,705 "within 0.1 s" (not one-to-one) | 2,211 one-to-one (979 own, 1,232 unattributed) |
-| `--reacquire`: unexplained / bursts, per identified boxer-minute, own labels | 5,647 / 8,694, 39.8 | 6,193 / 8,666, 43.7, 14.0 |
+| labels matched to a burst | 2,705 "within 0.1 s" (not one-to-one) | 2,212 one-to-one (973 own, 1,239 unattributed) |
+| `--reacquire`: unexplained / bursts, per identified boxer-minute, own labels | 5,647 / 8,694, 39.8 | 6,185 / 8,657, 43.6, 14.0 |
 
 - The linking is unchanged on this data: the punch-free-chain displacement of F1 is real (the unit test shows
   it) but did not occur in any of the 29 videos. The completeness numbers move because of F2-F4: the
@@ -787,16 +791,17 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
   excuses them) and the like-for-like labelled rate falls to 10.7 per identified boxer-minute, because two
   thirds of the labels cannot be credited to an identified boxer (the identities cover 65.4% of credited
   punches and only 53% of labels are credited at all).
-- **Still not a finding about the labels.** 39.1 unexplained bursts against 10.7 own labels per identified
-  boxer-minute says the rule fires about 3.6 times as often as labels occur; with a rule whose precision on
-  V6 was 0.46 that is expected whether or not the referee missed punches. The sample (seed 20261007,
-  40 of 5,783, inclusion probability 0.0069 each) is for you to classify; nothing was viewed or judged.
+- **Still not a finding about the labels.** 39.0 unexplained bursts against 10.7 own labels per identified
+  boxer-minute is not a like-for-like ratio (two thirds of the labels are unattributed). Like for like: the
+  rule fires 53.9 bursts per identified boxer-minute against 22.1 labels per video boxer-minute, 2.4 times as
+  often; with a rule whose precision on V6 was 0.46 that is expected whether or not the referee missed punches. The sample (seed 20261007,
+  40 of 5,772, inclusion probability 0.0069 each) is for you to classify; nothing was viewed or judged.
   The GH078416 linked overlay was re-rendered (`results/ingest/olympic/GH078416.linked.overlay.mp4`) and NOT opened.
 - All 29 tables are unbound by content (`video_bound: false`, `videos_content_bound: 0`): they predate the
   fingerprint and were accepted on the file name, which matched for all 29. Re-running `run_ingest.py --track`
   would bind them; that was not done.
 
-- **Tests:** `test_linking.py` 219 (was 130), `test_tracks.py` 55 (34), `test_ingest.py` 114 (109);
+- **Tests:** `test_linking.py` 224 (was 130), `test_tracks.py` 55 (34), `test_ingest.py` 114 (109);
   unchanged and green: olympic 33, hands 38, labels 50, pipeline 260, env 36.
 - **Security pass:** a stored fingerprint is validated as 64 lowercase hex on construction and load (a loaded
   file is untrusted); the name and fingerprint checks run before the video is decoded or any output is
@@ -808,7 +813,7 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
   recording is invisible to it; asserted and documented); (2) the 29 existing tables are bound by name only;
   (3) nearest-first matching is greedy, not a maximum matching; (4) a referee fragment can still be absorbed
   as a tail or connector of a punching chain; (5) the identity swap after a crossing is unchanged;
-  (6) 549 short segments and 10 bodyless ones are skipped, so some real bursts are unseen.
+  (6) 262 short segments and 6 bodyless ones are skipped, so some real bursts are unseen.
 
 ### Mutation check, iterations 1-3 (each guard reverted in a copy; `tests/test_linking.py` must fail)
 | Guard reverted | Result | First failing test |

@@ -993,11 +993,26 @@ res_r = completeness.find_bursts(t_r, manual_linking(t_r, [(1, 2), ()]), [], [],
 check("a real punch inside one fragment is still found, exactly one, at the right frame and hand",
       len(res_r["bursts"]) == 1 and abs(res_r["bursts"][0].frame - 100) <= 6 and res_r["bursts"][0].hand == "right"
       and res_r["bursts"][0].boxer == "A", str(res_r["bursts"]))
+BRIDGE_F = int(round(punchfind.BRIDGE_S * FPS))
+check("setup: the rule bridges 2 missing frames at 50 fps", BRIDGE_F == 2, str(BRIDGE_F))
 t_g = two_fragment_table(n=210, split=200, drop=(100, 101), n2=203)
 res_g = completeness.find_bursts(t_g, manual_linking(t_g, [(1, 2), ()]), [], [], RULE)
-check("a missing frame inside one id also ends a segment; a segment under the smoothing window (3 frames) is skipped and counted",
-      res_g["boxers"]["A"]["segments"] == 3 and res_g["boxers"]["A"]["short_segments"] == 1
-      and abs(res_g["boxers"]["A"]["identified_min"] - (100 + 98 + 3) / FPS / 60) < 1e-12, str(res_g["boxers"]["A"]))
+check("a hole of 2 frames inside ONE id is bridged, not a segment end (same person, as on the tuning footage); "
+      "the 3-frame fragment after the handover is under the smoothing window, skipped and counted",
+      res_g["boxers"]["A"]["segments"] == 2 and res_g["boxers"]["A"]["short_segments"] == 1
+      and abs(res_g["boxers"]["A"]["identified_min"] - (198 + 3) / FPS / 60) < 1e-12
+      # 198 rows + the 2 bridged frames carry a signal: the bridge really ran inside the segment
+      and abs(res_g["boxers"]["A"]["signal_min"] - 200 / FPS / 60) < 1e-12, str(res_g["boxers"]["A"]))
+t_g4 = two_fragment_table(n=210, split=200, drop=(100, 101, 102), n2=203)
+res_g4 = completeness.find_bursts(t_g4, manual_linking(t_g4, [(1, 2), ()]), [], [], RULE)
+check("a hole of 3 frames (longer than the bridge) inside one id DOES end a segment",
+      res_g4["boxers"]["A"]["segments"] == 3 and res_g4["boxers"]["A"]["short_segments"] == 1, str(res_g4["boxers"]["A"]))
+lk_g = manual_linking(t_g, [(1, 2), ()])
+check("boxer_segments: an id change splits even with no missing frame and a generous max_gap",
+      [len(x) for x in completeness.boxer_segments(t_j, lk_j, 0, max_gap=50)] == [200, len(t_j.frame) - 200],
+      str([len(x) for x in completeness.boxer_segments(t_j, lk_j, 0, max_gap=50)]))
+raises("boxer_segments refuses a negative max_gap", lambda: completeness.boxer_segments(t_g, lk_g, 0, max_gap=-1), "max_gap")
+raises("boxer_segments refuses a bool max_gap", lambda: completeness.boxer_segments(t_g, lk_g, 0, max_gap=True), "max_gap")
 res_bl = completeness.find_bursts(dataclasses.replace(t_j, conf=np.zeros_like(t_j.conf)), lk_j, [], [], RULE)
 check("... and a segment with no confident body at all is counted as bodyless, not a crash",
       res_bl["boxers"]["A"]["bodyless_segments"] == 2 and res_bl["bursts"] == [] and res_bl["boxers"]["A"]["signal_min"] == 0.0)
