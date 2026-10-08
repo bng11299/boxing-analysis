@@ -97,6 +97,22 @@ def _float_array(z, key: str) -> np.ndarray:
     return a
 
 
+def _text(z, key: str) -> str:
+    """A stored string (source, model, video_fp): a 0-d unicode array, checked BEFORE str()
+    (a number or a vector would otherwise become plausible-looking text)."""
+    a = _field(z, key)
+    if a.shape != () or a.dtype.kind != "U":
+        raise ValueError(f"{key} must be a single string, got shape {a.shape} dtype {a.dtype}")
+    return str(a.item())
+
+
+def _bool_vector(z, key: str) -> np.ndarray:
+    a = _field(z, key)
+    if a.ndim != 1 or a.dtype.kind != "b":
+        raise ValueError(f"{key} must be a 1-D bool array, got shape {a.shape} dtype {a.dtype}")
+    return a
+
+
 def _scalar(z, key: str, whole: bool, lo: float = 0.0) -> "int | float":
     """A stored scalar, validated before conversion: one finite number, whole when `whole`
     (a width of 640.7 is refused, not read as 640), and >= `lo`."""
@@ -155,6 +171,8 @@ class PoseSequence:
 
     def __post_init__(self) -> None:
         _check_fp(self.video_fp)
+        if self.detected.ndim != 1:
+            raise ValueError(f"detected must be a 1-D per-frame mask, got shape {self.detected.shape}")
         f = len(self.detected)
         if self.xy.shape != (f, N_JOINTS, 2) or self.conf.shape != (f, N_JOINTS):
             raise ValueError(f"shape mismatch: xy {self.xy.shape}, conf {self.conf.shape}, "
@@ -200,14 +218,17 @@ class PoseSequence:
 
     @classmethod
     def load(cls, path) -> "PoseSequence":
+        """Load a sequence, with the same raw checks as `PoseTable.load` (dtype and shape before
+        conversion; `detected` must be a 1-D bool array; strings are 0-d strings; a missing field
+        is a ValueError), then the constructor's cross-field checks."""
         with np.load(path, allow_pickle=False) as z:
             fps = _scalar(z, "fps", whole=False)
             if not fps > 0:
                 raise ValueError(f"fps must be positive, got {fps!r}")
-            return cls(xy=_float_array(z, "xy"), conf=_float_array(z, "conf"), detected=z["detected"],
+            return cls(xy=_float_array(z, "xy"), conf=_float_array(z, "conf"), detected=_bool_vector(z, "detected"),
                        fps=fps, width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
-                       source=str(z["source"]), model=str(z["model"]),
-                       video_fp=str(z["video_fp"]) if "video_fp" in z.files else "")
+                       source=_text(z, "source"), model=_text(z, "model"),
+                       video_fp=_text(z, "video_fp") if "video_fp" in z.files else "")
 
 
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
@@ -340,9 +361,14 @@ class PoseTable:
 
     @classmethod
     def load(cls, path) -> "PoseTable":
-        """Load a table. Every stored field is validated BEFORE it is converted (a file is
-        untrusted): whole, in-range frame numbers and ids, a whole n_frames/width/height >= 1,
-        a finite fps > 0. A fraction is refused, not truncated into a different frame or id."""
+        """Load a table. A file is untrusted, so each stored field is read through a helper that
+        checks its raw dtype and shape BEFORE converting it, and a missing field is a ValueError:
+        frame and track_id are 1-D integer (or finite whole-float) arrays in range, box / xy / conf
+        are float arrays, n_frames / width / height are 0-d whole numbers >= 1, fps is a 0-d finite
+        number > 0, source / model / video_fp are 0-d strings. A fraction is refused, not truncated
+        into a different frame or id. Cross-field consistency (matching lengths, frames inside the
+        video, finite coordinates, confidence in [0, 1], no repeated id in a frame) is then checked
+        by the constructor."""
         with np.load(path, allow_pickle=False) as z:
             frame, track_id = _whole_array(z, "frame"), _whole_array(z, "track_id")
             fps = _scalar(z, "fps", whole=False)
@@ -352,8 +378,8 @@ class PoseTable:
                        box=_float_array(z, "box"), xy=_float_array(z, "xy"), conf=_float_array(z, "conf"),
                        n_frames=_scalar(z, "n_frames", whole=True, lo=1), fps=fps,
                        width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
-                       source=str(z["source"]), model=str(z["model"]),
-                       video_fp=str(z["video_fp"]) if "video_fp" in z.files else "")
+                       source=_text(z, "source"), model=_text(z, "model"),
+                       video_fp=_text(z, "video_fp") if "video_fp" in z.files else "")
 
 
 TRACKER_CONFIG = Path(__file__).resolve().parents[2] / "config" / "bytetrack_50fps.yaml"

@@ -353,6 +353,34 @@ for tag_, over_, why_ in (("fps", {"fps": np.float64("nan")}, "finite"), ("width
     except ValueError as e_:
         msg_ = str(e_)
     check(f"a pose file with a bad {tag_} is refused before conversion, for that reason", why_ in msg_, msg_)
+seq_fields = {"xy": ps.xy, "conf": ps.conf, "detected": ps.detected, "fps": 60.0, "width": W, "height": H,
+              "source": "x", "model": "x"}
+
+
+def seq_refusal(tag, over=None, drop=None):
+    pth_ = tmp / f"seq_{tag}.npz"
+    np.savez(pth_, **({k_: v_ for k_, v_ in seq_fields.items() if k_ != drop} | (over or {})))
+    try:
+        PoseSequence.load(pth_)
+        return "did not raise"
+    except ValueError as e_:
+        return str(e_)
+
+
+m_ = seq_refusal("mask2d", {"detected": np.ones((len(ps.detected), 17), bool)})
+check("a (F, 17) bool mask where the (F,) frame mask belongs is refused on load", "1-D bool" in m_, m_)
+m_ = seq_refusal("detint", {"detected": ps.detected.astype(np.int64)})
+check("an integer 'detected' is refused on load", "1-D bool" in m_, m_)
+raises("... and at construction: a (F, 17) detected mask is refused",
+       lambda: PoseSequence(ps.xy, ps.conf, np.ones((len(ps.detected), 17), bool), 60.0, W, H))
+m_ = seq_refusal("numsrc", {"source": np.int64(5)})
+check("a numeric source is refused, not turned into text", "source must be a single string" in m_, m_)
+m_ = seq_refusal("vecmodel", {"model": np.array(["a", "b"])})
+check("a vector model is refused, not str()'d", "model must be a single string" in m_, m_)
+m_ = seq_refusal("nodet", drop="detected")
+check("a missing 'detected' is a ValueError naming it", "'detected' is missing" in m_, m_)
+m_ = seq_refusal("nosrc", drop="source")
+check("a missing 'source' is a ValueError naming it", "'source' is missing" in m_, m_)
 pickled = tmp / "evil.npz"
 np.savez(pickled, xy=np.array([{"a": 1}], dtype=object))
 raises("a pickled array in a pose file is refused (allow_pickle off)",

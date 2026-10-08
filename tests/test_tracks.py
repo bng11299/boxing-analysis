@@ -271,6 +271,15 @@ check("whole-valued FLOAT arrays are still accepted (exactly representable), wit
       np.array_equal(PoseTable.load(stored(frame=table.frame.astype(np.float64), track_id=table.track_id.astype(np.float64))).track_id,
                      table.track_id))
 check("and the ordinary round trip is unchanged", np.array_equal(PoseTable.load(f).frame, table.frame))
+raises("a NUMERIC source is refused, not turned into the text '5'", lambda: PoseTable.load(stored(source=np.int64(5))), "source must be a single string")
+raises("a numeric model is refused", lambda: PoseTable.load(stored(model=np.float64(1.5))), "model must be a single string")
+raises("a vector model (two strings) is refused, not str()'d", lambda: PoseTable.load(stored(model=np.array(["a", "b"]))), "model must be a single string")
+raises("a vector source is refused", lambda: PoseTable.load(stored(source=np.array(["GH000001.mp4", "x"]))), "source must be a single string")
+raises("a numeric video_fp is refused", lambda: PoseTable.load(stored(video_fp=np.int64(7))), "video_fp must be a single string")
+raises("a missing source is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "source", tmp / "nosrc.npz")), "'source' is missing")
+raises("a missing model is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "model", tmp / "nomodel.npz")), "'model' is missing")
+check("a proper string source and model still load, unchanged",
+      PoseTable.load(f).source == table.source and PoseTable.load(f).model == table.model)
 
 print("run_ingest --track")
 calls.clear()
