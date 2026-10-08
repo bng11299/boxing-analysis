@@ -12,10 +12,13 @@ whether a labelled punch plausibly accounts for it.
     event's frames, otherwise it is UNATTRIBUTED (ambiguous, unreached, or credited
     to someone who is not an identified boxer);
   * each boxer's bursts are matched first to that boxer's OWN labels, each label to at
-    most one burst, nearest first, within TOL_S of the label's frames; a label thrown
-    by the other boxer never explains this boxer's burst;
-  * the bursts still unmatched, of both boxers together, are then matched one-to-one to
-    the UNATTRIBUTED labels (each used once across both boxers);
+    most one burst, within TOL_S of the label's frames, as an OPTIMAL assignment (most
+    bursts explained, then least total frame gap; a greedy nearest-first pass can spend a
+    broad label on one burst and strand the next); a label thrown by the other boxer never
+    explains this boxer's burst;
+  * the bursts still unmatched, of both boxers together, are then matched in the same way,
+    one-to-one, to the UNATTRIBUTED labels (each used once across both boxers; on an exact
+    tie the burst that sorts first by (frame, boxer) gets the label);
   * what is left is "unexplained": a burst no label accounts for.
 
 An unexplained burst is a CANDIDATE for a missed label, nothing more. The rule misses
@@ -33,9 +36,15 @@ wherever the track id changes or a frame is missing. The bridging, smoothing, di
 and peak finding all run inside one segment, so a pose jump at an id handover (two
 different detections of the same body, a torso apart) is never read as wrist speed.
 
-Caveats carried into the report: the rule's threshold is V6's (AlphaPose, 24 fps, hooks
-and uppercuts of one athlete), and a burst is only seen where the linking identified the
-boxer, in a segment long enough for the rule, with a confident wrist.
+EXPOSURE. A burst is only seen where the linking identified the boxer, in a segment long
+enough for the rule, with a confident wrist. Those frames (bridged ones included) are the
+boxer's exposure, an explicit mask (see `find_bursts`), and it is the ONE denominator of every
+rate: bursts, unexplained bursts and the boxer's own labels are all counted against it, and a
+burst outside it is an error. Identified minutes (all rows the linking names) are descriptive
+only; whole-video label density is another population and is never compared with these rates.
+
+Caveat carried into the report: the rule's threshold is V6's (AlphaPose, 24 fps, hooks and
+uppercuts of one athlete).
 """
 
 from __future__ import annotations
@@ -44,6 +53,7 @@ import random
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from . import punchfind
 from .data import Track
@@ -143,29 +153,64 @@ def span_gap(frame: int, event) -> int:
 
 
 def _match(bursts: "list[tuple]", labels: "list[int]", events, tol: int, taken: set) -> "dict[int, int]":
-    """Greedy one-to-one matching, nearest first. `bursts` is [(key, frame)], `labels` indexes
-    into `events`; labels already in `taken` are unavailable and the used ones are added to it.
-    Returns {burst key: label index}. Ties are broken by frame, then key, then label index."""
-    pairs = []
-    for key, f in bursts:
-        for li in labels:
-            if li not in taken:
-                g = span_gap(f, events[li])
-                if g <= tol:
-                    pairs.append((g, f, key, li))
-    pairs.sort()
+    """One-to-one matching of bursts to labels that MAXIMISES the number of matched pairs, then
+    minimises their total span gap (an optimal assignment, `scipy.optimize.linear_sum_assignment`),
+    so a broad label is never spent on a burst that a narrow one could have explained when that
+    leaves another burst unexplained. `bursts` is [(key, frame)], `labels` indexes into `events`;
+    labels already in `taken` are unavailable and the used ones are added to it. Only pairs within
+    `tol` frames are feasible. Returns {burst key: label index}.
+
+    Exact ties are resolved by ORDER, not by the solver's whim: bursts are sorted by (frame, key)
+    and labels by (first frame, last frame, index) before the cost matrix is built, and the cost
+    carries two integer tie-breaks below the gap (matched bursts with a lower sorted position
+    first, then labels with a lower position), so of two simultaneous bursts `key=("A", ..)`
+    sorts before `("B", ..)` and takes the single label. The tie-breaks are scaled to stay
+    strictly below one frame of gap, so they never trade a match or a frame of gap for order.
+    Beyond them (a different pair of bursts with the same position sum) the choice is the
+    solver's, which is deterministic for the same input."""
+    avail = sorted((li for li in labels if li not in taken),
+                   key=lambda li: (events[li].first, events[li].last, li))
+    pool = sorted(bursts, key=lambda kf: (kf[1], kf[0]))
+    if not pool or not avail:
+        return {}
+    nb, nl = len(pool), len(avail)
+    r = min(nb, nl)
+    gap = np.array([[span_gap(f, events[li]) for li in avail] for _k, f in pool], dtype=np.int64)
+    feasible = gap <= tol
+    if not feasible.any():
+        return {}
+    k1 = r * nl + 1                              # > any sum of label positions in a matching
+    k2 = r * nb * k1 + k1                        # > any sum of (burst position * k1 + label position)
+    cost = (gap * k2 + np.arange(nb, dtype=np.int64)[:, None] * k1 + np.arange(nl, dtype=np.int64)[None, :])
+    big = int(cost[feasible].max()) * r + 1      # > the cost of ANY assignment made of feasible pairs
+    cost = np.where(feasible, cost, big)
+    rows, cols = linear_sum_assignment(cost)
     got: "dict[int, int]" = {}
-    for _g, _f, key, li in pairs:
-        if key not in got and li not in taken:
-            got[key] = li
-            taken.add(li)
+    for i, j in zip(rows.tolist(), cols.tolist()):
+        if feasible[i, j]:
+            got[pool[i][0]] = avail[j]
+            taken.add(avail[j])
     return got
 
 
 def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, video: str = "",
                 tol_s: float = TOL_S) -> dict:
-    """Bursts per boxer, matched one-to-one to labels (see the module docstring), the minutes
+    """Bursts per boxer, matched one-to-one to labels (see the module docstring), the EXPOSURE
     they were looked for in, and the labels each boxer owns.
+
+    EXPOSURE (the one denominator for every rate): per boxer, a mask over the video's frames
+    that is True on every frame of every PROCESSED segment (not skipped as too short, not
+    bodyless) where the bridged track has a valid signal for at least one hand
+    (`punchfind.signal_frames(track).any(axis=1)`). Policy: frames that `punchfind.bridge`
+    interpolated across a short hole inside one id ARE in the exposure, because the detector
+    runs on the bridged track and may place a peak on one; a frame of a skipped segment is NOT,
+    although the boxer was identified there. Every burst frame is checked to lie in its
+    boxer's exposure (RuntimeError otherwise), so numerator and denominator are the same
+    observation by construction. `identified_min` (rows the linking names) is descriptive only.
+
+    An owned label is "in exposure" when its span [first, last] intersects the owner's
+    exposure; an unattributed label when it intersects either boxer's. The masks are returned
+    under "exposure" as {"A": bool array, "B": bool array}.
 
     `attrs` is `olympic.attribute(events, table)`: one attribution per event, same order."""
     if not tol_s >= 0:
@@ -178,17 +223,20 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
     owner = [event_owner(a, linking) for a in attrs]
 
     raw: "list[list[tuple]]" = [[], []]            # per boxer: (frame, hand index, peak speed)
-    boxers = {}
+    boxers, masks = {}, {}
     for k in (0, 1):
         rows = boxer_rows(table, linking, k)
-        info = {"identified_min": len(rows) / table.fps / 60, "signal_min": 0.0, "signal_min_left": 0.0,
+        info = {"identified_frames": int(len(rows)), "identified_min": len(rows) / table.fps / 60,
+                "exposure_frames": 0, "exposure_min": 0.0, "signal_min_left": 0.0,
                 "signal_min_right": 0.0, "segments": 0, "short_segments": 0, "bodyless_segments": 0,
                 "bursts": 0, "unexplained": 0, "bursts_by_hand": {"left": 0, "right": 0},
                 "unexplained_by_hand": {"left": 0, "right": 0}, "own_labels": sum(o == k for o in owner),
+                "own_labels_in_exposure": 0, "own_labels_outside_exposure": 0,
                 "labels_matched_own": 0, "note": ""}
         boxers["AB"[k]] = info
+        mask = np.zeros(table.n_frames, dtype=bool)
+        masks["AB"[k]] = mask
         valid = np.zeros(2)                          # frames with a valid signal: left, right
-        either = 0
         for seg in boxer_segments(table, linking, k, max_gap=bridge):
             info["segments"] += 1
             if len(seg) < min_rows:
@@ -202,15 +250,29 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
                 continue
             have = punchfind.signal_frames(track)
             valid += have.sum(axis=0)
-            either += int(have.any(axis=1).sum())
+            mask[track.frame_ids[have.any(axis=1)]] = True
             frames, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
             row = {int(f): i for i, f in enumerate(track.frame_ids)}
             for f, h in zip(frames, hands):
                 raw[k].append((int(f), int(h), float(sig[row[int(f)], int(h)])))
-        info["signal_min"] = either / table.fps / 60
+        info["exposure_frames"] = int(mask.sum())
+        info["exposure_min"] = int(mask.sum()) / table.fps / 60
         info["signal_min_left"], info["signal_min_right"] = (valid / table.fps / 60).tolist()
         if len(rows) < 2:
             info["note"] = "fewer than two identified frames"
+        for f, _h, _p in raw[k]:
+            if not mask[f]:
+                raise RuntimeError(f"boxer {'AB'[k]}: a burst at frame {f} lies outside the exposure it was "
+                                   "counted against; numerator and denominator would differ")
+
+    def in_exposure(e, which) -> bool:
+        lo, hi = e.first, min(e.last, table.n_frames - 1)
+        return lo <= hi and any(masks[n][lo:hi + 1].any() for n in which)
+
+    for i, o in enumerate(owner):
+        if o is not None:
+            key = "own_labels_in_exposure" if in_exposure(events[i], "AB"[o]) else "own_labels_outside_exposure"
+            boxers["AB"[o]][key] += 1
 
     # Matching. Keys are (boxer, index in raw[boxer]).
     taken: set = set()
@@ -243,9 +305,10 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
                 info["labels_matched_own"] += 1
     labels = {"total": len(events), "owned_a": sum(o == 0 for o in owner), "owned_b": sum(o == 1 for o in owner),
               "unattributed": sum(o is None for o in owner),
+              "unattributed_in_exposure": sum(o is None and in_exposure(events[i], "AB") for i, o in enumerate(owner)),
               "matched_own": sum(v == "own" for v in how.values()),
               "matched_unattributed": sum(v == "unattributed" for v in how.values())}
-    return {"bursts": bursts, "boxers": boxers, "labels": labels}
+    return {"bursts": bursts, "boxers": boxers, "labels": labels, "exposure": masks}
 
 
 def random_sample(unexplained: "dict[str, list[Burst]]", n: int = SAMPLE_N, seed: int = SAMPLE_SEED
