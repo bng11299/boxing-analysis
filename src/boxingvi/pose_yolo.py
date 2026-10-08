@@ -53,6 +53,66 @@ def _check_fp(fp) -> None:
         raise ValueError("video_fp must be empty or a 64-character lowercase sha256 hex digest")
 
 
+_INT64_MAX = float(2 ** 53)       # beyond this a float cannot hold every whole number exactly
+
+
+def _field(z, key: str) -> np.ndarray:
+    try:
+        return z[key]
+    except KeyError:
+        raise ValueError(f"not a pose file: the field {key!r} is missing") from None
+
+
+def _whole_array(z, key: str, lo: int = 0) -> np.ndarray:
+    """A stored integer array (frame numbers, track ids), VALIDATED BEFORE any conversion: an
+    integer dtype, or a float dtype whose every value is finite and a whole number. A stored
+    -0.5 or 1.9 is refused, never truncated to 0 or 1 (`astype` would have done exactly that
+    and produced a plausible, wrong identity). Values must be >= `lo`."""
+    a = _field(z, key)
+    if a.ndim != 1:
+        raise ValueError(f"{key} must be a 1-D array")
+    if a.dtype.kind in "iu":
+        if a.dtype.kind == "u" and a.size and int(a.max()) > np.iinfo(np.int64).max:
+            raise ValueError(f"{key} holds a value beyond the integer range")
+    elif a.dtype.kind == "f":
+        if not np.isfinite(a).all():
+            raise ValueError(f"{key} must be finite")
+        if (a != np.floor(a)).any():
+            raise ValueError(f"{key} must be whole numbers, not fractions")
+        if a.size and np.abs(a).max() > _INT64_MAX:
+            raise ValueError(f"{key} holds a value beyond the integer range")
+    else:
+        raise ValueError(f"{key} must be an integer array, got dtype {a.dtype}")
+    out = a.astype(np.int64)
+    if out.size and out.min() < lo:
+        raise ValueError("a negative track id: -1 means unidentified and is never a person"
+                         if key == "track_id" else f"{key} holds a value below {lo}")
+    return out
+
+
+def _float_array(z, key: str) -> np.ndarray:
+    a = _field(z, key)
+    if a.dtype.kind != "f":
+        raise ValueError(f"{key} must be a floating-point array, got dtype {a.dtype}")
+    return a
+
+
+def _scalar(z, key: str, whole: bool, lo: float = 0.0) -> "int | float":
+    """A stored scalar, validated before conversion: one finite number, whole when `whole`
+    (a width of 640.7 is refused, not read as 640), and >= `lo`."""
+    a = _field(z, key)
+    if a.shape != () or a.dtype.kind not in "iuf":
+        raise ValueError(f"{key} must be a single number")
+    x = a.item()
+    if isinstance(x, float) and not np.isfinite(x):
+        raise ValueError(f"{key} must be finite")
+    if whole and x != int(x):
+        raise ValueError(f"{key} must be a whole number, got {x!r}")
+    if not x >= lo:
+        raise ValueError(f"{key} must be at least {lo:g}, got {x!r}")
+    return int(x) if whole else float(x)
+
+
 def verify_binding(pose, video, check_name: bool = True) -> bool:
     """Is this pose table / sequence the one extracted from THIS video file?
 
@@ -141,8 +201,11 @@ class PoseSequence:
     @classmethod
     def load(cls, path) -> "PoseSequence":
         with np.load(path, allow_pickle=False) as z:
-            return cls(xy=z["xy"], conf=z["conf"], detected=z["detected"],
-                       fps=float(z["fps"]), width=int(z["width"]), height=int(z["height"]),
+            fps = _scalar(z, "fps", whole=False)
+            if not fps > 0:
+                raise ValueError(f"fps must be positive, got {fps!r}")
+            return cls(xy=_float_array(z, "xy"), conf=_float_array(z, "conf"), detected=z["detected"],
+                       fps=fps, width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
                        source=str(z["source"]), model=str(z["model"]),
                        video_fp=str(z["video_fp"]) if "video_fp" in z.files else "")
 
@@ -277,10 +340,18 @@ class PoseTable:
 
     @classmethod
     def load(cls, path) -> "PoseTable":
+        """Load a table. Every stored field is validated BEFORE it is converted (a file is
+        untrusted): whole, in-range frame numbers and ids, a whole n_frames/width/height >= 1,
+        a finite fps > 0. A fraction is refused, not truncated into a different frame or id."""
         with np.load(path, allow_pickle=False) as z:
-            return cls(frame=z["frame"].astype(np.int64), track_id=z["track_id"].astype(np.int64),
-                       box=z["box"], xy=z["xy"], conf=z["conf"], n_frames=int(z["n_frames"]),
-                       fps=float(z["fps"]), width=int(z["width"]), height=int(z["height"]),
+            frame, track_id = _whole_array(z, "frame"), _whole_array(z, "track_id")
+            fps = _scalar(z, "fps", whole=False)
+            if not fps > 0:
+                raise ValueError(f"fps must be positive, got {fps!r}")
+            return cls(frame=frame, track_id=track_id,
+                       box=_float_array(z, "box"), xy=_float_array(z, "xy"), conf=_float_array(z, "conf"),
+                       n_frames=_scalar(z, "n_frames", whole=True, lo=1), fps=fps,
+                       width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
                        source=str(z["source"]), model=str(z["model"]),
                        video_fp=str(z["video_fp"]) if "video_fp" in z.files else "")
 

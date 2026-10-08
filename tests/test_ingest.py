@@ -342,6 +342,17 @@ raises("a Track with NaN confidence is refused",
                      conf=np.full((3, N_JOINTS), np.nan)))
 check("a Track with no confidence (V6) is still accepted",
       Track(np.arange(3), np.zeros((3, N_JOINTS, 2)), 30.0).conf is None)
+for tag_, over_, why_ in (("fps", {"fps": np.float64("nan")}, "finite"), ("width", {"width": np.float64(640.5)}, "whole number"),
+                          ("height0", {"height": np.int64(0)}, "at least 1")):
+    pth_ = tmp / f"badscalar_{tag_}.npz"
+    np.savez(pth_, **({"xy": ps.xy, "conf": ps.conf, "detected": ps.detected, "fps": 60.0, "width": W, "height": H,
+                       "source": "x", "model": "x"} | over_))
+    try:
+        PoseSequence.load(pth_)
+        msg_ = "did not raise"
+    except ValueError as e_:
+        msg_ = str(e_)
+    check(f"a pose file with a bad {tag_} is refused before conversion, for that reason", why_ in msg_, msg_)
 pickled = tmp / "evil.npz"
 np.savez(pickled, xy=np.array([{"a": 1}], dtype=object))
 raises("a pickled array in a pose file is refused (allow_pickle off)",

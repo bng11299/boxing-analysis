@@ -38,6 +38,11 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"  FAIL  {name}  {detail}")
 
 
+def _missing(fields, key, path):
+    np.savez(path, **{k: v for k, v in fields.items() if k != key})
+    return path
+
+
 def raises(name: str, fn, pattern: str = "") -> None:
     try:
         fn()
@@ -224,6 +229,48 @@ raises("a table with a negative track id is refused (-1 is 'unidentified', never
        lambda: dataclasses.replace(neg_t), "negative track id")
 np.savez(tmp / "neg.npz", **(old_fields | {"track_id": np.where(np.arange(len(table.frame)) == 0, -1, table.track_id)}))
 raises("... also when loaded from a file", lambda: PoseTable.load(tmp / "neg.npz"), "negative track id")
+
+print("a loaded file is validated BEFORE conversion (Astra 6 second review, finding 3)")
+n_rows = len(table.frame)
+
+
+def stored(**over):
+    """Write `old_fields` with some fields replaced; returns the path."""
+    stored.k += 1
+    p_ = tmp / f"raw{stored.k}.npz"
+    np.savez(p_, **(old_fields | over))
+    return p_
+
+
+stored.k = 0
+frac_id = table.track_id.astype(np.float64)
+frac_id[0] = -0.5
+raises("a stored track id of -0.5 is refused as a fraction (astype would have made it id 0)",
+       lambda: PoseTable.load(stored(track_id=frac_id)), "whole numbers")
+frac_fr = table.frame.astype(np.float64)
+frac_fr[1] = 1.9
+raises("a stored frame of 1.9 is refused (astype would have made it frame 1)",
+       lambda: PoseTable.load(stored(frame=frac_fr)), "whole numbers")
+nan_id = table.track_id.astype(np.float64)
+nan_id[0] = np.nan
+raises("a NaN track id is refused", lambda: PoseTable.load(stored(track_id=nan_id)), "finite")
+neg_f = table.frame.astype(np.float64)
+neg_f[0] = -1.0
+raises("a whole but negative frame is refused", lambda: PoseTable.load(stored(frame=neg_f)), "below 0")
+raises("a string-typed id array is refused", lambda: PoseTable.load(stored(track_id=table.track_id.astype(str))), "integer array")
+raises("a 2-D frame array is refused", lambda: PoseTable.load(stored(frame=table.frame.reshape(-1, 1))), "1-D")
+raises("a NaN fps in the file is refused", lambda: PoseTable.load(stored(fps=np.float64("nan"))), "finite")
+raises("a zero fps in the file is refused", lambda: PoseTable.load(stored(fps=np.float64(0.0))), "positive")
+raises("a fractional n_frames (7.5) is refused, not read as 7", lambda: PoseTable.load(stored(n_frames=np.float64(7.5))), "whole number")
+raises("n_frames of 0 is refused", lambda: PoseTable.load(stored(n_frames=np.int64(0))), "at least 1")
+raises("a fractional width is refused", lambda: PoseTable.load(stored(width=np.float64(640.7))), "whole number")
+raises("a width of 0 is refused", lambda: PoseTable.load(stored(height=np.int64(0))), "at least 1")
+raises("a vector where a scalar belongs is refused", lambda: PoseTable.load(stored(fps=np.array([30.0, 60.0]))), "single number")
+raises("a missing field is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "conf", tmp / "missing.npz")), "'conf' is missing")
+check("whole-valued FLOAT arrays are still accepted (exactly representable), with identical content",
+      np.array_equal(PoseTable.load(stored(frame=table.frame.astype(np.float64), track_id=table.track_id.astype(np.float64))).track_id,
+                     table.track_id))
+check("and the ordinary round trip is unchanged", np.array_equal(PoseTable.load(f).frame, table.frame))
 
 print("run_ingest --track")
 calls.clear()
