@@ -80,14 +80,24 @@ def analyse(table, attrs, params: linking.LinkParams = linking.LinkParams()) -> 
         held = linking.link_video(table, mine, params)
     except ValueError:       # too few credited punches in half the video to estimate a ring
         out["credited_in_either_share_heldout"], out["credited_heldout"], out["ring_heldout"] = None, 0, None
+        out["credited_heldout_inside"] = 0
         return lk, out
     # The ring the held-out linking used: it must be a function of `mine` alone (tested).
     out["ring_heldout"] = None if held.region is None else [round(v, 1) for v in
                                                             (held.region.x0, held.region.y0, held.region.x1, held.region.y1)]
     inside = sum(a.track_id in held.ids(0) or a.track_id in held.ids(1) for a in cred)
-    out["credited_in_either_share_heldout"] = round(inside / max(len(cred), 1), 4)
+    out["credited_in_either_share_heldout"] = round(inside / max(len(cred), 1), 4)     # for display only
     out["credited_heldout"] = len(cred)
+    out["credited_heldout_inside"] = int(inside)       # the integer the pooled share is built from
     return lk, out
+
+
+def pooled_heldout_share(rows) -> float:
+    """The pooled held-out share from the per-video INTEGER counts, divided once. Never rebuilt
+    from the rounded per-video shares (a rounded share times its denominator is not a count)."""
+    inside = sum(r["credited_heldout_inside"] for r in rows)
+    total = sum(r["credited_heldout"] for r in rows)
+    return round(inside / max(total, 1), 4)
 
 
 def _pct(x) -> str:
@@ -156,6 +166,7 @@ def main(argv=None) -> int:
         "credited_punches": sum(r["credited_punches"] for r in ok),
         "credited_in_a": sum(r["credited_in_a"] for r in ok), "credited_in_b": sum(r["credited_in_b"] for r in ok),
         "credited_heldout": sum(r["credited_heldout"] for r in ok),
+        "credited_heldout_inside": sum(r["credited_heldout_inside"] for r in ok),
         "videos_content_bound": sum(r["video_bound"] for r in ok),
         "link_solve_s_total": round(sum(r["link_solve_s"] for r in ok), 2),
         "link_solve_s_max": round(max(r["link_solve_s"] for r in ok), 2),
@@ -164,9 +175,7 @@ def main(argv=None) -> int:
     }
     pooled["credited_in_either_share"] = round((pooled["credited_in_a"] + pooled["credited_in_b"])
                                                / max(pooled["credited_punches"], 1), 4)
-    pooled["credited_in_either_share_heldout"] = round(
-        sum(r["credited_in_either_share_heldout"] * r["credited_heldout"] for r in ok if r["credited_heldout"])
-        / max(pooled["credited_heldout"], 1), 4)
+    pooled["credited_in_either_share_heldout"] = pooled_heldout_share(ok)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps({"videos": report, "all": pooled}, indent=1, allow_nan=False), encoding="utf-8")
     print(f"ALL ({pooled['videos_linked']} videos): {pooled['credited_in_a']}+{pooled['credited_in_b']} of "

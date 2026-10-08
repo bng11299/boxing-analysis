@@ -20,6 +20,13 @@ punch-free chain (a referee) can never take a slot from a boxer. A solution that
 not proven optimal within the time limit is an error, never an answer. Fragments no
 chain wants are left out.
 
+Repeatability, stated narrowly: the optimum VALUE is exact and unique; the answer is
+repeatable for the same input and the same solver version. Among exactly equal optima
+(three overlapping fragments with equal rewards allow three equally good pairs) there
+is no canonical choice and no secondary optimisation: the pick is the solver's. Sorting
+the chosen chains (the A / B naming below) happens after the selection and does not
+make the selection solver-independent.
+
 What it cannot do (residuals, tested or reported rather than hidden):
   * It has no appearance model. Where two people cross and the id is lost during
     the crossing, the continuation nearest in space wins, which can be the OTHER
@@ -361,7 +368,8 @@ class Linking:
     nothing qualified. `membership[f, k]` is the track id that is identity k in
     frame f, or -1: the identity is simply not identified there (a gap, or a
     fragment left out). Identity 0 is the one with more credited punches (A), only
-    so that the labels are reproducible: which boxer is "A" means nothing.
+    so that the two names are stable for a given selection: which boxer is "A" means
+    nothing, and the selection itself is the solver's among exactly equal optima.
     """
 
     identities: tuple
@@ -569,7 +577,7 @@ def link(table: PoseTable, credited: "dict[int, int]", region: Region,
     while len(chains) < MAX_CHAINS:
         chains.append(())
 
-    def key(c):   # more punches first, then earlier start, then lower id: reproducible labels
+    def key(c):   # more punches first, then earlier start, then lower id: a stable A / B naming of the chains chosen
         if not c:
             return (1, 0, 0, 0)
         return (0, -sum(by_tid[t].punches for t in c), by_tid[c[0]].first, c[0])
