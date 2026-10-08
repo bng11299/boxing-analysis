@@ -469,7 +469,9 @@ def brute(frags, links, params, require_punch=True):
 
 rng = np.random.default_rng(20261007)
 variants = [LinkParams(), LinkParams(reacquire_s=60.0), LinkParams(chain_points=0.0),
-            LinkParams(punch_points=1.0), LinkParams(punch_points=1.0, reacquire_s=60.0, chain_points=2.0)]
+            LinkParams(punch_points=1.0), LinkParams(punch_points=1.0, reacquire_s=60.0, chain_points=2.0),
+            # ring time worth so much that a punch-free chain (a referee) is worth opening: the punch rule must bind
+            LinkParams(ring_points_per_s=20.0), LinkParams(ring_points_per_s=20.0, punch_points=2.0, reacquire_s=60.0)]
 n_inst = n_exact = n_binds = n_valid = 0
 worst = 0.0
 for inst in range(800):
@@ -494,7 +496,7 @@ for inst in range(800):
     n_valid += (len(got_chains) <= 2 and len(flat) == len(set(flat))
                 and all(sum(by_t[t].punches for t in c) >= 1 for c in got_chains)
                 and all((a, b) in pairs_ok for c in got_chains for a, b in zip(c, c[1:])))
-check("brute force: on 800 random small instances (5 parameter sets) the integer program's objective equals the "
+check("brute force: on 800 random small instances (7 parameter sets) the integer program's objective equals the "
       "enumerated optimum exactly", n_exact == n_inst == 800, f"{n_exact}/{n_inst}, worst difference {worst}")
 check("... and every returned solution is valid: <= 2 chains, disjoint, each with a punch, only candidate links",
       n_valid == n_inst, f"{n_valid}/{n_inst}")
