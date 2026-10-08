@@ -151,7 +151,7 @@ def main(argv=None) -> int:
                               "video_bound": bool(table.video_fp)}
         print(f"{t.name}: both {r['both_identified']:.0%} A {r['identified_a']:.0%} B {r['identified_b']:.0%} | "
               f"credited punches in A/B {r['credited_in_a']}/{r['credited_in_b']} of {r['credited_punches']} "
-              f"({r['credited_in_either_share']:.0%}; {_pct(r['credited_in_either_share_heldout'])} held out) | "
+              f"({_pct(r['credited_in_either_share'])}; {_pct(r['credited_in_either_share_heldout'])} held out) | "
               f"co-presence {r['co_presence']:.0%} | fragments {r['fragments_a']}+{r['fragments_b']} of "
               f"{len(table.ids())} | solve {r['link_solve_s']}s | longest gap A {r['longest_unidentified_a_s']}s B {r['longest_unidentified_b_s']}s")
         if want_overlay == vid:
@@ -175,14 +175,14 @@ def main(argv=None) -> int:
         "median_both_identified": round(statistics.median(r["both_identified"] for r in ok), 4),
         "median_co_presence": round(statistics.median(r["co_presence"] for r in ok), 4),
     }
-    pooled["credited_in_either_share"] = round((pooled["credited_in_a"] + pooled["credited_in_b"])
-                                               / max(pooled["credited_punches"], 1), 4)
+    pooled["credited_in_either_share"] = (round((pooled["credited_in_a"] + pooled["credited_in_b"])
+                                                / pooled["credited_punches"], 4) if pooled["credited_punches"] else None)
     pooled["credited_in_either_share_heldout"] = pooled_heldout_share(ok)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps({"videos": report, "all": pooled}, indent=1, allow_nan=False), encoding="utf-8")
     print(f"ALL ({pooled['videos_linked']} videos): {pooled['credited_in_a']}+{pooled['credited_in_b']} of "
           f"{pooled['credited_punches']} credited punches are on boxer A / B "
-          f"({pooled['credited_in_either_share']:.1%}; {_pct(pooled['credited_in_either_share_heldout'], 1)} with half "
+          f"({_pct(pooled['credited_in_either_share'], 1)}; {_pct(pooled['credited_in_either_share_heldout'], 1)} with half "
           f"held out of the linking); median both-identified {pooled['median_both_identified']:.0%}, "
           f"median co-presence {pooled['median_co_presence']:.0%}; {pooled['videos_content_bound']} of "
           f"{pooled['videos_linked']} tables are bound to their video by content (the rest by file name only); "

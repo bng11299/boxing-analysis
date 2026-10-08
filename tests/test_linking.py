@@ -1425,5 +1425,17 @@ check("a video whose held-out half has a ring but NO credited punch: share None 
 raises("a missing rule file is refused", lambda: olympic_completeness.main(args[:6] + ["--rule", str(tmp / "nope.json")] + args[8:]),
        "no tuned rule")
 
+print("summarise: no credited punch is no measurement (None), never 0%")
+from types import SimpleNamespace  # noqa: E402
+st_none = linking.summarise(lk_j, [SimpleNamespace(track_id=None)] * 3)
+check("three uncredited punches: the share is None, credited_punches 0",
+      st_none["credited_in_either_share"] is None and st_none["credited_punches"] == 0, str(st_none))
+st_one = linking.summarise(lk_j, [SimpleNamespace(track_id=1), SimpleNamespace(track_id=99)])
+check("one of two credited punches on boxer A: the share is exactly 0.5",
+      st_one["credited_in_either_share"] == 0.5 and st_one["credited_in_a"] == 1, str(st_one))
+st_zero = linking.summarise(lk_j, [SimpleNamespace(track_id=99)])
+check("a credited punch on neither boxer: the share is a measured 0.0, not None",
+      st_zero["credited_in_either_share"] == 0.0, str(st_zero))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

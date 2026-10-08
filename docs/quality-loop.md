@@ -928,8 +928,9 @@ ValueError refused it for the wrong reason); it now uses finite coordinates and 
 **Tests:** `test_linking.py` 263 (was 256), `test_tracks.py` 79 (71), `test_ingest.py` 124 (117); olympic 33, hands 38, labels 50,
 pipeline 260, env 36 unchanged.
 **Residual risks:** (1) the two phases are a policy (ownership first), so the explained count can be lower than a global assignment
-would give; (2) `credited_in_either_share` still divides by `max(credited_punches, 1)`: a pool with no credited punches at all would print
-0 rather than n/a (not reachable here, 29 of 29 videos have credited punches); (3) the two output files of `olympic_completeness.py` are
+would give; (2) ~~`credited_in_either_share` divides by `max(credited_punches, 1)`~~ **closed in review (a reviewer):** with no
+credited punch the share is None (json null, printed n/a) per video and pooled; a measured 0.0 (credited punches, none on A or B) is
+still 0.0; 3 tests, mutation `max(nc, 1)` restored -> 1 fail; (3) the two output files of `olympic_completeness.py` are
 written one after the other, not as one atomic transaction.
 
 ### Mutation check, iterations 1-3 (each guard reverted in a copy; `tests/test_linking.py` must fail)

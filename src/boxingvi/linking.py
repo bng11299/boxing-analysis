@@ -632,7 +632,7 @@ def summarise(lk: Linking, attrs) -> dict:
     ids_a, ids_b = lk.ids(0), lk.ids(1)
     ia = sum(x.track_id in ids_a for x in credited)
     ib = sum(x.track_id in ids_b for x in credited)
-    nc = max(len(credited), 1)
+    nc = len(credited)
     return {
         "frames": n,
         "identified_a": round(float(a.mean()), 4), "identified_b": round(float(b.mean()), 4),
@@ -642,7 +642,8 @@ def summarise(lk: Linking, attrs) -> dict:
         "co_presence": round(float(both.sum() / max(min(a.sum(), b.sum()), 1)), 4),
         "credited_punches": len(credited),
         "credited_in_a": ia, "credited_in_b": ib,
-        "credited_in_either_share": round((ia + ib) / nc, 4),
+        # No credited punch: nothing was measured, so no share (None), never 0%.
+        "credited_in_either_share": round((ia + ib) / nc, 4) if nc else None,
         "fragments_a": len(lk.identities[0]), "fragments_b": len(lk.identities[1]),
         "longest_unidentified_a_s": round(_longest_false(a) / lk.fps, 2),
         "longest_unidentified_b_s": round(_longest_false(b) / lk.fps, 2),
