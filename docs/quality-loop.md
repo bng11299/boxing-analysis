@@ -707,16 +707,20 @@ Link each Olympic Boxing video's ByteTrack ids into two boxer identities (`src/b
 
 ### Iteration 4 -- Astra 6 review fixes (2026-10-07; verdict was FIX FIRST: 5 blocking, 4 not)
 
+> **Partly superseded by Iteration 5** (the second review). Three things below were wrong in one respect each and are
+> marked where they occur: the denominator of the completeness rates (F4, F5: identified minutes, not the frames the
+> rule ran on), the greedy matching (F2) and the "like for like" comparison in the numbers. The rest stands.
+
 Order of work: each finding got a failing test first (or a mutation that shows the old behaviour
 fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewritten.
 
 | # | Finding | Fix | Evidence |
 |---|---|---|---|
 | F1 blocking | A punch-free chain (a referee) took a slot, was dropped AFTER solving, and left boxer B empty (A 60 s / 10 punches, B 10 s / 1, referee 60 s / 0) | `linking.solve_chains`: an exact integer program (`scipy.optimize.milp`, zero gap, 300 s limit, anything but "optimal" is a `RuntimeError`) over a two-state layered path model (state 0 = no punch yet, state 1 = holds one; only state 1 may end). networkx (never pinned) is gone. Costs are rounded to 1/1000 point so the solver's absolute gap cannot hide a difference. | Astra's three tracks return A + B = 129 (was A + empty); 800 random instances (7 parameter sets) match an exhaustive enumeration of every pair of vertex-disjoint chains exactly, and the punch rule changes the optimum in at least 20 of them (asserted); negative: a time-limited or failed solve raises |
-| F2 blocking | A burst was "explained" by ANY label within 0.1 s, including one thrown by the other boxer, and one burst near two labels counted both | `completeness.find_bursts`: one-to-one, nearest first, a boxer's OWN labels first (a label is owned by the boxer whose identity holds its credited track id in the event's frames), then the remaining bursts of both boxers against the UNATTRIBUTED labels, each label once. `match` is own / unattributed / none; the matched label's hand is recorded (`hand_agrees`, information only, 62% of matched bursts) and not required. The count is now called "unexplained = candidates for missed labels", not an upper bound; `events_with_burst` is gone. | both boxers burst together, only A labelled: B's burst is unexplained; one burst between two labels matches one; one unattributed label near two bursts matches one; greedy nearest-first unit tests |
+| F2 blocking | A burst was "explained" by ANY label within 0.1 s, including one thrown by the other boxer, and one burst near two labels counted both | `completeness.find_bursts`: one-to-one, nearest first (**greedy; replaced by an optimal assignment in Iteration 5, R2**), a boxer's OWN labels first (a label is owned by the boxer whose identity holds its credited track id in the event's frames), then the remaining bursts of both boxers against the UNATTRIBUTED labels, each label once. `match` is own / unattributed / none; the matched label's hand is recorded (`hand_agrees`, information only, 62% of matched bursts) and not required. The count is now called "unexplained = candidates for missed labels", not an upper bound; `events_with_burst` is gone. | both boxers burst together, only A labelled: B's burst is unexplained; one burst between two labels matches one; one unattributed label near two bursts matches one; greedy nearest-first unit tests |
 | F3 blocking | Joined fragments read a pose jump at a handover as wrist speed (~10 body lengths/s at 50 fps, threshold 3.62) | Rows are split into segments at an id change or a missing frame; `bridge`, `wrist_signal`, `detect` run per segment; segments under the smoothing window (5 frames) are skipped and counted (`short_segments`), segments with no confident body are `bodyless_segments`. | two stationary fragments a torso apart: the joined track reads a burst (asserted in the test as the fault), per segment there is none; a real punch inside one fragment is still found |
-| F4 blocking | All labels of the video were divided by identified boxer-minutes | `own_labels_per_identified_boxer_min` (labels owned by an identified boxer / his identified minutes) and `labels_per_video_boxer_min` (all labels / 2 x video minutes); unattributed labels reported as a count and share; durations and counts aggregated unrounded, rounded only when the json is written; the CLI line compares unexplained with OWN labels per identified boxer-minute | Astra's example (60 labels, 0.1 min each): 6 / 0.2 = 30, not 300; two videos of 0.0004 min each still divide by 0.0016 |
-| F5 | "Signal minutes" averaged the two hands | `signal_min` = elapsed minutes with EITHER hand valid (new `punchfind.signal_frames`, the one definition shared with `signal_coverage`), plus per-hand minutes and per-hand burst / unexplained counts | left wrist invalid, right valid throughout: signal minutes = elapsed, not half |
+| F4 blocking | All labels of the video were divided by identified boxer-minutes (**the matched fix still divided by identified minutes: superseded by Iteration 5, R1**) | `own_labels_per_identified_boxer_min` (labels owned by an identified boxer / his identified minutes) and `labels_per_video_boxer_min` (all labels / 2 x video minutes); unattributed labels reported as a count and share; durations and counts aggregated unrounded, rounded only when the json is written; the CLI line compares unexplained with OWN labels per identified boxer-minute | Astra's example (60 labels, 0.1 min each): 6 / 0.2 = 30, not 300; two videos of 0.0004 min each still divide by 0.0016 |
+| F5 | "Signal minutes" averaged the two hands | (`signal_min` is now `exposure_min`, an explicit mask: Iteration 5) `signal_min` = elapsed minutes with EITHER hand valid (new `punchfind.signal_frames`, the one definition shared with `signal_coverage`), plus per-hand minutes and per-hand burst / unexplained counts | left wrist invalid, right valid throughout: signal minutes = elapsed, not half |
 | F6 | Stratified quota: ties took the first 40 video names whatever the seed, small pools were over-sampled | `completeness.random_sample`: seeded simple random sample without replacement over ALL unexplained bursts, inclusion probability n/N for every burst; the csv has `inclusion_prob` (`user_label` still empty), the json the population N | 2,000 seeds over 12 bursts: every inclusion rate within 3 standard errors of 1/3; 60 videos x 3 bursts, sample 40: every video appears across seeds |
 | F7 | The held-out test would pass with leakage (every fragment had many labels) | `olympic_link.analyse` returns `ring_heldout`; new scene where B's last fragment is supported only by held-out (odd) labels | held-out share 14/18 = 77.8%, and it WOULD read 100% if all labels leaked in (asserted); changing the held-out events' glove boxes moves the full ring and not `ring_heldout`; mutation: pass all attrs, 4 checks fail |
 | F8 blocking | Size, fps and length do not identify a video; a renamed table was accepted by `load_video` and the overlays | `pose_yolo.verify_binding`: the table's `source` must equal the video's file name; `PoseTable` / `PoseSequence` gain `video_fp` = `video.fingerprint(path)` (sha256 of size as 8 bytes big-endian + first 4 MiB + last 4 MiB), written by `run_ingest`, round-tripped by save/load (old files load as ""), verified when present. Empty = accepted on the name alone and reported `video_bound: false`. Used by `olympic_link.load_video`, `olympic_attribute.py`, `render_tracks_overlay`, `render_linked_overlay`, and (content only) `render_overlay`. | same size, rate and length, other name: refused; same name, other recording, with a fingerprint: refused; legacy table: accepted, reported unbound; the fingerprint does not see an edit in the middle of a file (asserted, documented) |
@@ -746,6 +750,7 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
 - A segment is "too short" under 5 frames (0.1 s at 50 fps = the smoothing window); this value was set
   before the real run.
 - Greedy nearest-first matching, ties by frame, boxer, label index: deterministic, not a maximum matching.
+  **Superseded by Iteration 5, R2** (Astra's counterexample: bursts at 100 and 120, owned labels [99,120] and [95,95]).
 - `Linking` gained `solve_s` (not part of equality); `olympic_link.py` reports `link_solve_s`,
   `video_bound`, and pooled `videos_content_bound`.
 - The held-out linking is solved too; its time is not recorded, only the full-label solve.
@@ -778,7 +783,7 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
 | videos whose fragments in A / B changed | | 0 of 29 (and 0 of 29 with `--reacquire`) |
 | MILP solve time per video (full-label linking) | | default: max 0.09 s, total 1.3 s; `--reacquire`: max 2.6 s, total 30 s; none near 60 s |
 | bursts / unexplained | 8,135 / 5,506 | 7,984 / 5,772 (own 973, unattributed 1,239, none 5,772) |
-| unexplained per identified boxer-minute | 37.2 | 39.0 (148.1 identified boxer-minutes) |
+| unexplained per identified boxer-minute (**denominator superseded: Iteration 5 divides by exposure**) | 37.2 | 39.0 (148.1 identified boxer-minutes) |
 | own labels per identified boxer-minute | (31.1 = ALL labels over the same minutes, wrong) | 10.7 |
 | labels per video boxer-minute (all labels / 2 x 104.3 min) | | 22.1 |
 | unattributed labels | | 3,020 of 4,605 (65.6%); 57.0% with `--reacquire` |
@@ -791,11 +796,12 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
   excuses them) and the like-for-like labelled rate falls to 10.7 per identified boxer-minute, because two
   thirds of the labels cannot be credited to an identified boxer (the identities cover 65.4% of credited
   punches and only 53% of labels are credited at all).
-- **Still not a finding about the labels.** 39.0 unexplained bursts against 10.7 own labels per identified
-  boxer-minute is not a like-for-like ratio (two thirds of the labels are unattributed). Like for like: the
-  rule fires 53.9 bursts per identified boxer-minute against 22.1 labels per video boxer-minute, 2.4 times as
-  often; with a rule whose precision on V6 was 0.46 that is expected whether or not the referee missed punches. The sample (seed 20261007,
-  40 of 5,772, inclusion probability 0.0069 each) is for you to classify; nothing was viewed or judged.
+- **Still not a finding about the labels.** Unexplained bursts are candidates; nothing about missed labels follows until
+  the sample is classified. (This bullet used to compare 53.9 bursts per identified boxer-minute with 22.1 labels per
+  video boxer-minute as "like for like" and read the 2.4 times ratio against the rule's V6 precision. Those are two
+  different observation populations and the inference needs recall and transfer assumptions nobody has tested: withdrawn
+  in Iteration 5, R1.) The sample (seed 20261007, 40 of 5,772, inclusion probability 0.0069 each) is for you to
+  classify; nothing was viewed or judged here.
   The GH078416 linked overlay was re-rendered (`results/ingest/olympic/GH078416.linked.overlay.mp4`) and NOT opened.
 - All 29 tables are unbound by content (`video_bound: false`, `videos_content_bound: 0`): they predate the
   fingerprint and were accepted on the file name, which matched for all 29. Re-running `run_ingest.py --track`
@@ -811,9 +817,90 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
   dependency (networkx removed from the code, scipy was already pinned).
 - **Residual risks:** (1) the fingerprint identifies a file, not every byte (an edit in the middle of a
   recording is invisible to it; asserted and documented); (2) the 29 existing tables are bound by name only;
-  (3) nearest-first matching is greedy, not a maximum matching; (4) a referee fragment can still be absorbed
+  (3) nearest-first matching is greedy, not a maximum matching (**fixed in Iteration 5**); (4) a referee fragment can still be absorbed
   as a tail or connector of a punching chain; (5) the identity swap after a crossing is unchanged;
   (6) 262 short segments and 6 bodyless ones are skipped, so some real bursts are unseen.
+
+### Iteration 5 -- Astra 6 second review (2026-10-07; verdict FIX FIRST: 1 blocking, 5 not)
+
+Reviewed `eed8ea0..35da53d`. 35da53d (a reviewer, after the round-2 fixes) had already changed `boxer_segments` to bridge holes of
+up to `BRIDGE_S` inside ONE id and to split only at an id change or a longer hole; that stays.
+
+| # | Finding | Fix | Evidence |
+|---|---|---|---|
+| R1 blocking | `identified_min` counted original rows, but detection runs on BRIDGED segments (a peak can land on an interpolated frame) and skips short / bodyless segments that still counted as identified time; the report called bursts per identified boxer-minute against labels per video boxer-minute "like for like" | `completeness.find_bursts` builds a per-boxer **exposure** mask over the video frames: every frame of every processed segment (not short, not bodyless) where the bridged track has a valid signal for at least one hand (`signal_frames(track).any(axis=1)`), bridged frames INCLUDED (policy stated in the docstring). `exposure_min` = mask.sum() / fps / 60. Every burst frame is asserted to lie in its boxer's exposure (`RuntimeError` otherwise). Own labels are "in exposure" when their span touches the owner's exposure (`own_labels_in_exposure` / `_outside_exposure`); unattributed labels when it touches either boxer's. Rates per boxer and pooled (raw counts and raw frame counts summed, divided last): `unexplained_per_exposure_min`, `bursts_per_exposure_min`, `own_labels_in_exposure_per_exposure_min`. `identified_min` stays as a description and nothing divides by it; `labels_per_video_boxer_min` stays and is labelled a different population. The like-for-like sentence and the precision-based reading are removed from the CLI print and from Iteration 4. | integrated through `find_bursts`: (a) the peak at frame 102, which has no row in the table, is in the numerator and the mask (398 identified rows, 400 exposure frames); (b) a 3-row skipped segment adds 3 identified frames and 0 exposure frames; (c) an owned label wholly inside the skipped segment is `own_labels_outside_exposure`; a patched `signal_frames` that empties the mask makes the run raise; no key anywhere is named `*per_identified*` |
+| R2 | Greedy nearest-first matching strands a burst (tolerance 5, bursts at 100 and 120, owned labels [99,120] and [95,95]: the broad label goes to 100, 120 is left unexplained) and favours A on ties | `completeness._match` is an optimal assignment (`scipy.optimize.linear_sum_assignment`): cost = span gap for feasible pairs (gap <= tolerance), a larger-than-any-feasible-assignment M otherwise, infeasible pairs dropped afterwards, so it maximises the number of matches and then minimises the total gap. Two phases kept (own labels per boxer, then both boxers' leftovers against unattributed labels; a label once). Exact ties: bursts sorted by (frame, key) and labels by (first, last, index), and two integer tie-break terms scaled below one frame of gap, so the burst that sorts first by (frame, boxer) takes a contested label. | the counterexample, a unit test and the same case through `find_bursts` (303 and 337, a broad and a narrow owned label); 400 random small instances equal a brute-force enumeration of (most matches, least total gap); simultaneous bursts of both boxers for one label: A wins the exact tie whatever the list order |
+| R3 | `PoseTable.load` converted (`astype`, `int`, `float`) before checking: a stored id -0.5 became id 0, a frame 1.9 became frame 1 | `pose_yolo._whole_array` / `_scalar` / `_float_array`: dtype kind, finiteness, whole values, range, 1-D shape, scalar shape, `n_frames`/`width`/`height` whole and >= 1, `fps` finite and > 0, a missing field is a `ValueError` naming it. `PoseSequence.load` has the same checks. | fractional negative id, fractional frame, NaN id, whole-but-negative frame, string ids, 2-D frame array, NaN / zero fps, fractional n_frames and width, zero height, vector fps, missing field; whole-valued FLOAT arrays still load unchanged |
+| R4 | Labels enough for a ring but no eligible identity: the rate was `None` and `:.1f` raised after the files were written | `olympic_completeness.main` computes the summary and both files' contents first, then writes, then prints; absent rates print `n/a` and are `null` in the json | every person re-identified every 5 frames (under the 0.2 s fragment minimum): 33 labels, no identity, exit 0, rates null, `n/a` printed, sample file header only |
+| R5 | Equal MILP optima have no canonical selection rule | **Claim narrowed, no secondary optimisation** (as instructed): `linking.py` now says the answer is repeatable for the same input and solver version and that among exactly equal optima the choice is the solver's; the A / B sort names the chains after the selection | docstring only |
+| R6 | Held-out pooling rebuilt counts from rounded shares | `analyse` keeps `credited_heldout_inside` (integer); `olympic_link.pooled_heldout_share` pools integer counts and divides once | 1 of 5 and 4 of 6: rebuilt from rounded shares 0.4546, the integer ratio 5 / 11 = 0.4545 |
+
+**Existing assertions replaced or extended (nothing weakened)**
+- `signal_min` -> `exposure_min` in four assertions: the same quantity (the frames with a valid signal in processed segments) under its new
+  name, now an explicit mask. The values asserted are unchanged (200 / 400 frames).
+- The label-count dict equality gains `unattributed_in_exposure: 1`.
+- The Iteration 4 rate tests (`own_labels_per_identified_boxer_min`, the 60-labels / 0.2 min = 300 example, the 0.0004-minute rounding
+  case, and the end-to-end checks on `ca["...per_identified_boxer_min"]`) encoded the identified-minute denominator that R1 shows to
+  be the wrong observation. They are replaced by exposure-based equivalents with the same intent (matched numerator and denominator;
+  aggregation on unrounded numbers; a real fact from the planted run); the 6 / 0.2 = 30 and 4 / 0.0016 = 2500 arithmetic is kept.
+- The test titled "greedy nearest-first" is renamed; its assertion (the burst on the label takes it, the other takes the farther one)
+  is unchanged and still holds under the optimal assignment.
+
+**Mutation check (each change reverted or broken in the working tree, `git checkout` after; the named suite must fail)**
+| Mutation | Suite | Result | First failing checks |
+|---|---|---|---|
+| R1 rates divide by `identified_min` | test_linking | caught, 4 fail | 6 / 0.2 = 30; 2 / 0.2 = 10; per boxer 1 / 0.1; own-labels rate 1 over 200 frames not 2 over 203 |
+| R1 burst-in-exposure assertion removed | test_linking | caught, 1 | "a burst outside the exposure ... is a RuntimeError" |
+| R1 bridged frames excluded from exposure | test_linking | caught (the run raises the new RuntimeError at frame 102, the suite aborts) + 1 fail | the 2-frame-hole segment test |
+| R1 skipped segment counted in exposure | test_linking | caught, 4 | (b), (c), the video-row rate, the short-segment test |
+| R2 greedy matching restored | test_linking | caught, 4 | counterexample; labels used up; 400-instance brute force; in the scene |
+| R3 `PoseTable.load` coerces before validating | test_tracks | caught, 13 | -0.5 id, 1.9 frame, NaN id, negative frame, string ids, 2-D frame, fractional / zero scalars |
+| R3 `PoseSequence.load` coerces | test_ingest | caught, 3 | NaN fps, fractional width, zero height |
+| R4 `n/a` formatting removed (`None:.1f`) | test_linking | caught (the run crashes on the new test) | zero-identity video |
+| R6 pooled from rounded shares | test_linking | caught, 2 | 5 / 11 = 0.4545 |
+
+**Numbers, before (35da53d) -> after (29 Olympic videos, default parameters; `results/*.json`, gitignored)**
+| Quantity | Before | After |
+|---|---|---|
+| bursts / unexplained | 7,984 / 5,772 | 7,984 / 5,766 (the optimal assignment explains 6 more) |
+| exposure boxer-minutes vs identified boxer-minutes | (identified 148.06; signal 146.40) | exposure 146.40, identified 148.06 |
+| unexplained per exposure-minute | 39.0 per identified | 39.4 |
+| bursts per exposure-minute | 53.9 per identified | 54.5 |
+| own labels in exposure, per exposure-minute | 10.7 (1,585 own labels / identified) | 10.8 (1,580 in exposure) |
+| own labels outside exposure | | 5 of 1,585 |
+| unattributed labels in exposure | | 2,749 of 3,020 |
+| labels matched (own / unattributed) | 973 / 1,239 | 973 / 1,245 |
+| sample N (population), inclusion probability | 5,772 | 5,766, 0.00694 |
+| `--reacquire`: bursts / unexplained | 8,657 / 6,185 | 8,657 / 6,178 |
+| `--reacquire`: exposure vs identified boxer-minutes | | 140.78 vs 141.79 |
+| `--reacquire`: unexplained / bursts / own labels in exposure per exposure-minute | 43.6 / 61.1 / 14.0 per identified | 43.9 / 61.5 / 14.0 |
+| `--reacquire`: own labels outside exposure; unattributed in exposure | | 7 of 1,980; 2,440 of 2,625 |
+| `--reacquire`: labels matched (own / unattributed) | 1,212 / 1,260 | 1,212 / 1,267; sample N 6,178 |
+| held-out credited share, pooled | 50.7% | 601 of 1,185 = 50.72% (credited on A or B, all: 1,585 of 2,423 = 65.4%) |
+| MILP solve time | max 0.09 s, total 1.3 s | max 0.09 s, total 1.22 s |
+
+- **The correction is one of definition, not of size.** On this data the exposure is 98.9% of the identified time (146.40 of 148.06
+  minutes; 99.2% with `--reacquire`), no burst fell outside it in any of the 29 videos (the new assertion held in both runs), and
+  the rates move by about 1%. What changed is that the numerator and the denominator are now guaranteed to describe the same frames,
+  and that the unsupported comparison is gone. Nothing new is learned about the labels: unexplained bursts are candidates for missed
+  labels, and the sample (40 of 5,766, for YOU to classify; nothing was viewed or judged) is what will say how many are punches.
+- 2,749 of the 3,020 unattributed labels lie in time when a linked boxer was in the exposure: the attribution could not tell whose punch
+  it was, not that nobody was being observed. That is a statement about attribution, not about completeness.
+- The linking is unchanged on this data: 0 of 29 videos changed which fragments are in A / B (R5 and R6 do not touch the optimisation);
+  all 29 tables are still unbound by content (`videos_content_bound: 0`). The GH078416 linked overlay was not re-rendered or opened this round.
+
+- **Tests:** `test_linking.py` 256 (was 224), `test_tracks.py` 71 (55), `test_ingest.py` 117 (114); unchanged and green: olympic 33,
+  hands 38, labels 50, pipeline 260, env 36.
+- **Security pass:** a stored pose file is validated before conversion (fractions, NaN, negative, wrong dtype, wrong shape, missing field
+  all fail closed); the burst-in-exposure assertion turns a silent numerator / denominator mismatch into an error; the CLI computes
+  everything before it writes, so a late formatting failure cannot leave half a result; no new dependency (`scipy.optimize` was already
+  used by the MILP).
+- **Residual risks:** (1) exposure is a property of the rule's signal, not of the footage: a frame can be in the exposure while the
+  boxer is hidden behind the referee but the pose is confident; (2) the optimal matching has ties beyond its tie-break (two different
+  sets of bursts with the same position sum); there the solver decides, deterministically for the same input; (3) among exactly equal
+  MILP optima the identity pick is the solver's (R5, claim narrowed and not engineered away); (4) the rule is V6's (AlphaPose, 24 fps)
+  and untuned for 50 fps sparring, so "unexplained" says nothing about missed labels until the sample is classified; (5) the 29 tables
+  are bound by file name only.
 
 ### Mutation check, iterations 1-3 (each guard reverted in a copy; `tests/test_linking.py` must fail)
 | Guard reverted | Result | First failing test |
