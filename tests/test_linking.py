@@ -1007,6 +1007,24 @@ check("setup: two A bursts (303 and 337), a broad and a narrow label both credit
       and completeness.span_gap(303, broad) == 0 and completeness.span_gap(337, broad) == 0, str(pt))
 check("in the scene: BOTH bursts are explained by the two owned labels (greedy left 337 unexplained)",
       [b.match for b in pt] == ["own", "own"] and res_t2["labels"]["matched_own"] == 2, str(pt))
+# The documented LIMITATION, pinned: the matching is optimal within each phase (own labels first, then unattributed), not the
+# global maximum. Same two bursts, but the narrow label is now UNATTRIBUTED. Owned phase: the one owned label ties (gap 0) for
+# both bursts and goes to the first by (frame, boxer): 303. 337 is then out of reach of the unattributed label (gap > 5).
+# Giving the owned label to 337 and the unattributed one to 303 would explain BOTH; this implementation deliberately does not.
+narrow_u = olympic.Event(298, 298, "head", "left", (1, 1, 2, 2), 1)
+ev_t3 = ev_t + [broad, narrow_u]
+at_t3 = olympic.attribute(ev_t3, t_2)
+res_t3 = completeness.find_bursts(t_2, linking.link_video(t_2, at_t3), ev_t3, at_t3, RULE)
+pt3 = [b for b in res_t3["bursts"] if 280 <= b.frame <= 340]
+check("setup: the broad label is A's, the narrow one unattributed, and a global assignment WOULD explain both bursts "
+      "(narrow -> 303 at gap 5, broad -> 337 at gap 0)",
+      at_t3[-2].track_id == 2 and at_t3[-1].track_id is None and [b.frame for b in pt3] == [303, 337]
+      and completeness.span_gap(303, narrow_u) == 5 and completeness.span_gap(337, broad) == 0
+      and completeness.span_gap(337, narrow_u) > 5, str(pt3))
+check("LIMITATION pinned: the owned phase takes burst 303, so 337 stays unexplained and the unattributed label goes unused "
+      "(optimal within each phase, not the global maximum)",
+      [b.match for b in pt3] == ["own", "none"] and res_t3["labels"]["matched_own"] == 1
+      and res_t3["labels"]["matched_unattributed"] == 0, str((pt3, res_t3["labels"])))
 # In a scene: A's left burst at 300 with two A-owned labels 5 frames either side of its speed peak.
 one = base_scene(bursts={"A": [(300, 0)]})
 t_1 = one.table()
@@ -1372,6 +1390,38 @@ check("... and they print as n/a, the unattributed share still printed (all 33 l
       "n/a per exposure minute" in buf0.getvalue() and "33 of 33" in buf0.getvalue(), buf0.getvalue())
 check("the sample is empty: header only", cc0.read_text(encoding="utf-8").strip() == "video,frame,time_s,boxer,hand,inclusion_prob,user_label"
       and c0["sample"]["population_unexplained"] == 0 and c0["sample"]["inclusion_prob"] is None)
+print("olympic_link.py: no held-out observations is not 0% (third review, B2)")
+ev_few = ev_c[::2]                                   # 16 labels: enough for a ring, 8 per half: too few for the held-out ring
+(task / "annotations.json").write_text(json.dumps(cvat(ev_few)), encoding="utf-8")
+cs.table().save(trk / "GH000001.tracks.npz")
+tk_u = olympic.find_tasks(ds)[0]
+tb_u, _, evu, atu = olympic_link.load_video(tk_u, trk)
+lk_u, out_u = olympic_link.analyse(tb_u, atu)
+check("setup: 16 labels link, and the held-out half cannot estimate a ring: no share, no evaluable punch, ring None",
+      len(evu) == 16 and out_u["credited_heldout"] == 0 and out_u["credited_in_either_share_heldout"] is None
+      and out_u["credited_heldout_inside"] == 0 and out_u["ring_heldout"] is None and out_u["credited_in_either_share"] > 0, str(out_u))
+cl_u, bufu = tmp / "res" / "link_unevaluable.json", io.StringIO()
+with contextlib.redirect_stdout(bufu):
+    rcu = olympic_link.main(["--data", str(ds), "--tracks", str(trk), "--out", str(cl_u)])
+lu = json.loads(cl_u.read_text(encoding="utf-8"))
+check("an all-unevaluable pool: exit 0, the pooled held-out share is null (not 0.0), the counts are exact zeros",
+      rcu == 0 and lu["all"]["credited_in_either_share_heldout"] is None and lu["all"]["credited_heldout"] == 0
+      and lu["all"]["credited_heldout_inside"] == 0, str(lu["all"]))
+check("... the per-video row says null too, and the CLI prints n/a, never 0.0%",
+      lu["videos"]["task_kam2_gh000001"]["credited_in_either_share_heldout"] is None
+      and "n/a with half held out" in bufu.getvalue() and "0.0% with half" not in bufu.getvalue()
+      and "n/a held out" in bufu.getvalue(), bufu.getvalue())
+check("pooled_heldout_share: an empty pool and an all-zero pool are None; a pool with data is a number",
+      olympic_link.pooled_heldout_share([]) is None
+      and olympic_link.pooled_heldout_share([{"credited_heldout_inside": 0, "credited_heldout": 0}]) is None
+      and olympic_link.pooled_heldout_share([{"credited_heldout_inside": 0, "credited_heldout": 4}]) == 0.0)
+at_full = olympic.attribute(ev_c, tb_u)
+at_odd_blank = [dataclasses.replace(a_, track_id=None) if i_ % 2 else a_ for i_, a_ in enumerate(at_full)]
+_, out_blank = olympic_link.analyse(tb_u, at_odd_blank)
+check("a video whose held-out half has a ring but NO credited punch: share None too, evaluable count 0 (not 0%)",
+      out_blank["credited_in_either_share_heldout"] is None and out_blank["credited_heldout"] == 0
+      and out_blank["ring_heldout"] is not None, str(out_blank))
+
 raises("a missing rule file is refused", lambda: olympic_completeness.main(args[:6] + ["--rule", str(tmp / "nope.json")] + args[8:]),
        "no tuned rule")
 
