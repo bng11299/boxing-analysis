@@ -86,22 +86,24 @@ def analyse(table, attrs, params: linking.LinkParams = linking.LinkParams()) -> 
     out["ring_heldout"] = None if held.region is None else [round(v, 1) for v in
                                                             (held.region.x0, held.region.y0, held.region.x1, held.region.y1)]
     inside = sum(a.track_id in held.ids(0) or a.track_id in held.ids(1) for a in cred)
-    out["credited_in_either_share_heldout"] = round(inside / max(len(cred), 1), 4)     # for display only
+    # For display only; with no held-out punch to evaluate there is no share (None), never 0.
+    out["credited_in_either_share_heldout"] = round(inside / len(cred), 4) if cred else None
     out["credited_heldout"] = len(cred)
     out["credited_heldout_inside"] = int(inside)       # the integer the pooled share is built from
     return lk, out
 
 
-def pooled_heldout_share(rows) -> float:
+def pooled_heldout_share(rows) -> "float | None":
     """The pooled held-out share from the per-video INTEGER counts, divided once. Never rebuilt
-    from the rounded per-video shares (a rounded share times its denominator is not a count)."""
+    from the rounded per-video shares (a rounded share times its denominator is not a count).
+    None when nothing was evaluable (a zero denominator): no measurement, not a 0% result."""
     inside = sum(r["credited_heldout_inside"] for r in rows)
     total = sum(r["credited_heldout"] for r in rows)
-    return round(inside / max(total, 1), 4)
+    return round(inside / total, 4) if total else None
 
 
-def _pct(x) -> str:
-    return "n/a" if x is None else f"{x:.0%}"
+def _pct(x, nd: int = 0) -> str:
+    return "n/a" if x is None else f"{x:.{nd}%}"
 
 
 def _check_video_id(vid: str) -> str:
@@ -180,7 +182,7 @@ def main(argv=None) -> int:
     a.out.write_text(json.dumps({"videos": report, "all": pooled}, indent=1, allow_nan=False), encoding="utf-8")
     print(f"ALL ({pooled['videos_linked']} videos): {pooled['credited_in_a']}+{pooled['credited_in_b']} of "
           f"{pooled['credited_punches']} credited punches are on boxer A / B "
-          f"({pooled['credited_in_either_share']:.1%}; {pooled['credited_in_either_share_heldout']:.1%} with half "
+          f"({pooled['credited_in_either_share']:.1%}; {_pct(pooled['credited_in_either_share_heldout'], 1)} with half "
           f"held out of the linking); median both-identified {pooled['median_both_identified']:.0%}, "
           f"median co-presence {pooled['median_co_presence']:.0%}; {pooled['videos_content_bound']} of "
           f"{pooled['videos_linked']} tables are bound to their video by content (the rest by file name only); "
