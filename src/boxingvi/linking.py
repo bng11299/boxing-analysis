@@ -11,17 +11,22 @@ if the jump between a's last and b's first position is something a person can do
 in that gap (MAX_SPEED_BL_S body lengths per second, plus JUMP_SLACK_BL). A
 fragment is worth including by its EVIDENCE: labelled punches credited to it, and
 the share of its frames inside the ring (a region read off where credited gloves
-are). Two vertex-disjoint chains of fragments that maximise evidence minus link
-costs are found exactly, as a min-cost flow of 2 units with every fragment split
-into in/out nodes of capacity 1. Fragments no chain wants are left out.
+are). At most two vertex-disjoint chains of fragments, EACH with at least one credited
+punch, that maximise evidence minus link costs are found exactly, as an integer
+program (scipy's HiGHS `milp`) over a two-state layered path model: a chain is in
+state 0 until it has passed a fragment with a credited punch and in state 1 after,
+and only state 1 may end. The punch requirement is part of the optimisation, so a
+punch-free chain (a referee) can never take a slot from a boxer. A solution that is
+not proven optimal within the time limit is an error, never an answer. Fragments no
+chain wants are left out.
 
 What it cannot do (residuals, tested or reported rather than hidden):
   * It has no appearance model. Where two people cross and the id is lost during
     the crossing, the continuation nearest in space wins, which can be the OTHER
     person: an identity SWAP. tests/test_linking.py asserts this behaviour.
   * The referee is in the ring too. Only the punch evidence tells a referee from
-    a boxer, so a referee fragment next to a boxer's gap can be absorbed (a chain with
-    no credited punch at all is emptied, so a referee alone is never an identity).
+    a boxer, so a referee fragment next to a boxer's gap can be absorbed (a chain needs
+    at least one credited punch, so a referee alone is never an identity).
   * Punch evidence is also what decides which chains win, so "most credited punches
     sit inside the two identities" is partly true BY CONSTRUCTION; olympic_link.py
     therefore also reports it with half the punches held out of the linking.
@@ -35,10 +40,12 @@ from __future__ import annotations
 
 import bisect
 import math
+import time
 from dataclasses import dataclass, field
 
-import networkx as nx
 import numpy as np
+from scipy.optimize import Bounds, LinearConstraint, milp
+from scipy.sparse import coo_matrix
 
 from .pose_yolo import PoseTable
 from .punchfind import L_HIP, L_SHOULDER, MIN_CONF, R_HIP, R_SHOULDER
@@ -117,15 +124,23 @@ JUMP_POINTS = 3.0
 GAP_POINTS = 1.0
 SCALE_POINTS = 2.0
 # A chain with no credited punch is not a boxer, whatever its ring time: the referee is in
-# the ring too and throws nothing. Such a chain is emptied rather than reported as an identity.
+# the ring too and throws nothing. The requirement is enforced INSIDE the optimisation (a punch-free
+# chain may not take a slot a boxer could have used). The layered model encodes exactly ">= 1"
+# (state 0 = no punch yet, state 1 = at least one), so this constant must stay 1.
 MIN_CHAIN_PUNCHES = 1
+MAX_CHAINS = 2
+# The solver is exact (HiGHS branch and bound, zero relative gap) or it fails: past this many
+# seconds the answer is an error, not the best solution found so far.
+MILP_TIME_LIMIT_S = 300.0
 # Opening a chain costs 8 points: more than the dearest plausible link (1 + 3 + 1, plus up to
 # 3 for a 4x scale mismatch), so one boxer is never cut in two just to save a link, and less
 # than one credited punch (10), so a second boxer who threw even one still opens a chain.
 # Without it the second chain is free, and the cheapest use of a free chain is to split
 # the only boxer found (found by the first test of a one-boxer scene).
 CHAIN_POINTS = 8.0
-# network simplex wants integer costs; 1/1000 of a point is far below anything meaningful.
+# Rewards and costs are rounded to 1/1000 of a point before solving, so every objective value is an
+# integer number of those units and the solver's absolute gap tolerance (1e-6) can never hide a
+# difference between two solutions; 1/1000 of a point is far below anything meaningful.
 COST_SCALE = 1000
 
 
@@ -357,6 +372,7 @@ class Linking:
     region: "Region | None"
     fragments: tuple = field(default=(), repr=False)
     objective: float = 0.0
+    solve_s: float = field(default=0.0, compare=False)     # wall time of the integer program
 
     def ids(self, k: int) -> frozenset:
         return frozenset(self.identities[k])
@@ -367,6 +383,153 @@ class Linking:
 
     def identified(self, k: int) -> np.ndarray:
         return self.membership[:, k] >= 0
+
+
+def _units(x: float) -> int:
+    return int(round(x * COST_SCALE))
+
+
+def solve_chains(usable: "list[Fragment]", links: "list[Link]", fps: float,
+                 params: LinkParams = LinkParams(), time_limit_s: float = MILP_TIME_LIMIT_S
+                 ) -> "tuple[list[tuple], float]":
+    """The best set of at most two vertex-disjoint forward chains, each holding a credited punch.
+
+    Returns (chains as tuples of track ids, objective in points), objective = the sum of the
+    fragment rewards in the chains - `chain_points` per chain - the cost of every link used
+    (all rounded to 1/COST_SCALE point), or no chains and 0 when nothing is worth including.
+
+    A two-state layered path model on the forward-only DAG. Binary variables: start[f];
+    x[f, s] (f is used, the chain's state AFTER f is s; s = 1 means "the chain already holds a
+    punch"); y[l, s] for each candidate link l = a -> b carrying state s (the state after a);
+    end[f], allowed only from state 1. A fragment with punches exists only in state 1; a
+    punch-free one in both. Flow in = flow out at every node, x[f,0] + x[f,1] <= 1 (a fragment
+    is in at most one chain and counted once), sum start <= 2. Exact: any status but "optimal"
+    raises RuntimeError.
+    """
+    if MIN_CHAIN_PUNCHES != 1:
+        raise RuntimeError("the layered model encodes exactly 'at least one punch'; MIN_CHAIN_PUNCHES must be 1")
+    if not usable:
+        return [], 0.0
+    idx = {f.tid: i for i, f in enumerate(usable)}
+    if len(idx) != len(usable):
+        raise ValueError("duplicate fragment ids")
+    punchy = [f.punches > 0 for f in usable]
+    nvar = 0
+    col: "dict[tuple, int]" = {}
+    obj: "list[int]" = []
+
+    def var(key, cost: int) -> None:
+        nonlocal nvar
+        col[key] = nvar
+        obj.append(cost)
+        nvar += 1
+
+    chain_u = _units(params.chain_points)
+    for i, f in enumerate(usable):
+        r = _units(reward(f, fps, params))
+        var(("start", i), chain_u)
+        if not punchy[i]:
+            var(("x", i, 0), -r)       # the reward is counted once, in whichever state holds the fragment
+            var(("x", i, 1), -r)
+        else:
+            var(("x", i, 1), -r)
+        var(("end", i), 0)
+    lk = []
+    for l in links:
+        if l.a not in idx or l.b not in idx:
+            raise ValueError(f"link {l.a} -> {l.b} names a fragment that is not usable")
+        ia, ib = idx[l.a], idx[l.b]
+        c = _units(l.cost)
+        for s in ((1,) if punchy[ia] else (0, 1)):
+            var(("y", ia, ib, s), c)
+        lk.append((ia, ib))
+
+    inn: "dict[tuple, list]" = {}      # (fragment, state carried by the incoming link) -> columns
+    out: "dict[tuple, list]" = {}      # (fragment, state after it) -> columns
+    for (ia, ib) in lk:
+        for s in (0, 1):
+            k = col.get(("y", ia, ib, s))
+            if k is not None:
+                out.setdefault((ia, s), []).append(k)
+                inn.setdefault((ib, s), []).append(k)
+
+    rows_i, cols_i, vals = [], [], []
+    nrow = 0
+
+    def eq(terms) -> None:
+        nonlocal nrow
+        for k, v in terms:
+            rows_i.append(nrow)
+            cols_i.append(k)
+            vals.append(v)
+        nrow += 1
+
+    for i in range(len(usable)):
+        st, en = col[("start", i)], col[("end", i)]
+        if punchy[i]:
+            x1 = col[("x", i, 1)]
+            eq([(x1, 1), (st, -1)] + [(k, -1) for s in (0, 1) for k in inn.get((i, s), [])])
+            eq([(x1, 1), (en, -1)] + [(k, -1) for k in out.get((i, 1), [])])
+        else:
+            x0, x1 = col[("x", i, 0)], col[("x", i, 1)]
+            eq([(x0, 1), (st, -1)] + [(k, -1) for k in inn.get((i, 0), [])])
+            eq([(x1, 1)] + [(k, -1) for k in inn.get((i, 1), [])])
+            eq([(x0, 1)] + [(k, -1) for k in out.get((i, 0), [])])
+            eq([(x1, 1), (en, -1)] + [(k, -1) for k in out.get((i, 1), [])])
+    n_eq = nrow
+    cap_rows = [[(col[("x", i, 0)], 1), (col[("x", i, 1)], 1)] for i in range(len(usable)) if not punchy[i]]
+    ub = [1.0] * len(cap_rows)
+    cap_rows.append([(col[("start", i)], 1) for i in range(len(usable))])      # sum start <= 2
+    ub.append(float(MAX_CHAINS))
+    ri, ci, vv = [], [], []
+    for r_, terms in enumerate(cap_rows):
+        for k, v in terms:
+            ri.append(r_)
+            ci.append(k)
+            vv.append(v)
+    a_eq = coo_matrix((vals, (rows_i, cols_i)), shape=(n_eq, nvar)).tocsr()
+    a_ub = coo_matrix((vv, (ri, ci)), shape=(len(cap_rows), nvar)).tocsr()
+    t0 = time.perf_counter()
+    res = milp(c=np.asarray(obj, dtype=np.float64),
+               constraints=[LinearConstraint(a_eq, 0.0, 0.0), LinearConstraint(a_ub, -np.inf, np.asarray(ub))],
+               integrality=np.ones(nvar), bounds=Bounds(0.0, 1.0),
+               options={"time_limit": float(time_limit_s), "mip_rel_gap": 0.0, "disp": False})
+    solve_s = time.perf_counter() - t0
+    if res.status != 0 or not res.success or res.x is None:
+        raise RuntimeError(f"the chain optimisation was not solved to proven optimality "
+                           f"(status {res.status}: {res.message}) after {solve_s:.1f} s")
+    x = np.rint(res.x).astype(np.int64)
+    if np.abs(res.x - x).max() > 1e-4:
+        raise RuntimeError("the chain optimisation returned a fractional solution")
+    nxt: "dict[int, int]" = {}
+    link_units = 0
+    for key, k in col.items():
+        if key[0] == "y" and x[k] == 1:
+            if key[1] in nxt:
+                raise RuntimeError("the solution leaves one fragment twice")
+            nxt[key[1]] = key[2]
+            link_units += obj[k]
+    starts = [i for i in range(len(usable)) if x[col[("start", i)]] == 1]
+    if len(starts) > MAX_CHAINS:
+        raise RuntimeError("the solution opens more than two chains")
+    chains, seen = [], set()
+    total_units = -len(starts) * chain_u - link_units
+    for i0 in starts:
+        chain, cur = [i0], i0
+        while cur in nxt:
+            cur = nxt[cur]
+            if cur in chain or cur in seen:       # cannot happen on a forward-only graph
+                raise RuntimeError("the solution contains a cycle or shares a fragment")
+            chain.append(cur)
+        seen.update(chain)
+        if sum(usable[j].punches for j in chain) < MIN_CHAIN_PUNCHES:
+            raise RuntimeError("the solution holds a chain with no credited punch")
+        total_units += sum(_units(reward(usable[j], fps, params)) for j in chain)
+        chains.append(tuple(usable[j].tid for j in chain))
+    if abs(total_units + res.fun) > 0.5:       # res.fun = -(objective in units), up to solver tolerance
+        raise RuntimeError(f"the extracted chains are worth {total_units / COST_SCALE} but the solver reports "
+                           f"{-res.fun / COST_SCALE}")
+    return chains, total_units / COST_SCALE
 
 
 def link(table: PoseTable, credited: "dict[int, int]", region: Region,
@@ -400,50 +563,24 @@ def link(table: PoseTable, credited: "dict[int, int]", region: Region,
     by_tid = {f.tid: f for f in usable}
     links = candidate_links(usable, fps, params)
 
-    g = nx.DiGraph()
-    g.add_node("S", demand=-2)
-    g.add_node("T", demand=2)
-    g.add_edge("S", "T", capacity=2, weight=0)         # an empty chain: nothing qualified
-    for f in usable:
-        g.add_edge("S", (f.tid, "in"), capacity=1, weight=int(round(params.chain_points * COST_SCALE)))
-        # capacity 1: a fragment belongs to at most ONE chain, and is counted once.
-        g.add_edge((f.tid, "in"), (f.tid, "out"), capacity=1, weight=-int(round(reward(f, fps, params) * COST_SCALE)))
-        g.add_edge((f.tid, "out"), "T", capacity=1, weight=0)
-    for l in links:
-        g.add_edge((l.a, "out"), (l.b, "in"), capacity=1, weight=int(round(l.cost * COST_SCALE)))
-    cost, flow = nx.network_simplex(g)
-
-    chains = []
-    for f in usable:
-        if flow["S"].get((f.tid, "in"), 0) > 0:
-            chain, cur = [f.tid], f.tid
-            while True:
-                nxt = [w for w, v in flow[(cur, "out")].items() if v > 0 and w != "T"]
-                if not nxt:
-                    break
-                cur = nxt[0][0]
-                if cur in chain:       # cannot happen on a forward-only graph; never loop on a corrupt one
-                    raise RuntimeError("the flow contains a cycle")
-                chain.append(cur)
-            chains.append(tuple(chain))
-    while len(chains) < 2:
+    t0 = time.perf_counter()
+    chains, objective = solve_chains(usable, links, fps, params)
+    solve_s = time.perf_counter() - t0
+    while len(chains) < MAX_CHAINS:
         chains.append(())
-    if len(chains) > 2:
-        raise RuntimeError("the flow produced more than two chains")   # cannot happen: 2 units
 
     def key(c):   # more punches first, then earlier start, then lower id: reproducible labels
         if not c:
             return (1, 0, 0, 0)
         return (0, -sum(by_tid[t].punches for t in c), by_tid[c[0]].first, c[0])
 
-    chains = [c if sum(by_tid[t].punches for t in c) >= MIN_CHAIN_PUNCHES else () for c in chains]
     chains.sort(key=key)
     membership = np.full((table.n_frames, 2), -1, dtype=np.int64)
     for k, chain in enumerate(chains):
         for t in chain:
             membership[table.frame[rows_of[t]], k] = t
     return Linking(tuple(chains), membership, table.n_frames, table.fps, table.source, region,
-                   tuple(full), -cost / COST_SCALE)
+                   tuple(full), objective, solve_s)
 
 
 def credited_counts(attrs) -> "dict[int, int]":
