@@ -371,8 +371,12 @@ m_ = seq_refusal("mask2d", {"detected": np.ones((len(ps.detected), 17), bool)})
 check("a (F, 17) bool mask where the (F,) frame mask belongs is refused on load", "1-D bool" in m_, m_)
 m_ = seq_refusal("detint", {"detected": ps.detected.astype(np.int64)})
 check("an integer 'detected' is refused on load", "1-D bool" in m_, m_)
-raises("... and at construction: a (F, 17) detected mask is refused",
-       lambda: PoseSequence(ps.xy, ps.conf, np.ones((len(ps.detected), 17), bool), 60.0, W, H))
+try:
+    PoseSequence(np.zeros_like(ps.xy), ps.conf, np.ones((len(ps.detected), 17), bool), 60.0, W, H)
+    m_ = "did not raise"
+except ValueError as e_:
+    m_ = str(e_)
+check("... and at construction (finite coordinates, so only the shape rule can refuse it)", "1-D per-frame mask" in m_, m_)
 m_ = seq_refusal("numsrc", {"source": np.int64(5)})
 check("a numeric source is refused, not turned into text", "source must be a single string" in m_, m_)
 m_ = seq_refusal("vecmodel", {"model": np.array(["a", "b"])})
