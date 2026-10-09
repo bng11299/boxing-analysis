@@ -1,0 +1,631 @@
+"""Tests for the camera's dropped frames ("skips"): video.frame_change, skips.find_skips / Skips,
+completeness.cut_at_skips / check_skips / near_skip_stats, the cut inside find_bursts(_credited), and
+`olympic_framechange.py` / `olympic_completeness.py --skips`.
+
+No Olympic data and no model: videos are synthetic (a sine-grating that moves a known number of pixels per
+frame, written with the repo's own VideoWriter), people are planted with known wrist bursts, and a "skip" is a
+known jump planted at a known frame. The rule's constant (SKIP_RATIO = 3) was not tuned: the boundary tests
+below only pin what the rule says.
+
+Run:  python tests/test_frame_skips.py
+"""
+
+from __future__ import annotations
+
+import contextlib
+import csv
+import dataclasses
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from fractions import Fraction
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
+
+import olympic_completeness  # noqa: E402
+import olympic_framechange  # noqa: E402
+from boxingvi import completeness, olympic, skips, video  # noqa: E402
+from boxingvi.data import N_JOINTS  # noqa: E402
+from boxingvi.linking import Linking  # noqa: E402
+from boxingvi.pose_yolo import PoseTable  # noqa: E402
+
+PASS = FAIL = 0
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  PASS  {name}")
+    else:
+        FAIL += 1
+        print(f"  FAIL  {name}  {detail}")
+
+
+def raises(name: str, fn, pattern: str = "", exc=ValueError) -> None:
+    try:
+        fn()
+    except exc as e:
+        check(name, pattern in str(e), f"wrong reason: {e}")
+    except Exception as e:
+        check(name, False, f"raised {type(e).__name__}: {e}")
+    else:
+        check(name, False, "did not raise")
+
+
+tmp = Path(tempfile.mkdtemp())
+NAN = float("nan")
+
+
+def flat(n, base=1.0, **at):
+    """A change series: `base` everywhere, NaN at frame 0, and `at` overrides as f<frame>=value."""
+    c = np.full(n, base)
+    c[0] = NAN
+    for k, v in at.items():
+        c[int(k[1:])] = v
+    return c
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+print("find_skips: the rule, its boundary and its window")
+n = 80
+check("a steady series has no skip", len(skips.find_skips(flat(n))) == 0)
+check("2.99x the local median is not a skip, 3.01x is, exactly 3.0x is not (strictly greater)",
+      len(skips.find_skips(flat(n, f40=2.99))) == 0 and skips.find_skips(flat(n, f40=3.01)).tolist() == [40]
+      and len(skips.find_skips(flat(n, f40=3.0))) == 0)
+check("the ratio scales with the local level: 30.1 over a level of 10 is a skip, 25 is not (a fixed threshold cannot do both)",
+      skips.find_skips(flat(n, 10.0, f40=30.1)).tolist() == [40] and len(skips.find_skips(flat(n, 10.0, f40=25.0))) == 0
+      and skips.find_skips(flat(n, 1.0, f40=3.01)).tolist() == [40] and len(skips.find_skips(flat(n, 1.0, f40=2.0))) == 0)
+check("frame 0 is NaN and never a skip, however the rest looks",
+      0 not in skips.find_skips(flat(n)).tolist() and 0 not in skips.find_skips(np.r_[NAN, np.full(30, 0.0)]).tolist())
+check("NaN never enters a median: a NaN neighbour does not change the verdict",
+      skips.find_skips(flat(n, f40=3.01, f41=NAN)).tolist() == [40])
+check("the frame next to frame 0 (a window cut short on the left) is judged on its right neighbours",
+      skips.find_skips(flat(n, f1=3.01)).tolist() == [1] and len(skips.find_skips(flat(n, f1=2.99))) == 0)
+check("the last frame (a window cut short on the right) is judged on its left neighbours",
+      skips.find_skips(flat(n, **{f"f{n - 1}": 3.01})).tolist() == [n - 1])
+check("a series shorter than the window still works (5 frames)",
+      skips.find_skips(np.array([NAN, 1.0, 5.0, 1.0, 1.0])).tolist() == [2])
+check("a one-frame video has no skip and does not crash", len(skips.find_skips(np.array([NAN]))) == 0)
+check("an empty series has no skip", len(skips.find_skips(np.zeros(0))) == 0)
+check("a jump of TWO consecutive frames flags both (each is judged against its neighbours, the other one a single outlier)",
+      skips.find_skips(flat(n, f40=6.0, f41=6.0)).tolist() == [40, 41])
+pan = flat(n)
+pan[30:60] = 6.0
+check("a pan: 30 frames at 6x the level are NOT skips, inside the stretch or at its edges (the local median rises with them)",
+      len(skips.find_skips(pan)) == 0, str(skips.find_skips(pan)))
+ramp = np.r_[NAN, np.linspace(1.0, 4.0, n - 1)]
+check("a smooth acceleration (1x to 4x over the video) has no skip", len(skips.find_skips(ramp)) == 0)
+# neighbours: ten at 1.0 on the left, ten at 2.0 on the right. Median without the frame: 1.5, so 4.6 > 4.5 is a skip.
+# Median WITH the frame (the 11th of 21): 2.0, so 4.6 < 6.0 would not be.
+step = np.r_[NAN, np.full(29, 1.0), np.full(10, 1.0), 4.6, np.full(10, 2.0), np.full(29, 2.0)]
+check("the frame is excluded from its own window: 4.6 between ten 1.0s and ten 2.0s is a skip (median 1.5), "
+      "which a window that included it (median 2.0) would miss",
+      skips.find_skips(step).tolist() == [40], str(skips.find_skips(step)))
+check("a perfectly still stretch has median 0 and nothing divides by it: zeros are no skip, a non-zero frame in them is",
+      len(skips.find_skips(flat(n, 0.0))) == 0 and skips.find_skips(flat(n, 0.0, f40=0.5)).tolist() == [40])
+check("the ratio is a parameter: ratio 2 flags 2.5x, which ratio 3 does not",
+      skips.find_skips(flat(n, f40=2.5), ratio=2.0).tolist() == [40] and len(skips.find_skips(flat(n, f40=2.5))) == 0)
+three = flat(n, f39=4.0, f40=5.0, f41=4.0)
+check("the half window is a parameter: three raised frames in a row are all skips against 10 neighbours each side, and none against 1",
+      skips.find_skips(three).tolist() == [39, 40, 41] and len(skips.find_skips(three, half_window=1)) == 0)
+for bad_r in (0, -1, float("nan"), float("inf"), True, "3"):
+    raises(f"ratio {bad_r!r} is refused", lambda r=bad_r: skips.find_skips(flat(n), ratio=r), "ratio")
+for bad_w in (0, -2, 1.5, True, None):
+    raises(f"half_window {bad_w!r} is refused", lambda w=bad_w: skips.find_skips(flat(n), half_window=w), "half_window")
+raises("a 2-D change array is refused", lambda: skips.find_skips(np.zeros((4, 4))), "1-D")
+raises("an integer change array is refused (a counted change is not this signal)", lambda: skips.find_skips(np.arange(10)), "floating")
+raises("a negative change is refused", lambda: skips.find_skips(np.array([NAN, 1.0, -0.5, 1.0])), ">= 0")
+raises("an infinite change is refused", lambda: skips.find_skips(np.array([NAN, 1.0, np.inf, 1.0])), "finite")
+
+# ---------------------------------------------------------------------------------------------------------------------
+print("video.frame_change on synthetic video: one dropped stretch, a pan, a still scene")
+W, H, FPS = 256, 192, 50
+XX, YY = np.arange(W)[None, :], np.arange(H)[:, None]
+
+
+def grating(shift):
+    lum = 128 + 70 * np.sin(2 * np.pi * (XX + shift) / 128) + 40 * np.sin(2 * np.pi * YY / 96)
+    return np.repeat(np.clip(lum, 0, 255).astype(np.uint8)[:, :, None], 3, axis=2)
+
+
+def make(name, shifts):
+    p = tmp / name
+    with video.VideoWriter(p, W, H, Fraction(FPS)) as w:
+        for s in shifts:
+            w.write(grating(s))
+    return p
+
+
+N = 60
+vd = make("drop.mp4", [f + (5 if f >= 30 else 0) for f in range(N)])        # moves 1 px a frame; at 30 it jumps 6 px
+c_drop = video.frame_change(vd)
+base = float(np.median(np.r_[c_drop[1:30], c_drop[31:]]))
+check("frame_change: one value per decoded frame (60) and frame 0 is NaN, everything else a positive number",
+      len(c_drop) == N and np.isnan(c_drop[0]) and np.isfinite(c_drop[1:]).all() and (c_drop[1:] > 0).all(), str(c_drop[:4]))
+check("REAL FACT: the jump of 6 px at frame 30 reads about 6x the 1 px steps around it (between 4x and 8x)",
+      4 < c_drop[30] / base < 8, f"{c_drop[30]:.2f} vs {base:.2f}")
+check("a stretch where 5 frames were dropped: exactly frame 30 is a skip, no other",
+      skips.find_skips(c_drop).tolist() == [30], str(skips.find_skips(c_drop)))
+check("... also at step 1 (every pixel) and step 8: the same single skip",
+      skips.find_skips(video.frame_change(vd, step=1)).tolist() == [30] and skips.find_skips(video.frame_change(vd, step=8)).tolist() == [30])
+c_pan = video.frame_change(make("pan.mp4", [2 * f for f in range(N)]))
+check("a smooth pan (2 px a frame): no skip, and the change is steady (max within 2x the median)",
+      len(skips.find_skips(c_pan)) == 0 and np.nanmax(c_pan) < 2 * np.nanmedian(c_pan), f"{np.nanmax(c_pan):.2f} {np.nanmedian(c_pan):.2f}")
+p_still = tmp / "still.mp4"
+with video.VideoWriter(p_still, W, H, Fraction(FPS)) as w_:
+    for _ in range(N):
+        w_.write(np.full((H, W, 3), 90, np.uint8))
+c_still = video.frame_change(p_still)
+check("a still scene (a flat picture): the change is 0 at every frame after the first, and no skip is found (median 0, no division)",
+      len(c_still) == N and np.isnan(c_still[0]) and (c_still[1:] == 0).all() and len(skips.find_skips(c_still)) == 0, str(c_still[:5]))
+for bad_step in (0, -1, 2.5, True, None):
+    raises(f"frame_change step {bad_step!r} is refused", lambda s=bad_step: video.frame_change(vd, step=s), "step")
+raises("a missing video is a FileNotFoundError, not an empty answer", lambda: video.frame_change(tmp / "nope.mp4"), "no video", FileNotFoundError)
+
+# ---------------------------------------------------------------------------------------------------------------------
+print("Skips: bound to its video, saved and loaded strictly")
+FP = video.fingerprint(vd)
+chg = flat(N, 1.0, f30=5.0)
+sk = skips.Skips(chg, "GH000001.mp4", FP)
+check("Skips derives its frames from the stored change with the stored constants, and knows its length",
+      sk.frames.tolist() == [30] and sk.n_frames == N and sk.ratio == 3.0 and sk.half_window == 10 and sk.step == 4)
+f_ok = tmp / "ok.framechange.npz"
+sk.save(f_ok)
+back = skips.Skips.load(f_ok)
+check("a saved file loads back to the same change (NaN at 0 included), source, fingerprint and constants",
+      np.array_equal(back.change, sk.change, equal_nan=True) and back.source == sk.source and back.video_fp == FP
+      and (back.step, back.ratio, back.half_window) == (4, 3.0, 10) and back.frames.tolist() == [30])
+check("saving leaves no .part file behind and replaces an existing file in whole",
+      not list(tmp.glob("*.part")) and (sk.save(f_ok) or True) and skips.Skips.load(f_ok).frames.tolist() == [30] and not list(tmp.glob("*.part")))
+
+
+def tab(n_frames=N, source="GH000001.mp4", fp=""):
+    """A minimal pose table with one row, for the binding checks."""
+    return PoseTable(np.array([0], np.int64), np.array([1], np.int64), np.zeros((1, 4), np.float32),
+                     np.zeros((1, N_JOINTS, 2), np.float32), np.full((1, N_JOINTS), 0.9, np.float32), n_frames, 50.0,
+                     W, H, source=source, video_fp=fp)
+
+
+check("verify accepts the table of this video (same name, same length, same fingerprint; or no fingerprint on the table)",
+      sk.verify(tab(fp=FP)) is None and sk.verify(tab(fp="")) is None)
+raises("verify refuses a table of another file name", lambda: sk.verify(tab(source="GH999999.mp4")), "pose table for")
+raises("verify refuses a table of another length (59 frames)", lambda: sk.verify(tab(n_frames=N - 1)), "cover")
+raises("verify refuses a table whose content fingerprint differs", lambda: sk.verify(tab(fp="b" * 64)), "fingerprints differ")
+raises("a missing file is a FileNotFoundError that says what to run", lambda: skips.load_for(tab(), tmp / "none.npz"), "olympic_framechange", FileNotFoundError)
+check("load_for loads and verifies in one step", skips.load_for(tab(fp=FP), f_ok).frames.tolist() == [30])
+raises("load_for refuses a mismatching table", lambda: skips.load_for(tab(source="X.mp4"), f_ok), "pose table for")
+
+print("Skips: malformed files are refused")
+
+
+def write(name, **fields):
+    p = tmp / name
+    np.savez(p, **fields)
+    return p
+
+
+good = dict(change=chg, n_frames=N, step=4, ratio=3.0, half_window=10, source="GH000001.mp4", video_fp=FP)
+for what, fields, why in (
+        ("a missing field", {k: v for k, v in good.items() if k != "video_fp"}, "video_fp"),
+        ("an integer change array", good | {"change": np.arange(N)}, "floating"),
+        ("n_frames that disagrees with the array", good | {"n_frames": N + 1}, "n_frames"),
+        ("a fractional n_frames", good | {"n_frames": 60.5}, "whole"),
+        ("a NaN anywhere but frame 0", good | {"change": flat(N, f10=NAN)}, "NaN at frame 0"),
+        ("a change value at frame 0", good | {"change": np.r_[1.0, chg[1:]]}, "NaN at frame 0"),
+        ("a negative change", good | {"change": flat(N, f5=-1.0)}, ">= 0"),
+        ("an infinite change", good | {"change": flat(N, f5=np.inf)}, "finite"),
+        ("a 2-D change", good | {"change": np.zeros((N, 2)), "n_frames": N}, "1-D"),
+        ("a fingerprint that is not a sha256", good | {"video_fp": "zz"}, "sha256"),
+        ("an empty source", good | {"source": ""}, "file name"),
+        ("a source that is a number", good | {"source": 5}, "single string"),
+        ("a zero ratio", good | {"ratio": 0.0}, "ratio"),
+        ("a zero half window", good | {"half_window": 0}, "half_window"),
+        ("a zero step", good | {"step": 0}, "step")):
+    raises(f"refused: {what}", lambda f=fields, w=what: skips.Skips.load(write(f"bad_{abs(hash(w))}.npz", **f)), why)
+obj = tmp / "pickled.npz"
+np.savez(obj, **(good | {"change": np.array([object()], dtype=object)}))
+raises("refused: a pickled object array (no pickle is ever loaded)", lambda: skips.Skips.load(obj), "")
+junk = tmp / "junk.npz"
+junk.write_bytes(b"this is not a zip file at all")
+raises("refused: a file that is not an npz", lambda: skips.Skips.load(junk), "")
+trunc = tmp / "trunc.npz"
+trunc.write_bytes(f_ok.read_bytes()[:40])
+raises("refused: a truncated npz", lambda: skips.Skips.load(trunc), "")
+raises("constructing a Skips with an empty change is refused", lambda: skips.Skips(np.zeros(0), "a.mp4", FP), "at least one frame")
+
+# ---------------------------------------------------------------------------------------------------------------------
+print("cut_at_skips and check_skips: where a segment is cut")
+FRPS = 50.0
+
+
+def pose(cx, cy, ext=(0.0, 0.0)):
+    xy = np.tile([cx, cy], (N_JOINTS, 1)).astype(float)
+    xy[:, 0] += np.linspace(-6, 6, N_JOINTS)
+    xy[5], xy[6] = (cx - 12, cy - 20), (cx + 12, cy - 20)
+    xy[11], xy[12] = (cx - 8, cy + 20), (cx + 8, cy + 20)
+    xy[9], xy[10] = (cx - 24 - ext[0], cy - 4), (cx + 24 + ext[1], cy - 4)
+    return xy, np.array([cx - 28, cy - 52, cx + 28, cy + 56], float)
+
+
+def table_of(n_frames, frames, source="GH000001.mp4", tid=1, bursts=(), steps=(), cx=150.0):
+    """One person (track `tid`) in `frames`, still, with triangular wrist bursts [(frame, hand)] (out and back in 8
+    frames) and permanent wrist STEPS [(frame, hand, px)]: the wrist is `px` further out from that frame on, which
+    the rule reads as one fast jump."""
+    rows = []
+    for f in frames:
+        e = [0.0, 0.0]
+        for b, hand in bursts:
+            e[hand] = max(e[hand], 120.0 * max(0.0, 1 - abs(f - b) / 4))
+        for sf, hand, px in steps:
+            if f >= sf:
+                e[hand] = max(e[hand], float(px))
+        xy, box = pose(cx, 150.0, tuple(e))
+        rows.append((f, tid, box, xy))
+    k = len(rows)
+    return PoseTable(np.array([r[0] for r in rows], np.int64), np.array([r[1] for r in rows], np.int64),
+                     np.array([r[2] for r in rows], np.float32).reshape(k, 4),
+                     np.array([r[3] for r in rows], np.float32).reshape(k, N_JOINTS, 2),
+                     np.full((k, N_JOINTS), 0.9, np.float32), n_frames, FRPS, 640, 480, source=source)
+
+
+tc = table_of(20, list(range(0, 5)) + list(range(8, 13)))       # frames 0-4 and 8-12: one segment with a 3-frame hole
+seg = [np.arange(len(tc.frame))]
+pieces = lambda sk_: [tc.frame[p].tolist() for p in completeness.cut_at_skips(tc, seg, np.array(sk_, np.int64))]   # noqa: E731
+check("no skip: the segment is returned as it was (the same object, not a copy)", completeness.cut_at_skips(tc, seg, None) is seg
+      and completeness.cut_at_skips(tc, seg, np.zeros(0, np.int64)) is seg)
+check("a skip at a row boundary cuts between f-1 and f: skip at 3 -> [0,1,2] and [3,4,8..12]",
+      pieces([3]) == [[0, 1, 2], [3, 4, 8, 9, 10, 11, 12]], str(pieces([3])))
+check("a skip on a frame the segment is MISSING (6, inside the hole the bridge would interpolate across) cuts there",
+      pieces([6]) == [[0, 1, 2, 3, 4], [8, 9, 10, 11, 12]], str(pieces([6])))
+check("a skip on the first frame after the hole (8) cuts there too; one on the last frame before it (4) cuts before 4",
+      pieces([8]) == [[0, 1, 2, 3, 4], [8, 9, 10, 11, 12]] and pieces([4]) == [[0, 1, 2, 3], [4, 8, 9, 10, 11, 12]], str(pieces([4])))
+check("a skip before the segment's first frame or after its last cuts nothing; several skips cut several times",
+      pieces([13]) == [[0, 1, 2, 3, 4, 8, 9, 10, 11, 12]] and pieces([2, 10]) == [[0, 1], [2, 3, 4, 8, 9], [10, 11, 12]], str(pieces([2, 10])))
+check("a skip on the second row (frame 1) cuts off the first row alone",
+      pieces([1]) == [[0], [1, 2, 3, 4, 8, 9, 10, 11, 12]], str(pieces([1])))
+t_late = table_of(20, list(range(5, 15)))
+check("a skip at or before the segment's first row cuts nothing", [t_late.frame[p].tolist() for p in completeness.cut_at_skips(
+      t_late, [np.arange(10)], np.array([3, 5], np.int64))] == [list(range(5, 15))])
+check("segments are cut independently: a skip in one leaves the other whole",
+      [tc.frame[p].tolist() for p in completeness.cut_at_skips(tc, [np.arange(0, 5), np.arange(5, 10)], np.array([3], np.int64))]
+      == [[0, 1, 2], [3, 4], [8, 9, 10, 11, 12]])
+for what, bad in (("an unsorted array", [5, 3]), ("a repeated frame", [3, 3]), ("frame 0", [0, 4]), ("a frame past the video", [4, 20]),
+                  ("a negative frame", [-1]), ("floats", np.array([3.0, 4.0])), ("a 2-D array", np.array([[3, 4]]))):
+    raises(f"check_skips refuses {what}", lambda b=bad: completeness.check_skips(b, 20), "skips")
+check("check_skips accepts None, an empty list and a sorted list, and returns int64",
+      completeness.check_skips(None, 20) is None and len(completeness.check_skips([], 20)) == 0
+      and completeness.check_skips([3, 19], 20).dtype == np.int64)
+
+# ---------------------------------------------------------------------------------------------------------------------
+print("the cut in find_bursts_credited / find_bursts: a skip-made burst goes, a real punch near one stays, skips=None is unchanged")
+RULE = {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4}
+NS = 400
+
+
+def label(table, tid, first, last, hand):
+    pts = [table.xy[np.flatnonzero((table.frame == f) & (table.track_id == tid))[0], 9 + hand] for f in range(first, last + 1)]
+    pts = np.array(pts)
+    lo, hi = pts.min(axis=0) - 10, pts.max(axis=0) + 10
+    return olympic.Event(first, last, "head", ("left", "right")[hand], (float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])), 1)
+
+
+def run(table, events, **kw):
+    attrs = olympic.attribute(events, table)
+    return completeness.find_bursts_credited(table, events, attrs, RULE, video="GH000001", **kw)
+
+
+near = lambda f, want, tol=6: abs(f - want) <= tol    # noqa: E731
+frames_of = lambda res: sorted(b.frame for b in res["bursts"])    # noqa: E731
+
+# one labelled real punch at 60 (so the fragment is credited), and the wrist JUMPS 120 px at frame 200 (a dropped stretch)
+tJ = table_of(NS, range(NS), bursts=[(60, 1)], steps=[(200, 0, 120)])
+evJ = [label(tJ, 1, 58, 62, 1)]
+r_off = run(tJ, evJ)
+r_on = run(tJ, evJ, skips=np.array([200]))
+check("without skips the one-frame jump at 200 is read as a punch: two bursts, the real one at 60 (explained) and one near 200 (unexplained)",
+      len(r_off["bursts"]) == 2 and near(r_off["bursts"][0].frame, 60) and r_off["bursts"][0].explained
+      and near(r_off["bursts"][1].frame, 200, 4) and not r_off["bursts"][1].explained, str(frames_of(r_off)))
+check("with the skip at 200 the jump is cut out: only the real punch at 60 remains, still explained",
+      len(r_on["bursts"]) == 1 and near(r_on["bursts"][0].frame, 60) and r_on["bursts"][0].explained, str(frames_of(r_on)))
+check("... the fragment is two segments instead of one, and the exposure is still all 400 frames (both pieces are long)",
+      r_off["fragments"][1]["segments"] == 1 and r_on["fragments"][1]["segments"] == 2
+      and r_on["fragments"][1]["exposure_frames"] == NS and int(r_on["exposure"][1].sum()) == NS, str(r_on["fragments"][1]))
+r_far = run(tJ, evJ, skips=np.array([300]))
+check("a skip elsewhere (300) leaves the jump at 200 a burst: the cut acts only where the skip is",
+      len(r_far["bursts"]) == 2 and near(r_far["bursts"][1].frame, 200, 4), str(frames_of(r_far)))
+r_b = run(tJ, evJ, skips=np.array([201]))
+check("a skip one frame off (201) does NOT cut the jump between 199 and 200: the cut is between f-1 and f of the skip, not a window",
+      len(r_b["bursts"]) == 2 and near(r_b["bursts"][1].frame, 200, 4), str(frames_of(r_b)))
+
+# a real punch two frames from a skip is still found
+tN = table_of(NS, range(NS), bursts=[(60, 1), (150, 0)])
+evN = [label(tN, 1, 58, 62, 1)]
+r_n0 = run(tN, evN)
+for d in (-2, 2):
+    r_n = run(tN, evN, skips=np.array([150 + d]))
+    k_ = sum(140 <= b.frame <= 160 for b in r_n["bursts"])
+    check(f"a real punch at 150 with a skip {d:+d} frames away is still found: one or two bursts within 140..160 (the cut can split a "
+          "punch in two), and the real punch at 60 is untouched",
+          1 <= k_ <= 2 and any(near(b.frame, 60) for b in r_n["bursts"]) and sum(near(b.frame, 150, 10) for b in r_n0["bursts"]) == 1,
+          str(frames_of(r_n)))
+check("setup: without skips the real punch at 150 is a burst near 150, unexplained", any(near(b.frame, 150, 4) and not b.explained for b in r_n0["bursts"]))
+
+# skips=None / empty / outside every segment: identical to not passing it
+same = lambda a, b: [(x.frame, x.hand, x.match, x.track_id, x.peak_speed) for x in a["bursts"]] == [   # noqa: E731
+    (x.frame, x.hand, x.match, x.track_id, x.peak_speed) for x in b["bursts"]] and a["fragments"] == b["fragments"] and a["labels"] == b["labels"]
+check("skips=None is exactly the old output (bursts with their peak speeds, fragments, labels), and so are an empty list and a skip beyond the track",
+      same(run(tJ, evJ), run(tJ, evJ, skips=None)) and same(run(tJ, evJ), run(tJ, evJ, skips=[]))
+      and same(r_off, run(table_of(NS + 50, range(NS), bursts=[(60, 1)], steps=[(200, 0, 120)]), evJ, skips=np.array([NS + 10]))))
+raises("find_bursts_credited refuses a skip list outside the video", lambda: run(tJ, evJ, skips=np.array([NS])), "skips")
+raises("find_bursts_credited refuses an unsorted skip list", lambda: run(tJ, evJ, skips=np.array([200, 100])), "sorted")
+
+# the linking path: find_bursts cuts through the same function (boxer A is the one person, track 1, for the whole video)
+mem = np.full((NS, 2), -1, np.int64)
+mem[:, 0] = 1
+lk = Linking(identities=((1,), ()), membership=mem, n_frames=NS, fps=FRPS, source=tJ.source, region=None)
+atJ = olympic.attribute(evJ, tJ)
+f_off = completeness.find_bursts(tJ, lk, evJ, atJ, RULE, video="GH000001")
+f_on = completeness.find_bursts(tJ, lk, evJ, atJ, RULE, video="GH000001", skips=np.array([200]))
+check("find_bursts (the linking path) cuts too: boxer A has the jump as a burst without skips and not with, in 1 then 2 segments",
+      sum(near(b.frame, 200, 4) for b in f_off["bursts"]) == 1 and sum(near(b.frame, 200, 4) for b in f_on["bursts"]) == 0
+      and f_off["boxers"]["A"]["segments"] == 1 and f_on["boxers"]["A"]["segments"] == 2, str([b.frame for b in f_on["bursts"]]))
+check("... and with skips=None find_bursts is unchanged",
+      [(b.frame, b.hand, b.match, b.peak_speed) for b in completeness.find_bursts(tJ, lk, evJ, atJ, RULE, video="GH000001", skips=None)["bursts"]]
+      == [(b.frame, b.hand, b.match, b.peak_speed) for b in f_off["bursts"]])
+
+print("near_skip_stats: the base rate and the counts")
+bs = [completeness.Burst("V", f, f / 50, "1", "left", 5.0, m, track_id=1) for f, m in
+      ((10, "none"), (50, "none"), (101, "none"), (30, "own"), (99, "own"), (150, "unattributed"))]
+mask = np.zeros(200, bool)
+mask[40:190] = True
+st = completeness.near_skip_stats(bs, {1: mask}, np.array([50, 100]), 200)
+check("near_skip_stats: skips 50 and 100, within 2: unexplained near = 50, 101 (2 of 3), explained near = 99 (1 of 3)",
+      st["skips"] == 2 and st["unexplained"] == 3 and st["unexplained_near_skip"] == 2 and st["explained"] == 3
+      and st["explained_near_skip"] == 1 and st["within_frames"] == 2, str(st))
+check("... the base rate counts exposure frames within 2 of a skip: 48..52 and 98..102, both inside 40..189 = 10 of 150",
+      st["exposure_frames"] == 150 and st["exposure_near_skip"] == 10, str(st))
+st0 = completeness.near_skip_stats(bs, {1: mask}, np.array([50, 100]), 200, within=0)
+check("within=0 means the skip frame itself only: 50 (unexplained) and none of the others",
+      st0["unexplained_near_skip"] == 1 and st0["explained_near_skip"] == 0 and st0["exposure_near_skip"] == 2, str(st0))
+two = completeness.near_skip_stats(bs, {1: mask, 2: mask}, np.array([50]), 200)
+check("two people's exposures are summed, as the burst rates' denominators are: 300 frames, 10 near", two["exposure_frames"] == 300 and two["exposure_near_skip"] == 10)
+check("a skip at the start of the video does not wrap around (frame 1, within 2 -> frames 0..3)",
+      completeness.near_skip_stats([completeness.Burst("V", 0, 0.0, "1", "left", 5.0)], {1: np.ones(200, bool)}, np.array([1]), 200)
+      ["unexplained_near_skip"] == 1)
+raises("a burst outside the video is refused", lambda: completeness.near_skip_stats([completeness.Burst("V", 200, 4.0, "1", "left", 5.0)], {1: mask}, [], 200), "outside")
+raises("a negative window is refused", lambda: completeness.near_skip_stats(bs, {1: mask}, [], 200, within=-1), "within")
+raises("unsorted skips are refused", lambda: completeness.near_skip_stats(bs, {1: mask}, [100, 50], 200), "sorted")
+sh = olympic_completeness.pool_skip_stats([st, st])
+check("pooling sums the counts and divides once: 4 of 6 unexplained, 20 of 300 exposure frames, 4/6 over 20/300 = 10x",
+      sh["unexplained"] == 6 and sh["unexplained_near_skip"] == 4 and sh["exposure_near_skip"] == 20 and sh["exposure_frames"] == 300
+      and abs(sh["base_rate"] - 20 / 300) < 1e-12 and abs(sh["unexplained_excess_over_base"] - (4 / 6) / (20 / 300)) < 1e-9, str(sh))
+nobase = olympic_completeness.pool_skip_stats([completeness.near_skip_stats([], {1: np.zeros(200, bool)}, [], 200)])
+check("with nothing in exposure every share is None (written as null), not a crash",
+      nobase["base_rate"] is None and nobase["unexplained_near_skip_share"] is None and nobase["unexplained_excess_over_base"] is None)
+
+# ---------------------------------------------------------------------------------------------------------------------
+print("the CLIs end to end: olympic_framechange.py and olympic_completeness.py --skips / --skips-measure / --skipcheck")
+NC = 1500
+ds = tmp / "ds"
+task = ds / "task_kam2_gh000001"
+(task / "data").mkdir(parents=True)
+clip = task / "data" / "GH000001.mp4"
+# a REAL clip whose picture jumps at frame 700 (a grating moving 1 px a frame that jumps 6 px there), so olympic_framechange.py
+# finds a real skip in real pixels; the person in the pose table has the matching wrist jump at 700.
+small = tmp / "cli_small.mp4"
+with video.VideoWriter(small, W, H, Fraction(FPS)) as w:
+    for f in range(NC):
+        w.write(grating(f + (5 if f >= 700 else 0)))
+# the pose table's video size must equal the clip's: use the clip's own size
+tM = table_of(NC, range(NC), bursts=[(100, 1)], steps=[(700, 0, 120)])
+tM = dataclasses.replace(tM, width=W, height=H)
+evM = [label(tM, 1, 300 + 30 * i, 302 + 30 * i, 0) for i in range(11)]
+subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(small), "-c", "copy", str(clip)], check=True)
+pl = {v: k for k, v in olympic.TARGETS.items()}
+ph = {v: k for k, v in olympic.HANDS.items()}
+
+
+def cvat(evs):
+    tracks = []
+    for e in evs:
+        x1, y1, x2, y2 = e.box
+        shp = lambda frame, out: {"type": "rectangle", "frame": frame, "outside": out, "points": [x1, y1, x2, y2]}  # noqa: E731
+        tracks.append({"label": f"{pl[e.target]} {ph[e.hand]}", "shapes": [shp(e.first, False), shp(e.last + 1, True)]})
+    return [{"tracks": tracks}]
+
+
+(task / "annotations.json").write_text(json.dumps(cvat(evM)), encoding="utf-8")
+trk = tmp / "tracks"
+trk.mkdir()
+tM.save(trk / "GH000001.tracks.npz")
+rule_f = tmp / "rule.json"
+rule_f.write_text(json.dumps({"chosen": RULE}), encoding="utf-8")
+
+
+def cli(mod, argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = mod.main(argv)
+        except SystemExit as e:
+            rc = e.code
+    return rc, out.getvalue(), err.getvalue()
+
+
+rc, out_fc, _ = cli(olympic_framechange, ["--data", str(ds), "--tracks", str(trk)])
+fcf = trk / "GH000001.framechange.npz"
+real = skips.Skips.load(fcf) if fcf.is_file() else None
+check("olympic_framechange.py exits 0 and writes <id>.framechange.npz beside the table, bound to the clip's name, length and content",
+      rc == 0 and real is not None and real.source == "GH000001.mp4" and real.n_frames == NC and real.video_fp == video.fingerprint(clip), out_fc)
+check("REAL FACT: in the real pixels of the clip exactly frame 700 is a skip, and the CLI says 1 skip of 1500 frames",
+      real is not None and real.frames.tolist() == [700] and "1500 frames, 1 skips" in out_fc and "one skip every 30.0 s" in out_fc, out_fc)
+check("the print has the pooled line (videos, skips, per minute, wall time)", "ALL: 1 videos, 1 skips" in out_fc and "per minute" in out_fc and "wall" in out_fc, out_fc)
+before = fcf.read_bytes()
+rc2, out2, _ = cli(olympic_framechange, ["--data", str(ds), "--tracks", str(trk)])
+check("a second run leaves the existing file alone (--overwrite replaces it) and says so", rc2 == 0 and fcf.read_bytes() == before and "left alone" in out2, out2)
+rc3, _, _ = cli(olympic_framechange, ["--data", str(ds), "--tracks", str(trk), "--overwrite"])
+check("--overwrite re-measures the same file: same skips", rc3 == 0 and skips.Skips.load(fcf).frames.tolist() == [700])
+rc4, out4, _ = cli(olympic_framechange, ["--data", str(ds), "--tracks", str(trk), "--only", "GH999999"])
+check("--only a video that is not there does nothing and exits 0", rc4 == 0 and "ALL" not in out4)
+raises("--only with a path-like id is refused", lambda: cli(olympic_framechange, ["--data", str(ds), "--tracks", str(trk), "--only", "../x"]), "GoPro id")
+
+res = tmp / "res"
+res.mkdir()
+j_off, c_off = res / "off.json", res / "off.csv"
+rc, o_off, _ = cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--credited",
+                                        "--out", str(j_off), "--sample-out", str(c_off)])
+ja_off = json.loads(j_off.read_text(encoding="utf-8"))
+check("setup: without skips the credited run has two unexplained bursts (the punch at 100 and the jump at 700) and no skips block",
+      rc == 0 and ja_off["all"]["unexplained"] == 2 and "skips" not in ja_off and "skips" not in ja_off["all"]
+      and "skips" not in ja_off["videos"]["task_kam2_gh000001"] and "SKIPS" not in o_off, o_off)
+rows_off = list(csv.DictReader(c_off.read_text(encoding="utf-8").splitlines()))
+check("setup: the sample holds both bursts, with their track and hand", sorted((int(r["frame"]) // 100, r["hand"]) for r in rows_off) == [(1, "right"), (6, "left")]
+      or sorted((int(r["frame"]) // 100, r["hand"]) for r in rows_off) == [(1, "right"), (7, "left")], str(rows_off))
+
+j_on, c_on, k_on = res / "on.json", res / "on.csv", res / "check.csv"
+rc, o_on, _ = cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--credited", "--skips",
+                                       "--out", str(j_on), "--sample-out", str(c_on), "--skipcheck", str(c_off), "--skipcheck-out", str(k_on)])
+ja_on = json.loads(j_on.read_text(encoding="utf-8"))
+sk_on = ja_on["all"]["skips"]
+check("--skips --credited: one unexplained burst left (the real punch), the jump is gone",
+      rc == 0 and ja_on["all"]["unexplained"] == 1 and ja_on["all"]["bursts"] == 1, o_on)
+check("... the json says what was done: mode cut, the rule, the declaration that the constant was not tuned",
+      ja_on["skips"]["mode"] == "cut" and ja_on["skips"]["ratio"] == 3.0 and ja_on["skips"]["half_window"] == 10
+      and "not from tuning" in ja_on["skips"]["declaration"] and "cut between f-1 and f" in ja_on["skips"]["cut"], str(ja_on["skips"]))
+check("REAL FACT: pooled near-skip counts after the cut: 1 skip, 1 unexplained burst and none near the skip; base rate 5 of 1500 exposure frames",
+      sk_on["skips"] == 1 and sk_on["unexplained"] == 1 and sk_on["unexplained_near_skip"] == 0 and sk_on["exposure_frames"] == NC
+      and sk_on["exposure_near_skip"] == 5 and abs(sk_on["base_rate"] - 5 / NC) < 1e-3 and sk_on["unexplained_near_skip_share"] == 0,
+      str(sk_on))
+check("the per-video row carries the same block and the print leads with the SKIPS line",
+      ja_on["videos"]["task_kam2_gh000001"]["skips"]["skips"] == 1 and "SKIPS (cut; 1 skips): bursts within 2 frames of a skip: unexplained 0/1" in o_on, o_on[:300])
+rows_chk = list(csv.reader(k_on.read_text(encoding="utf-8").splitlines()))
+check("skipcheck: the header is video, frame, track_id, hand, still_unexplained_with_skips",
+      rows_chk[0] == ["video", "frame", "track_id", "hand", "still_unexplained_with_skips"], str(rows_chk[:1]))
+verdict = {int(r[1]) // 100: (r[3], r[4]) for r in rows_chk[1:]}
+check("skipcheck: the real punch at 100 (right hand) is still unexplained = true; the jump at 700 (left hand) is false",
+      len(rows_chk) == 3 and verdict.get(1) == ("right", "true") and (verdict.get(6) or verdict.get(7)) == ("left", "false"), str(rows_chk))
+check("skipcheck copies the ids it was given and nothing else (no user_label, no inclusion_prob column)", all(len(r) == 5 for r in rows_chk))
+check("the sample it read was not modified", list(csv.DictReader(c_off.read_text(encoding="utf-8").splitlines())) == rows_off)
+
+j_m, c_m = res / "m.json", res / "m.csv"
+rc, o_m, _ = cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--credited", "--skips-measure",
+                                      "--out", str(j_m), "--sample-out", str(c_m)])
+ja_m = json.loads(j_m.read_text(encoding="utf-8"))
+sk_m = ja_m["all"]["skips"]
+strip = lambda d: {k: v for k, v in d.items() if k not in ("skips",)}    # noqa: E731
+check("--skips-measure does NOT cut: the same bursts as the run without skips (2 unexplained), and the sample is identical",
+      rc == 0 and ja_m["all"]["unexplained"] == 2 and c_m.read_bytes() == c_off.read_bytes()
+      and ja_m["skips"]["mode"] == "measure" and "NOT cut" in ja_m["skips"]["cut"], o_m)
+check("REAL FACT: before the cut, 1 of the 2 unexplained bursts (50%) is within 2 frames of the skip, against a base rate of 5/1500 (0.3%): "
+      "the excess is about 150x",
+      sk_m["unexplained"] == 2 and sk_m["unexplained_near_skip"] == 1 and sk_m["unexplained_near_skip_share"] == 0.5
+      and sk_m["exposure_near_skip"] == 5 and 100 < sk_m["unexplained_excess_over_base"] < 200, str(sk_m))
+check("... every other number of the measure-only run equals the run without skips (same fragments, bursts, rates)",
+      ja_m["all"]["bursts"] == ja_off["all"]["bursts"] and ja_m["all"]["exposure_min"] == ja_off["all"]["exposure_min"]
+      and ja_m["all"]["unexplained_per_exposure_min"] == ja_off["all"]["unexplained_per_exposure_min"])
+
+# linking mode (the 11 labels give it a ring)
+j_l, c_l = res / "l.json", res / "l.csv"
+rc, o_l, _ = cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--skips",
+                                      "--out", str(j_l), "--sample-out", str(c_l)])
+ja_l = json.loads(j_l.read_text(encoding="utf-8")) if j_l.is_file() else {}
+j_l0, c_l0 = res / "l0.json", res / "l0.csv"
+rc0, _, _ = cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f),
+                                       "--out", str(j_l0), "--sample-out", str(c_l0)])
+ja_l0 = json.loads(j_l0.read_text(encoding="utf-8"))
+check("--skips in the linking mode: the jump burst is gone (one fewer burst than without) and the skips block is there",
+      rc == 0 and rc0 == 0 and ja_l["all"]["bursts"] == ja_l0["all"]["bursts"] - 1 and ja_l["skips"]["mode"] == "cut"
+      and ja_l["all"]["skips"]["skips"] == 1 and "skips" not in ja_l0, f"{o_l}")
+
+print("--skips refuses a missing, mismatched or malformed framechange file, and writes nothing")
+created = lambda: sorted(p.name for p in res.iterdir())    # noqa: E731
+snapshot = created()
+args_cut = ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--credited", "--skips",
+            "--out", str(res / "x.json"), "--sample-out", str(res / "x.csv")]
+
+
+def refuse(name, mutate, why):
+    mutate()
+    try:
+        rc_, _, err_ = cli(olympic_completeness, args_cut)
+    finally:
+        fcf.write_bytes(before)
+    check(name, rc_ == 2 and why in err_ and created() == snapshot, f"rc {rc_} {err_}")
+
+
+fcf.unlink()
+rc_, _, err_ = cli(olympic_completeness, args_cut)
+check("a missing framechange file: exit 2, the message names the video and says to run olympic_framechange.py, nothing written",
+      rc_ == 2 and "GH000001" in err_ and "olympic_framechange" in err_ and created() == snapshot, f"{rc_} {err_}")
+fcf.write_bytes(before)
+refuse("a framechange file of another video name", lambda: skips.Skips(real.change, "GH000002.mp4", real.video_fp).save(fcf), "pose table for")
+refuse("a framechange file of another length (1499 frames)", lambda: skips.Skips(real.change[:-1], "GH000001.mp4", real.video_fp).save(fcf), "cover 1499")
+refuse("a framechange file measured on another file (fingerprint differs from the video)", lambda: skips.Skips(real.change, "GH000001.mp4", "c" * 64).save(fcf), "fingerprints differ")
+refuse("a framechange file made with another ratio", lambda: skips.Skips(real.change, "GH000001.mp4", real.video_fp, ratio=2.0).save(fcf), "ratio")
+refuse("a garbage framechange file", lambda: fcf.write_bytes(b"not an npz"), "framechange")
+refuse("a framechange file with a missing field", lambda: np.savez(fcf, change=real.change, n_frames=NC, step=4, ratio=3.0,
+                                                                    half_window=10, source="GH000001.mp4"), "video_fp")
+fcf.unlink()
+rc_, _, err_ = cli(olympic_completeness, [a if a != "--skips" else "--skips-measure" for a in args_cut])
+fcf.write_bytes(before)
+check("--skips-measure refuses a missing file the same way (exit 2, nothing written)", rc_ == 2 and "olympic_framechange" in err_ and created() == snapshot, err_)
+
+print("--skips: argument checks and file names")
+refused_args = lambda extra: cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f)] + extra)    # noqa: E731
+for what, extra, why in (
+        ("--skips together with --skips-measure", ["--skips", "--skips-measure"], "pick one"),
+        ("--skipcheck without --skipcheck-out", ["--credited", "--skips", "--skipcheck", str(c_off)], "go together"),
+        ("--skipcheck without --skips", ["--credited", "--skipcheck", str(c_off), "--skipcheck-out", str(res / "q.csv")], "--skips"),
+        ("--skipcheck without --credited", ["--skips", "--skipcheck", str(c_off), "--skipcheck-out", str(res / "q.csv")], "--credited"),
+        ("--skipcheck-out that is the sample it reads", ["--credited", "--skips", "--skipcheck", str(c_off), "--skipcheck-out", str(c_off)], "overwrite"),
+        ("--skipcheck-out that is --out", ["--credited", "--skips", "--skipcheck", str(c_off), "--skipcheck-out", str(res / "o.json"),
+                                          "--out", str(res / "o.json")], "three files"),
+        ("--sample-out that is the sample --skipcheck reads", ["--credited", "--skips", "--skipcheck", str(c_off), "--skipcheck-out", str(res / "q.csv"),
+                                                              "--sample-out", str(c_off)], "three files")):
+    rc_, _, err_ = refused_args(extra)
+    check(f"refused (exit 2): {what}", rc_ == 2 and why in err_ and not (res / "q.csv").exists(), err_)
+mid = tmp / "malformed.csv"
+mid.write_text("video,frame,track_id,hand\nGH000001,abc,1,left\n", encoding="utf-8")
+try:
+    cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--credited", "--skips",
+                               "--out", str(res / "y.json"), "--sample-out", str(res / "y.csv"), "--skipcheck", str(mid),
+                               "--skipcheck-out", str(res / "y_check.csv")])
+    ok_raise = False
+except ValueError as e:
+    ok_raise = "malformed row" in str(e)
+check("a malformed skipcheck input stops the run BEFORE any output is written", ok_raise and not (res / "y.json").exists() and not (res / "y_check.csv").exists())
+check("the default names for --skips are their own files (never the ones of a run without skips)",
+      {olympic_completeness.DEFAULT_OUT_CREDITED_SKIPS.name, olympic_completeness.DEFAULT_SAMPLE_CREDITED_SKIPS.name,
+       olympic_completeness.DEFAULT_OUT_SKIPS.name, olympic_completeness.DEFAULT_OUT_CREDITED_SKIPS_MEASURE.name}
+      .isdisjoint({olympic_completeness.DEFAULT_OUT.name, olympic_completeness.DEFAULT_OUT_CREDITED.name,
+                   olympic_completeness.DEFAULT_SAMPLE.name, olympic_completeness.DEFAULT_SAMPLE_CREDITED.name})
+      and olympic_completeness.DEFAULT_OUT_CREDITED_SKIPS.as_posix() == "results/olympic_completeness_credited_skips.json"
+      and olympic_completeness.DEFAULT_SAMPLE_CREDITED_SKIPS.as_posix() == "results/olympic_completeness_credited_skips_sample.csv")
+work = tmp / "cwd"
+(work / "results").mkdir(parents=True)
+sent = {"results/olympic_completeness_credited.json": "SENTINEL-1", "results/olympic_completeness_credited_sample.csv": "SENTINEL-2",
+        "results/olympic_completeness_credited_min2.json": "SENTINEL-3"}
+for k_, v_ in sent.items():
+    (work / k_).write_text(v_, encoding="utf-8")
+here = os.getcwd()
+os.chdir(work)
+try:
+    rc_def, _, _ = cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--credited", "--skips"])
+finally:
+    os.chdir(here)
+check("with default names, --credited --skips writes the *_skips files and leaves every existing credited file byte-for-byte as it was",
+      rc_def == 0 and (work / "results/olympic_completeness_credited_skips.json").is_file()
+      and (work / "results/olympic_completeness_credited_skips_sample.csv").is_file()
+      and all((work / k_).read_text(encoding="utf-8") == v_ for k_, v_ in sent.items()))
+
+print(f"\n=== {PASS} passed, {FAIL} failed ===")
+sys.exit(1 if FAIL else 0)
