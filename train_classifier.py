@@ -40,13 +40,17 @@ DEFAULT_RULE = Path("results/punch_finder_v6.json")
 TOL = 1e-9
 
 
-def reference_metrics(path: Path, seed: int, epochs: int) -> dict:
+def reference_metrics(path: Path, seed: int, epochs: int, t_out: int) -> dict:
+    """The reported run this one must reproduce, checked to be the same recipe."""
     d = json.loads(path.read_text(encoding="utf-8"))
-    if d.get("seed") != seed or d.get("epochs") != epochs or d.get("balanced") or d.get("include_v6"):
+    if (d.get("seed") != seed or d.get("epochs") != epochs or d.get("stgcnpp_epochs") not in (None, epochs)
+            or d.get("balanced") or d.get("include_v6")):
         raise ValueError(f"{path} is not a seed-{seed}, {epochs}-epoch, unbalanced, V6-excluded run")
     r = [r for r in d["results"] if r.get("model") == "st-gcn++ pretrained"]
     if len(r) != 1:
         raise ValueError(f"{path} has no single 'st-gcn++ pretrained' result")
+    if r[0].get("t_out") != t_out or (r[0].get("pretrained_from") or {}).get("sha256") != PRETRAINED[SPEC]["sha256"]:
+        raise ValueError(f"{path}: the reported run used another t_out or another pretrained checkpoint")
     return {"accuracy": r[0]["accuracy"], "macro_f1": r[0]["macro_f1"]}
 
 
@@ -73,7 +77,7 @@ def main(argv=None) -> int:
     if a.geometry_only:
         return 0
 
-    ref = reference_metrics(a.reference, seed, epochs)
+    ref = reference_metrics(a.reference, seed, epochs, t_out)
     xtr, ytr = to_arrays(train)
     xva, yva = to_arrays(val)
     a.out.parent.mkdir(parents=True, exist_ok=True)

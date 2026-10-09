@@ -24,6 +24,14 @@ manifest is JSON written by train_classifier.py; it is validated field by field
 as untrusted. Like the YOLO weights, an attacker who can write the weights
 directory can rewrite both files -- keep that directory user-private.
 
+Known approximations, stated rather than hidden:
+* the lead-in is the wrist-speed peak inside a short training clip, where the
+  smoothing and gradient are one-sided at the clip's edges; in continuous pose
+  `punchfind.detect` sees both sides. Peaks near a clip's edge can differ by a frame.
+* the torso length is one median per video, not per window: right for a boxer
+  working on one spot, wrong for one who walks toward or away from the phone.
+  (A per-window torso would also shrink as the body turns into a hook.)
+
 What this module does not do: it does not decide WHEN a punch happened (that is
 `punchfind`), and it does not make the punch type agree with the finder's hand.
 The two are independent readings of the same skeleton, and their agreement is
@@ -42,12 +50,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .data import CLASSES, N_CLASSES, N_JOINTS, NATIVE_FPS, SOURCE_SIZE, Track
+from .data import CLASSES, MAX_FRAMES, N_CLASSES, N_JOINTS, NATIVE_FPS, SOURCE_SIZE, Track
 from .punchfind import (L_HIP, L_SHOULDER, MIN_CONF, R_HIP, R_SHOULDER, VARIANTS,
                         body_scale, wrist_signal)
 
 MANIFEST_VERSION = 1
 MAX_CLASSIFIER_BYTES = 64 * 1024 * 1024   # the real file is ~5.5 MB
+MAX_MANIFEST_BYTES = 64 * 1024
 LEAD_CLASSES = frozenset({"jab", "lead_hook", "lead_uppercut"})
 REAR_CLASSES = frozenset({"cross", "rear_hook", "rear_uppercut"})
 # Which COCO side leads. Orthodox boxers lead with the left hand.
@@ -93,8 +102,10 @@ class WindowGeometry:
             raise ValueError(f"geometry variant must be one of {VARIANTS}")
         if isinstance(self.n_clips, bool) or not isinstance(self.n_clips, int) or self.n_clips < 1:
             raise ValueError("geometry n_clips must be a positive integer")
-        if self.n_frames < MIN_OBSERVED_FRAMES:
-            raise ValueError("geometry window is shorter than two frames")
+        if not MIN_OBSERVED_FRAMES <= self.n_frames <= MAX_FRAMES:
+            # No training clip is longer than the corpus's 25 frames, and a manifest
+            # asking for more would also size every window from untrusted input.
+            raise ValueError(f"geometry window must be 2..{MAX_FRAMES} frames, got {self.n_frames}")
 
     @property
     def n_frames(self) -> int:
@@ -140,7 +151,9 @@ def training_geometry(clips, variant: str) -> WindowGeometry:
             continue
         n = len(tr.frame_ids)
         dur.append(n / f)
-        lead.append((int(np.argmax(best)) + 0.5) / f)
+        # np.gradient is centred, so best[i] is the speed AT frame i: the peak is
+        # at frame i, exactly where punchfind.detect reports a peak in continuous pose.
+        lead.append(int(np.argmax(best)) / f)
         fps.append(f)
         torso.append(scale)
         ok = (tr.conf[:, [L_HIP, R_HIP]] > 0).all(axis=1)
@@ -185,7 +198,9 @@ def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: fl
         raise ValueError(f"torso length must be a positive pixel length, got {torso_px!r}")
     n = geom.n_frames
     t0 = int(peak_frame) / track.fps - geom.lead_in_s
-    want = np.round((t0 + np.arange(n) / geom.fps) * track.fps).astype(np.int64)
+    # Nearest frame, ties upward: np.round would send ties to the even frame, so
+    # which frames a window holds would depend on the peak frame's parity.
+    want = np.floor((t0 + np.arange(n) / geom.fps) * track.fps + 0.5).astype(np.int64)
     pos = np.searchsorted(track.frame_ids, want)
     pos_c = np.clip(pos, 0, len(track.frame_ids) - 1)
     present = track.frame_ids[pos_c] == want
@@ -232,6 +247,9 @@ def write_manifest(path: Path, checkpoint: Path, geom: WindowGeometry, t_out: in
                    extra: dict) -> dict:
     """The manifest train_classifier.py writes next to the checkpoint."""
     blob = Path(checkpoint).read_bytes()
+    pinned = {"manifest_version", "classes", "t_out", "checkpoint", "size", "sha256", "geometry"}
+    if pinned & set(extra):
+        raise ValueError(f"extra fields may not override pinned ones: {sorted(pinned & set(extra))}")
     m = {"manifest_version": MANIFEST_VERSION, "classes": list(CLASSES), "t_out": int(t_out),
          "checkpoint": Path(checkpoint).name, "size": len(blob),
          "sha256": hashlib.sha256(blob).hexdigest(), "geometry": asdict(geom), **extra}
@@ -241,7 +259,11 @@ def write_manifest(path: Path, checkpoint: Path, geom: WindowGeometry, t_out: in
 
 def read_manifest(path: Path) -> dict:
     path = Path(path).resolve()
-    m = json.loads(path.read_text(encoding="utf-8"), parse_constant=_no_constant)
+    with path.open("rb") as f:
+        raw = f.read(MAX_MANIFEST_BYTES + 1)
+    if len(raw) > MAX_MANIFEST_BYTES:
+        raise ValueError(f"{path.name}: over {MAX_MANIFEST_BYTES} bytes; not a classifier manifest")
+    m = json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
     if not isinstance(m, dict) or m.get("manifest_version") != MANIFEST_VERSION:
         raise ValueError(f"{path.name}: not a version-{MANIFEST_VERSION} classifier manifest")
     if m.get("classes") != list(CLASSES):
@@ -278,7 +300,8 @@ def load_classifier(manifest_path: Path):
         raise FileNotFoundError(f"classifier checkpoint not found: {p.name}")
     if p.stat().st_size != m["size"]:
         raise ValueError(f"{p.name} is not the size its manifest pins")
-    blob = p.read_bytes()   # hash and load the same bytes
+    with p.open("rb") as f:   # hash and load the same bytes, and never more than pinned
+        blob = f.read(m["size"] + 1)
     if len(blob) != m["size"] or hashlib.sha256(blob).hexdigest() != m["sha256"]:
         raise ValueError(f"{p.name} does not match the sha256 its manifest pins; not loading it")
     try:

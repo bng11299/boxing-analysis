@@ -76,7 +76,7 @@ GEOM = classify.WindowGeometry(duration_s=0.375, lead_in_s=0.125, fps=24.0, tors
 
 print("window geometry")
 check("9 frames per window at 24 fps for 0.375 s", GEOM.n_frames == 9)
-for k, v in (("duration_s", float("nan")), ("fps", 0.0), ("torso_px", 1.0), ("lead_in_s", 0.5),
+for k, v in (("duration_s", 2.0), ("duration_s", float("nan")), ("fps", 0.0), ("torso_px", 1.0), ("lead_in_s", 0.5),
              ("hip_x", 1.2), ("variant", "sideways"), ("n_clips", True), ("duration_s", True),
              ("duration_s", 0.01)):
     raises(f"geometry refuses {k}={v!r}", lambda k=k, v=v: replace(GEOM, **{k: v}))
@@ -133,11 +133,48 @@ coded = Track(tr.frame_ids, tr.xy.copy(), fps)
 coded.xy[:, 0, 0] = tr.xy[:, 0, 0] + 0.001 * tr.frame_ids
 cw = classify.cut_window(coded, peak, GEOM, 100.0).keypoints
 got = np.round((cw[:, 0, 0] * w - 0.5 * w) / 2 / 0.001)   # scale 2 (torso 100 -> 200 px)
-start = peak / fps - GEOM.lead_in_s
-want = np.round((start + np.arange(9) / 24.0) * fps)
+# Worked by hand, not by the code's formula: a 3/24 s lead-in is 7.493 frames at
+# 59.946 fps, and each 1/24 s step is 2.498 frames; nearest frames of -7.493 + 2.498 k.
+want = peak + np.array([-7, -5, -2, 0, 2, 5, 7, 10, 12])
 check("frames are sampled at the training rate (24 fps) from 60 fps footage, starting a lead-in before the peak",
       np.array_equal(got, want), f"{got} vs {want}")
 check("the window spans 0.375 s of the clip, not 9 consecutive 60 fps frames", want[-1] - want[0] > 8 * 2)
+check("the peak frame itself is one of the samples", peak in got)
+
+print("round trip: a window cut at the finder's peak is the corpus clip")
+f24 = 24.0
+starts = [2.0 + 3 * i for i in range(12)]
+cont = body(int(40 * f24), f24, hx=960, hy=600, punches=starts, hand=1)   # inside a 1080p frame
+sig24 = punchfind.wrist_signal(cont, "relative")
+pk, _ = punchfind.detect(cont, sig24, 1.0, 0.4)
+check("control: the finder finds each planted punch once", len(pk) == len(starts), str(pk))
+LEAD = 3   # each corpus clip starts 3 frames before the finder's peak and runs 9 frames
+rt_clips = []
+for q in pk:
+    kp = np.zeros((25, N_JOINTS, 3), np.float32)
+    kp[:9, :, 0] = cont.xy[q - LEAD:q - LEAD + 9, :, 0] / w
+    kp[:9, :, 1] = cont.xy[q - LEAD:q - LEAD + 9, :, 1] / h
+    kp[:9, :, 2] = 1
+    rt_clips.append(Clip(kp, 1, "", "V1"))
+g_rt = classify.training_geometry(rt_clips, "relative")
+check("training_geometry puts the peak where the clips have it: 3 frames in, at 24 fps",
+      abs(g_rt.lead_in_s - LEAD / 24) < 1e-12 and g_rt.n_frames == 9, str(g_rt))
+cont_coded = Track(cont.frame_ids, cont.xy.copy(), f24)
+cont_coded.xy[:, 0, 0] += 0.001 * cont.frame_ids
+ok_rt = True
+for q in pk:
+    kq = classify.cut_window(cont_coded, int(q), g_rt, punchfind.body_scale(cont)).keypoints
+    s_rt = g_rt.torso_px / 100.0
+    fr = np.round(((kq[:, 0, 0] - g_rt.hip_x) * w) / s_rt / 0.001)
+    ok_rt &= np.array_equal(fr, np.arange(q - LEAD, q - LEAD + 9))
+check("cut_window at each finder peak returns exactly the corpus clip's 9 frames", bool(ok_rt))
+half = replace(GEOM, lead_in_s=3.5 / 24)
+offs = []
+for q in (480, 481):   # an even and an odd peak frame, at exactly 24 fps
+    kq = classify.cut_window(cont_coded, q, half, 100.0).keypoints
+    offs.append(np.round(((kq[:, 0, 0] - half.hip_x) * w) / 2 / 0.001) - q)
+check("a half-frame lead-in samples the same offsets whatever the peak frame's parity (ties go up)",
+      np.array_equal(offs[0], offs[1]) and np.array_equal(offs[0], np.arange(-3, 6)), str(offs))
 
 gap_ids = np.r_[np.arange(0, peak - 3), np.arange(peak + 4, 1200)]
 gapped = body(len(gap_ids), fps, punches=[5.0], ids=gap_ids)
@@ -185,6 +222,8 @@ ck = tmp / "clf.pt"
 torch.save(model.state_dict(), ck)
 mpath = tmp / "clf.json"
 classify.write_manifest(mpath, ck, GEOM, 50, {"note": "random init, test only"})
+raises("write_manifest: extra fields may not replace the pinned hash",
+       lambda: classify.write_manifest(tmp / "x.json", ck, GEOM, 50, {"sha256": "0" * 64}))
 loaded, man = classify.load_classifier(mpath)
 check("a manifest round-trips, and the geometry comes back as a WindowGeometry",
       man["geometry"] == GEOM and man["t_out"] == 50)
@@ -223,6 +262,9 @@ raises("manifest: a boolean t_out is refused", manifest_with(t_out=True))
 raises("manifest: a missing size is refused", manifest_with(size=None))
 (tmp / "nan.json").write_text(mpath.read_text(encoding="utf-8").replace('"t_out": 50', '"t_out": NaN'), encoding="utf-8")
 raises("manifest: NaN in the JSON is refused", lambda: classify.load_classifier(tmp / "nan.json"))
+big = json.loads(mpath.read_text(encoding="utf-8")); big["pad"] = "x" * 70_000
+(tmp / "big.json").write_text(json.dumps(big), encoding="utf-8")
+raises("manifest: an oversized file is refused before it is parsed", lambda: classify.load_classifier(tmp / "big.json"))
 raises("checkpoint: a size that disagrees with the manifest is refused", manifest_with(size=12345))
 raises("checkpoint: a sha256 that disagrees with the manifest is refused", manifest_with(sha256="0" * 64))
 raises("checkpoint: a missing file is refused", manifest_with(checkpoint="gone.pt"), FileNotFoundError)
@@ -282,7 +324,7 @@ rule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 1.0, 
 find_punches.main(["--pose", str(tmp / "IMG_7777.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o")])
 punches = tmp / "o" / "IMG_7777.punches.csv"
 args = ["--pose", str(tmp / "IMG_7777.pose.npz"), "--punches", str(punches), "--classifier", str(mpath),
-        "--out-dir", str(tmp / "o")]
+        "--rule", str(rule), "--out-dir", str(tmp / "o")]
 rc = classify_punches.main(args + ["--stance", "orthodox"])
 rows = list(csv.DictReader((tmp / "o" / "IMG_7777.classified.csv").open(encoding="utf-8")))
 check("end to end: one row per finder punch, every finder column kept",
@@ -303,14 +345,24 @@ raises("no stance -> refused (the tool does not guess one)",
 
 # A punch near the end whose window runs past the pose: kept, marked, not guessed.
 edge = punches.read_text(encoding="utf-8") + f"{n - 1},{(n - 1) / fps:.3f},left,9.000,no\n"
-(tmp / "edge.csv").write_text(edge, encoding="utf-8")
+(tmp / "IMG_8888.punches.csv").write_text(edge, encoding="utf-8")
 part = pose_yolo.PoseSequence(xy.astype(np.float32), cf, np.r_[np.ones(n - 3, bool), np.zeros(3, bool)],
                               fps, 1080, 1920, "IMG_7777.mov", "test")
 xy_p = part.xy.copy(); xy_p[n - 3:] = np.nan
 part = pose_yolo.PoseSequence(xy_p, cf, part.detected, fps, 1080, 1920, "IMG_7777.mov", "test")
 part.save(tmp / "IMG_8888.pose.npz")
-classify_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--punches", str(tmp / "edge.csv"),
-                       "--classifier", str(mpath), "--stance", "orthodox", "--out-dir", str(tmp / "o")])
+classify_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--punches", str(tmp / "IMG_8888.punches.csv"),
+                       "--classifier", str(mpath), "--rule", str(rule), "--stance", "orthodox",
+                       "--out-dir", str(tmp / "o")])
+raises("a punches CSV named for another clip is refused",
+       lambda: classify_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--punches", str(punches),
+                                      "--classifier", str(mpath), "--rule", str(rule), "--stance", "orthodox",
+                                      "--out-dir", str(tmp / "o")]))
+radial = tmp / "radial.json"
+radial.write_text(json.dumps({"chosen": {"variant": "radial", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
+raises("a finder rule with another wrist-speed variant than the window's is refused",
+       lambda: classify_punches.main(args[:-4] + ["--rule", str(radial), "--out-dir", str(tmp / "o"),
+                                                  "--stance", "orthodox"]))
 rows_e = list(csv.DictReader((tmp / "o" / "IMG_8888.classified.csv").open(encoding="utf-8")))
 check("a punch whose window is mostly past the pose is kept as unclassified, with the reason",
       rows_e[-1]["punch_type"] == "unclassified" and rows_e[-1]["confidence"] == "" and rows_e[-1]["note"] != "",
@@ -326,6 +378,17 @@ sc = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding=
 check("scored against labels: 'unclear' punches are not scored for type",
       sc["matched_detections"]["n"] == 2 and sc["every_labelled_punch"]["n"] == 2, str(sc))
 check("the score names the classifier it scored, by hash", sc["classifier_sha256"] == man["sha256"])
+check("control: no matched punch is unclassifiable on the whole clip", sc.get("matched_unclassifiable") == 0)
+lab8 = tmp / "IMG_8888.labels.json"
+lab8.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": int(3.0 * fps), "end": int(3.25 * fps), "label": "jab"},
+    {"start": n - 4, "end": n - 1, "label": "jab"}]}), encoding="utf-8")   # the punch at the end of the pose
+classify_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--punches", str(tmp / "IMG_8888.punches.csv"),
+                       "--classifier", str(mpath), "--rule", str(rule), "--stance", "orthodox",
+                       "--out-dir", str(tmp / "o"), "--labels", str(lab8)])
+sc8 = json.loads((tmp / "o" / "IMG_8888.classify_score.json").read_text(encoding="utf-8"))
+check("a matched punch that could not be classified is counted, not silently dropped from the score",
+      sc8["matched_unclassifiable"] == 1 and sc8["matched_detections"]["n"] == 1, str(sc8))
 
 
 def punches_with(text):
@@ -339,6 +402,7 @@ raises("punches: another header is refused", punches_with("frame,time,hand\n1,0.
 raises("punches: a frame past the clip is refused", punches_with(hdr + f"{n},{n / fps:.3f},left,1.0,no\n"))
 raises("punches: a negative frame is refused", punches_with(hdr + "-1,0.000,left,1.0,no\n"))
 raises("punches: a fractional frame is refused", punches_with(hdr + "1.5,0.025,left,1.0,no\n"))
+raises("punches: a non-ASCII digit is refused cleanly", punches_with(hdr + "²,0.033,left,1.0,no\n"))
 raises("punches: a time that does not match the frame (a CSV from another clip) is refused",
        punches_with(hdr + "600,5.000,left,1.0,no\n"))
 raises("punches: a NaN time is refused", punches_with(hdr + "600,nan,left,1.0,no\n"))

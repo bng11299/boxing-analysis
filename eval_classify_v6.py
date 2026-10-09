@@ -68,9 +68,9 @@ def main(argv=None) -> int:
     if rule["variant"] != geom.variant:
         raise SystemExit(f"the rule's variant {rule['variant']} is not the one the window was measured with")
 
-    track = load_v6_track(a.data / "Skeleton_data")
+    raw = load_v6_track(a.data / "Skeleton_data")   # reading A is cut from this, as the loader cuts
     spans = load_v6_spans(a.data / "Annotation_files")
-    track = punchfind.bridge(track, int(round(punchfind.BRIDGE_S * track.fps)))
+    track = punchfind.bridge(raw, int(round(punchfind.BRIDGE_S * raw.fps)))
     torso = punchfind.body_scale(track)
     sig = punchfind.wrist_signal(track, geom.variant)
     det, _ = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
@@ -78,7 +78,7 @@ def main(argv=None) -> int:
 
     readings = {"A": {}, "B": {}, "C": {}}
     for j, s in enumerate(spans):
-        c = corpus_clip(track, s)
+        c = corpus_clip(raw, s)
         if c is not None:
             readings["A"][j] = c
         w = classify.cut_window(track, span_peak(track, sig, s.start, s.end), geom, torso)
@@ -106,6 +106,10 @@ def main(argv=None) -> int:
                   "the finder's rule was tuned on V6's first half; C covers both halves"]}
     for k, p in preds.items():
         idx = sorted(p)
+        if not idx:
+            result["readings"][k] = {"n": 0}
+            print(f"{k}: no punch could be read")
+            continue
         s = type_scores([y[i] for i in idx], [p[i] for i in idx])
         s["predicted_counts"] = {c: int(sum(p[i] == n for i in idx)) for n, c in enumerate(CLASSES)}
         result["readings"][k] = s
@@ -114,6 +118,9 @@ def main(argv=None) -> int:
               f"commonest-type floor {s['majority_floor_accuracy']:.3f}")
     for a_, b_ in (("A", "B"), ("B", "C"), ("A", "C")):
         common = sorted(set(preds[a_]) & set(preds[b_]))
+        if not common:
+            result["paired"][f"{a_}_minus_{b_}"] = {"n": 0}
+            continue
         yt = np.array([y[i] for i in common])
         pa, pb = np.array([preds[a_][i] for i in common]), np.array([preds[b_][i] for i in common])
         ci = bootstrap_gap_ci(yt, pa, pb, metric="accuracy")

@@ -26,6 +26,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -37,18 +38,22 @@ from boxingvi import classify, punchfind  # noqa: E402
 from boxingvi.data import CLASSES  # noqa: E402
 from boxingvi.lsimport import UNCLEAR_LABEL  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
-from find_punches import TOL_S, load_labels  # noqa: E402
+from find_punches import DEFAULT_RULE, TOL_S, load_labels, load_rule  # noqa: E402
 
 PUNCH_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_interpolated_frame"]
 OUT_HEADER = PUNCH_HEADER + ["lead_rear", "punch_type", "confidence", "type_hand", "hands_agree",
                              "window_frames_observed", "note"]
 DEFAULT_OUT = Path("results/punches")
 MAX_ROWS = 100_000
+_DIGITS = re.compile(r"[0-9]+")
 
 
 def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
-    """find_punches.py's CSV, checked again: it sits on disk between the two tools,
-    and a CSV from another clip would otherwise be classified against this pose."""
+    """find_punches.py's CSV, checked again: it sits on disk between the two tools.
+    Every frame must lie in this clip and every time must equal frame / this clip's
+    fps. That catches a CSV from a clip at another frame rate or a longer clip; it
+    cannot catch one from another clip of the same rate and length, which is why
+    main() also requires the file names to name the same clip."""
     with path.open(newline="", encoding="utf-8") as f:
         r = csv.reader(f)
         header = next(r, None)
@@ -61,7 +66,7 @@ def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
             if len(row) != len(PUNCH_HEADER):
                 raise ValueError(f"{path.name} line {i}: {len(row)} fields, expected {len(PUNCH_HEADER)}")
             d = dict(zip(PUNCH_HEADER, row))
-            if not d["frame"].isdigit() or not 0 <= int(d["frame"]) < n_frames:
+            if not _DIGITS.fullmatch(d["frame"]) or not 0 <= int(d["frame"]) < n_frames:
                 raise ValueError(f"{path.name} line {i}: frame {d['frame']!r} is not a frame of this clip")
             try:
                 t = float(d["time_s"])
@@ -69,7 +74,7 @@ def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
                 raise ValueError(f"{path.name} line {i}: time {d['time_s']!r} is not a number") from None
             if not math.isfinite(t) or abs(t - int(d["frame"]) / fps) > 2e-3:
                 raise ValueError(f"{path.name} line {i}: time {d['time_s']} does not match frame "
-                                 f"{d['frame']} at {fps:.3f} fps: this CSV is from another clip")
+                                 f"{d['frame']} at {fps:.3f} fps: this CSV is not from this clip")
             if d["hand"] not in ("left", "right"):
                 raise ValueError(f"{path.name} line {i}: hand {d['hand']!r}")
             if d["peak_on_interpolated_frame"] not in ("yes", "no"):
@@ -117,14 +122,24 @@ def main(argv=None) -> int:
     ap.add_argument("--classifier", type=Path, required=True, help="the manifest .json next to the checkpoint")
     ap.add_argument("--stance", choices=sorted(classify.STANCES), required=True)
     ap.add_argument("--labels", type=Path)
+    ap.add_argument("--rule", type=Path, default=DEFAULT_RULE,
+                    help="the rule find_punches.py ran with; its variant must be the window's")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     a = ap.parse_args(argv)
 
     pose = PoseSequence.load(a.pose)
     clip = a.pose.name.split(".")[0]
+    if a.punches.name.split(".")[0] != clip:
+        raise ValueError(f"{a.punches.name} does not name the clip {clip}: classify the CSV "
+                         "find_punches.py wrote for this pose")
     rows = read_punches(a.punches, len(pose), pose.fps)
     model, man = classify.load_classifier(a.classifier)
     geom: classify.WindowGeometry = man["geometry"]
+    # The window's lead-in was measured with one wrist-speed variant; a peak found
+    # with the other one is a different moment of the punch.
+    if load_rule(a.rule)["variant"] != geom.variant:
+        raise ValueError(f"the punch finder's rule uses another wrist-speed variant than the "
+                         f"classifier's window ({geom.variant}); re-run one of them to match")
 
     # The same track the finder ran on, so every peak frame it reported exists here.
     raw = pose.to_track(usable_only=False)
@@ -170,11 +185,15 @@ def main(argv=None) -> int:
         named = [(j, s) for j, s in enumerate(spans) if s.label != UNCLEAR_LABEL]
         tol = int(round(TOL_S * pose.fps))
         pairs = punchfind.match([d["frame"] for d in rows], spans, tol)
-        yt, yp = [], []
+        yt, yp, matched_unclassified = [], [], 0
         for si, di in pairs:
-            if spans[si].label != UNCLEAR_LABEL and di in pred:
-                yt.append(spans[si].label)
-                yp.append(int(np.argmax(pred[di])))
+            if spans[si].label == UNCLEAR_LABEL:
+                continue
+            if di not in pred:
+                matched_unclassified += 1
+                continue
+            yt.append(spans[si].label)
+            yp.append(int(np.argmax(pred[di])))
         sig = punchfind.wrist_signal(track, geom.variant)
         pw = [classify.cut_window(track, span_peak(track, sig, s.start, s.end), geom, torso) for _, s in named]
         keep = [k for k, w_ in enumerate(pw) if w_.keypoints is not None]
@@ -182,6 +201,7 @@ def main(argv=None) -> int:
         result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
                   "classifier_sha256": man["sha256"],
                   "matched_detections": type_scores(yt, yp),
+                  "matched_unclassifiable": matched_unclassified,
                   "every_labelled_punch": type_scores([named[k][1].label for k in keep],
                                                       [int(np.argmax(p)) for p in pp]),
                   "labelled_unclassifiable": len(named) - len(keep)}
