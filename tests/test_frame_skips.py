@@ -375,17 +375,17 @@ check("without skips the one-frame jump at 200 is read as a punch: two bursts, t
 check("with the skip at 200 the jump is masked out: only the real punch at 60 remains, still explained, with the SAME peak speed as before",
       len(r_on["bursts"]) == 1 and r_on["bursts"][0].frame == r_off["bursts"][0].frame and r_on["bursts"][0].explained
       and r_on["bursts"][0].peak_speed == r_off["bursts"][0].peak_speed, str(frames_of(r_on)))
-check("... the segments are exactly what they were (1, not cut), and the 7 masked frames 197..203 left the exposure: 393 of 400",
-      r_on["fragments"][1]["segments"] == 1 and r_on["fragments"][1]["exposure_frames"] == NS - (2 * MH + 1)
-      and int(r_on["exposure"][1].sum()) == 393 and not r_on["exposure"][1][197:204].any() and r_on["exposure"][1][196] and r_on["exposure"][1][204],
+check("... the segments are exactly what they were (1, not cut); the 9 frames 196..204 (the signal mask 197..203 plus the peak test's one more each side) left the exposure: 391 of 400",
+      r_on["fragments"][1]["segments"] == 1 and r_on["fragments"][1]["exposure_frames"] == NS - (2 * (MH + 1) + 1)
+      and int(r_on["exposure"][1].sum()) == 391 and not r_on["exposure"][1][196:205].any() and r_on["exposure"][1][195] and r_on["exposure"][1][205],
       str(r_on["fragments"][1]))
-check("... and the exposure minutes follow: the rates divide by 393 frames, not 400",
-      abs(r_on["fragments"][1]["exposure_min"] - 393 / FRPS / 60) < 1e-12)
+check("... and the exposure minutes follow: the rates divide by 391 frames, not 400",
+      abs(r_on["fragments"][1]["exposure_min"] - 391 / FRPS / 60) < 1e-12)
 r_far = run(tJ, evJ, skips=np.array([300]))
 check("a skip elsewhere (300) leaves the jump at 200 a burst: the mask acts only where the skip is",
       len(r_far["bursts"]) == 2 and near(r_far["bursts"][1].frame, 200, 4), str(frames_of(r_far)))
-r_b = run(tJ, evJ, skips=np.array([204]))
-check("a skip 4 frames from the jump (204: mask 201..207) does NOT hide the jump at 199/200: the mask is the derived reach, not a wide window",
+r_b = run(tJ, evJ, skips=np.array([207]))
+check("a skip 7 frames after the jump (207: exposure removed 203..211) does NOT hide the jump's burst near 200: the mask is the derived reach, not a wide window",
       len(r_b["bursts"]) == 2 and near(r_b["bursts"][1].frame, 200, 4), str(frames_of(r_b)))
 # a real punch: unmasked it is found with the same frame and peak speed; inside the mask it is invisible and out of the exposure
 tN = table_of(NS, range(NS), bursts=[(60, 1), (150, 0)])
@@ -395,27 +395,46 @@ bf = [b.frame for b in r_n0["bursts"] if near(b.frame, 150, 6)]
 check("setup: without skips the real punch at 150 is one burst near 150, unexplained", len(bf) == 1 and not [b for b in r_n0["bursts"] if near(b.frame, 150, 6)][0].explained, str(bf))
 bf = bf[0]
 bp = [b.peak_speed for b in r_n0["bursts"] if b.frame == bf][0]
-for side, f_ok, f_in in (("after", bf - (MH + 1), bf - MH), ("before", bf + (MH + 1), bf + MH)):
-    r_ok = run(tN, evN, skips=np.array([f_ok]))
-    r_in = run(tN, evN, skips=np.array([f_in]))
-    check(f"a real punch peaking at {bf}, a skip {MH + 1} frames {side} it (just outside the mask): found, same frame, same peak speed",
+for side, sgn in (("after", -1), ("before", +1)):
+    r_ok = run(tN, evN, skips=np.array([bf + sgn * (MH + 2)]))
+    check(f"a real punch peaking at {bf}, a skip {MH + 2} frames {side} it (outside the signal mask and the peak test's extra frame): found, same frame, same peak speed, in the exposure",
           bf in frames_of(r_ok) and [b.peak_speed for b in r_ok["bursts"] if b.frame == bf] == [bp] and r_ok["exposure"][1][bf], str(frames_of(r_ok)))
-    check(f"... a skip {MH} frames {side} it (inside the mask): no burst at {bf}, that frame is out of the exposure, and no burst lies in the masked frames",
-          bf not in frames_of(r_in) and not r_in["exposure"][1][bf]
-          and not any(f_in - MH <= b.frame <= f_in + MH for b in r_in["bursts"]), f"{frames_of(r_in)} mask {f_in - MH}..{f_in + MH}")
-    check("... and the real punch at 60 is untouched", any(b.frame == r_n0["bursts"][0].frame for b in r_in["bursts"]))
+    for dist, why in ((MH + 1, "on the extra frame the peak test needs"), (MH, "at the edge of the signal mask"), (1, "right beside the skip")):
+        f_in = bf + sgn * dist
+        r_in = run(tN, evN, skips=np.array([f_in]))
+        check(f"... a skip {dist} frames {side} it ({why}): no burst at {bf}, that frame is out of the exposure, and the hidden punch does not come back as a burst on the frame beside the removed range either",
+              bf not in frames_of(r_in) and not r_in["exposure"][1][bf]
+              and not any(f_in - (MH + 2) <= b.frame <= f_in + (MH + 2) for b in r_in["bursts"]), f"{frames_of(r_in)} exposure removed {f_in - MH - 1}..{f_in + MH + 1}")
+        check("... and the real punch at 60 is untouched", any(b.frame == r_n0["bursts"][0].frame for b in r_in["bursts"]))
+
+# a real punch 12 frames after a skip-made jump: the jump's giant peak suppresses it (min gap 0.4 s) until the signal is zeroed
+tS = table_of(NS, range(NS), bursts=[(60, 1), (212, 1)], steps=[(200, 0, 120)])
+evS = [label(tS, 1, 58, 62, 1)]
+rS0, rS1 = run(tS, evS), run(tS, evS, skips=np.array([200]))
+check("without skips the jump at 200 (a much bigger peak) suppresses the real punch at 212 inside the 0.4 s minimum gap: bursts near 60 and 200 only",
+      [near(b.frame, 60) or near(b.frame, 200, 4) for b in rS0["bursts"]] == [True, True] and len(rS0["bursts"]) == 2, str(frames_of(rS0)))
+check("with the skip the zeroed signal no longer suppresses it: the real punch at 212 is found (and the jump is not)",
+      len(rS1["bursts"]) == 2 and near(rS1["bursts"][1].frame, 212, 6) and not near(rS1["bursts"][1].frame, 200, 4) and rS1["exposure"][1][rS1["bursts"][1].frame],
+      str(frames_of(rS1)))
 
 # the mask follows smooth_s: the same scene, a wider smoothing window, a wider mask
 segs_J = [np.arange(len(tJ.frame))]
 sc = lambda sm: completeness._scan_segments(tJ, segs_J, RULE, "t", 2, 5, np.array([200]), sm)    # noqa: E731
-check("_scan_segments with smooth_s = 0.1 masks 7 frames (exposure 393), with 0.2 it masks 13 (exposure 387), with 0.02 it masks 3 (397)",
-      int(sc(0.1)["mask"].sum()) == 393 and int(sc(0.2)["mask"].sum()) == 387 and int(sc(0.02)["mask"].sum()) == 397,
+check("_scan_segments with smooth_s = 0.1 removes 9 frames from the exposure (391), with 0.2 it removes 15 (385), with 0.02 it removes 5 (395)",
+      int(sc(0.1)["mask"].sum()) == 391 and int(sc(0.2)["mask"].sum()) == 385 and int(sc(0.02)["mask"].sum()) == 395,
       f"{int(sc(0.1)['mask'].sum())} {int(sc(0.2)['mask'].sum())} {int(sc(0.02)['mask'].sum())}")
+raw_ = lambda sm: sorted(completeness._scan_segments(tJ, segs_J, RULE, "t", 2, 5, None, sm)["raw"])    # noqa: E731
+pk_ = lambda sm: [r for r in raw_(sm) if abs(r[0] - 60) <= 6]    # noqa: E731
+check("the same smooth_s reaches the signal and the mask: a wider window (0.2 s) smooths the real punch at 60 to a lower peak than 0.1 s does, "
+      "and the default is 0.1 s",
+      len(pk_(0.1)) == 1 and len(pk_(0.2)) == 1 and pk_(0.2)[0][2] < pk_(0.1)[0][2] - 0.3
+      and raw_(punchfind.SMOOTH_S) == raw_(0.1) and punchfind.SMOOTH_S == 0.1, f"{pk_(0.1)} {pk_(0.2)}")
 # a 2-frame hole bridged and one hand's hole: the exposure follows the widened masks
 th2 = table_of(NS, [f for f in range(NS) if f not in (199, 200)], bursts=[(60, 1)], steps=[(201, 0, 120)])
 r_h = run(th2, [label(th2, 1, 58, 62, 1)], skips=np.array([200]))
-check("a skip inside a bridged hole masks the whole hole plus 3 beyond: rows 198 and 201 around it -> frames 196..203 = 8 frames out of the exposure (392 of 400)",
-      r_h["fragments"][1]["exposure_frames"] == NS - 8 and not r_h["exposure"][1][196:204].any(), str(r_h["fragments"][1]["exposure_frames"]))
+check("a skip inside a bridged hole removes the whole hole plus 4 beyond each end: rows 198 and 201 around it -> frames 195..204 = 10 frames out of the exposure (390 of 400)",
+      r_h["fragments"][1]["exposure_frames"] == NS - 10 and not r_h["exposure"][1][195:205].any() and r_h["exposure"][1][194] and r_h["exposure"][1][205],
+      str(r_h["fragments"][1]["exposure_frames"]))
 
 # skips=None / empty / outside every segment: identical to not passing it
 same = lambda a, b: [(x.frame, x.hand, x.match, x.track_id, x.peak_speed) for x in a["bursts"]] == [   # noqa: E731
@@ -433,10 +452,10 @@ lk = Linking(identities=((1,), ()), membership=mem, n_frames=NS, fps=FRPS, sourc
 atJ = olympic.attribute(evJ, tJ)
 f_off = completeness.find_bursts(tJ, lk, evJ, atJ, RULE, video="GH000001")
 f_on = completeness.find_bursts(tJ, lk, evJ, atJ, RULE, video="GH000001", skips=np.array([200]))
-check("find_bursts (the linking path) masks too: boxer A has the jump as a burst without skips and not with; one segment either way; 393 exposure frames",
+check("find_bursts (the linking path) masks too: boxer A has the jump as a burst without skips and not with; one segment either way; 391 exposure frames",
       sum(near(b.frame, 200, 4) for b in f_off["bursts"]) == 1 and sum(near(b.frame, 200, 4) for b in f_on["bursts"]) == 0
       and f_off["boxers"]["A"]["segments"] == 1 and f_on["boxers"]["A"]["segments"] == 1
-      and f_off["boxers"]["A"]["exposure_frames"] == NS and f_on["boxers"]["A"]["exposure_frames"] == 393, str([b.frame for b in f_on["bursts"]]))
+      and f_off["boxers"]["A"]["exposure_frames"] == NS and f_on["boxers"]["A"]["exposure_frames"] == 391, str([b.frame for b in f_on["bursts"]]))
 check("... and with skips=None find_bursts is unchanged",
       [(b.frame, b.hand, b.match, b.peak_speed) for b in completeness.find_bursts(tJ, lk, evJ, atJ, RULE, video="GH000001", skips=None)["bursts"]]
       == [(b.frame, b.hand, b.match, b.peak_speed) for b in f_off["bursts"]])
@@ -573,8 +592,8 @@ check("--skips --credited: one unexplained burst left (the real punch), the jump
 check("... the json says what was done: mode mask, the rule, the declaration that the constant was not tuned, the mask rule",
       ja_on["skips"]["mode"] == "mask" and ja_on["skips"]["ratio"] == 3.0 and ja_on["skips"]["half_window"] == 10
       and "not from tuning" in ja_on["skips"]["declaration"] and "smooth_window // 2 + 1" in ja_on["skips"]["mask"], str(ja_on["skips"]))
-check("REAL FACT: pooled near-skip counts after masking: 1 skip, 1 unexplained burst and none near the skip; the 7 masked frames left the exposure (1493 of 1500), and with them every frame within 2 of the skip (base rate 0)",
-      sk_on["skips"] == 1 and sk_on["unexplained"] == 1 and sk_on["unexplained_near_skip"] == 0 and sk_on["exposure_frames"] == NC - 7
+check("REAL FACT: pooled near-skip counts after masking: 1 skip, 1 unexplained burst and none near the skip; the 9 masked frames left the exposure (1491 of 1500), and with them every frame within 2 of the skip (base rate 0)",
+      sk_on["skips"] == 1 and sk_on["unexplained"] == 1 and sk_on["unexplained_near_skip"] == 0 and sk_on["exposure_frames"] == NC - 9
       and sk_on["exposure_near_skip"] == 0 and sk_on["base_rate"] == 0 and sk_on["unexplained_near_skip_share"] == 0,
       str(sk_on))
 check("the per-video row carries the same block and the print leads with the SKIPS line",
