@@ -25,6 +25,10 @@ Readings of the same held-out punches by the same classifier:
   Y      YOLO11-pose over the same frames, joints below confidence 0.3 dropped
          (the pipeline's rule)
   Y_all  YOLO11-pose keeping every detected joint (AlphaPose drops few)
+  Y_win  YOLO11-pose through the pipeline's own window (classify.cut_window) at the
+         wrist-speed peak inside the span: the pipeline with perfect punch timing.
+         Y - Y_win is the cost of the fixed-length window, on all six punch types
+         (on V6, hooks and uppercuts only, it was 21 points: results/classify_v6.json)
 Reported on every clip YOLO saw, and separately on clips where YOLO followed the
 same person as AlphaPose; clips YOLO missed are counted. Paired bootstrap
 intervals on A - Y.
@@ -41,10 +45,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from boxingvi import classify, poseswitch  # noqa: E402
+from boxingvi import classify, poseswitch, punchfind  # noqa: E402
 from boxingvi.data import CLASSES, NATIVE_FPS, load_corpus, split_by_video, to_arrays  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
 from boxingvi.stats import bootstrap_gap_ci  # noqa: E402
+from classify_punches import span_peak  # noqa: E402
 
 DEFAULT_OUT = Path("results/pose_switch.json")
 TOL = 1e-9
@@ -116,10 +121,15 @@ def main(argv=None) -> int:
         if not al["sharp"]:
             raise SystemExit(f"GATE 3 FAILED: {v} spans do not align with the video's frames; nothing scored")
         o = al["best"]
+        geom = man["geometry"]
+        track = punchfind.bridge(pose.to_track(usable_only=False), int(round(punchfind.BRIDGE_S * pose.fps)))
+        torso = punchfind.body_scale(track)
+        sig = punchfind.wrist_signal(track, geom.variant)
         for c in clips:
+            win = classify.cut_window(track, span_peak(track, sig, c.start + o, c.end + o), geom, torso)
             y = poseswitch.yolo_clip(pose, c.start + o, c.end + o)
             y_all = poseswitch.yolo_clip(pose, c.start + o, c.end + o, None)
-            rows.append({"video": v, "label": c.label, "A": c.alphapose, "Y": y, "Y_all": y_all,
+            rows.append({"video": v, "label": c.label, "A": c.alphapose, "Y": y, "Y_all": y_all, "Y_win": win.keypoints,
                          "seen": int((y[..., 2] > 0).any(axis=1).sum()) >= 2,
                          "seen_all": int((y_all[..., 2] > 0).any(axis=1).sum()) >= 2,
                          "same": poseswitch.same_person(c, y_all)})
@@ -130,11 +140,17 @@ def main(argv=None) -> int:
     py = predict(model, man, [r["Y"] for r in seen])
     pya = predict(model, man, [r["Y_all"] for r in seen])
     same = np.array([r["same"] is True for r in seen])
+    wseen = [r for r in seen if r["Y_win"] is not None]
+    yw = np.array([r["label"] for r in wseen])
+    pyw_y = predict(model, man, [r["Y"] for r in wseen])
+    pyw = predict(model, man, [r["Y_win"] for r in wseen])
     report.update({
         "n_clips": len(rows), "n_yolo_missed": len(rows) - len(seen),
         "n_same_person": int(same.sum()), "n_other_person": int(sum(r["same"] is False for r in seen)),
         "all_seen": {"A": scores(y, pa), "Y": scores(y, py), "Y_all": scores(y, pya),
                      "A_minus_Y": paired(y, pa, py), "A_minus_Y_all": paired(y, pa, pya)},
+        "window": {"Y": scores(yw, pyw_y), "Y_win": scores(yw, pyw), "Y_minus_Y_win": paired(yw, pyw_y, pyw),
+                   "n_unwindowable": len(seen) - len(wseen)},
         "same_person": {"A": scores(y[same], pa[same]), "Y": scores(y[same], py[same]),
                         "A_minus_Y": paired(y[same], pa[same], py[same])},
         "limits": ["held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
@@ -146,6 +162,10 @@ def main(argv=None) -> int:
         g = block["A_minus_Y"].get("accuracy")
         if g:
             print(f"  A - Y accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] on {block['A_minus_Y']['n']}")
+    g = report["window"]["Y_minus_Y_win"].get("accuracy")
+    if g:
+        print(f"window cost (Y - Y_win) accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] "
+              f"on {report['window']['Y_minus_Y_win']['n']}")
     print(f"{report['n_yolo_missed']} clips YOLO did not see; {report['n_other_person']} where it followed someone else")
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(report, indent=1, allow_nan=False, default=float), encoding="utf-8")
