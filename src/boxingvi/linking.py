@@ -41,11 +41,22 @@ What it cannot do (residuals, tested or reported rather than hidden):
 Every constant below was fixed from the physics of the footage and the tracker's
 own configuration BEFORE any linking result was looked at; none was tuned to a
 real-data number. Where one changes later, docs/quality-loop.md says so.
+
+DECLARED POST-HOC (feat/identity-continuity, Iteration 1): two rules and their constants
+(MAX_SCALE_RATIO, STILL_MIN_S, STILL_BL) were added AFTER looking at one video's linking,
+GH078416, where the linker crossed two gaps longer than MAX_GAP_S by stepping through a
+small, motionless figure behind the ropes. They are physical rules, not tuned to a score,
+but they were informed by that video: GH078416 is a DEVELOPMENT video, and the test of the
+rules is a human looking at OTHER videos. (1) Body size is continuous across an ordinary
+link (a hard limit, MAX_SCALE_RATIO). (2) A fragment that never throws, is observed for
+STILL_MIN_S and does not move is a spectator, not a connector (STILL_BL). Both make holes
+where there used to be wrong inclusions, which is the module's stated trade.
 """
 
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import math
 import time
 from dataclasses import dataclass, field
@@ -83,6 +94,17 @@ REACQUIRE_S = 0.0
 REACQUIRE_ON_S = 60.0     # the value olympic_link.py uses with --reacquire: one round's rest
 REACQUIRE_POINTS = 4.0
 REACQUIRE_PER_S = 0.05    # a longer wait is slightly less certain: +3 points at 60 s
+# BODY SIZE IS CONTINUOUS ACROSS AN ORDINARY LINK (declared post-hoc, see the module docstring).
+# The camera is fixed and does not zoom, so a body's apparent size changes only with the person's
+# distance to it. Within MAX_GAP_S = 2 s a boxer moves a few metres at most, and the ring is only
+# a few metres across, so his distance to the camera changes by a small fraction. Leaning in or
+# crouching foreshortens shoulder-to-hip by well under a third. 1.6x (a symmetric limit on
+# |ln ratio|) is therefore generous for one person and still far below the 2-3x that separates a
+# boxer from a spectator behind the ring. It is a HARD limit; the soft SCALE_POINTS cost stays as
+# it was. It does NOT apply to re-acquisition links (gap > max_gap_s): over up to 60 s a boxer can
+# walk from the near side of the ring to the far side, and those links keep their behaviour and
+# price unchanged.
+MAX_SCALE_RATIO = 1.6
 # Fragment ends are read as the MEDIAN of the first/last 0.1 s of boxes (5 frames at
 # 50 fps): robust to a single flickering box, short enough that a mover has not moved.
 EDGE_S = 0.1
@@ -98,6 +120,18 @@ MIN_TORSO_ROWS = 3
 TORSO_PER_BOX_HEIGHT = 0.3
 # Below this a "body" is a few pixels: not a person to link (also keeps divisions safe).
 MIN_SCALE_PX = 4.0
+
+# ---- a still person is not a connector (declared post-hoc, see the module docstring) -------
+# A boxer bounces and shifts his weight constantly: a stance is never held motionless for half a
+# second while the bout is live. Spectators, judges and seated coaches are motionless. A fragment
+# with NO credited punch, observed for at least STILL_MIN_S, whose box centre stays within
+# STILL_BL body lengths of its median (the 90th percentile of the distance, so a single
+# flickering box does not make a statue move) is STATIC: not eligible, like a fragment outside
+# the ring. A fragment observed for less than STILL_MIN_S cannot be judged and is unaffected; a
+# fragment with a credited punch is never excluded by this rule. A boxer standing still during a
+# referee's stop is an acceptable hole: "a wrong inclusion is worse than a hole".
+STILL_MIN_S = 0.5
+STILL_BL = 0.15
 
 # ---- the ring prior ----------------------------------------------------------------
 # The ring is where credited gloves are. The 1st-99th percentile of their centres,
@@ -166,6 +200,9 @@ class LinkParams:
     reacquire_per_s: float = REACQUIRE_PER_S
     max_speed_bl_s: float = MAX_SPEED_BL_S
     jump_slack_bl: float = JUMP_SLACK_BL
+    max_scale_ratio: float = MAX_SCALE_RATIO
+    still_min_s: float = STILL_MIN_S
+    still_bl: float = STILL_BL
     edge_s: float = EDGE_S
     min_fragment_s: float = MIN_FRAGMENT_S
     torso_per_box_height: float = TORSO_PER_BOX_HEIGHT
@@ -188,6 +225,9 @@ class LinkParams:
         _finite("reacquire_per_s", self.reacquire_per_s)
         _finite("max_speed_bl_s", self.max_speed_bl_s, 0.0, strict=True)
         _finite("jump_slack_bl", self.jump_slack_bl)
+        _finite("max_scale_ratio", self.max_scale_ratio, 1.0, strict=True)
+        _finite("still_min_s", self.still_min_s, 0.0, strict=True)
+        _finite("still_bl", self.still_bl)
         _finite("edge_s", self.edge_s, 0.0, strict=True)
         _finite("min_fragment_s", self.min_fragment_s)
         _finite("torso_per_box_height", self.torso_per_box_height, 0.0, strict=True)
@@ -234,6 +274,10 @@ class Fragment:
     scale_from_joints: bool
     ring_share: float = 0.0
     punches: int = 0
+    # 90th percentile of the distance of the box centres from their median, in body lengths (this
+    # fragment's own scale); inf = not measured (no usable body), which is never "still".
+    spread_bl: float = math.inf
+    static: bool = False      # is_static(): no credited punch, observed >= still_min_s, spread < still_bl
 
     @property
     def span(self) -> int:
@@ -273,10 +317,13 @@ def summarise_fragments(table: PoseTable, params: LinkParams = LinkParams()) -> 
             scale = float(np.median(h)) * params.torso_per_box_height
         if not scale >= MIN_SCALE_PX:
             scale = float("nan")
+        spread = math.inf
+        if scale > 0:
+            spread = float(np.quantile(np.linalg.norm(c - np.median(c, axis=0), axis=1), 0.9)) / scale
         out.append(Fragment(tid, int(fr[0]), int(fr[-1]), len(r),
                             tuple(float(v) for v in np.median(c[:edge], axis=0)),
                             tuple(float(v) for v in np.median(c[-edge:], axis=0)),
-                            scale, from_joints))
+                            scale, from_joints, spread_bl=spread))
     return out, rows_of
 
 
@@ -310,12 +357,21 @@ def plausible_jump(jump_bl: float, gap_frames: int, fps: float, params: LinkPara
     return jump_bl <= params.jump_slack_bl + params.max_speed_bl_s * gap_frames / fps
 
 
-def candidate_links(frags: "list[Fragment]", fps: float, params: LinkParams = LinkParams()) -> "list[Link]":
+def candidate_links(frags: "list[Fragment]", fps: float, params: LinkParams = LinkParams(),
+                    stats: "dict | None" = None) -> "list[Link]":
     """Every plausible a -> b, FORWARD in time only. b must start strictly after a ends
     (so two fragments that overlap in time can never be linked, and a chain's fragments
     are pairwise time-disjoint: the first of one starts after the last of the one before),
     within `max_gap_s`, with a jump a person could make in that gap. With `reacquire_s` >
-    `max_gap_s`, longer gaps up to that are also linked, with no speed limit and a flat price."""
+    `max_gap_s`, longer gaps up to that are also linked, with no speed limit and a flat price.
+
+    An ORDINARY link (gap <= max_gap_s) also needs a body size that is continuous: the ratio of the
+    two scales within `max_scale_ratio` either way (MAX_SCALE_RATIO). Re-acquisition links are not
+    subject to it. When `stats` is a dict, `stats["scale_rejected"]` counts the ordinary links that
+    were otherwise possible (in time and in speed) and were refused by this rule alone."""
+    max_log_ratio = math.log(params.max_scale_ratio) + 1e-9      # inclusive, whatever the float rounding
+    if stats is not None:
+        stats.setdefault("scale_rejected", 0)
     max_gap = max(1, int(round(params.max_gap_s * fps)))
     reach = max(max_gap, int(round(params.reacquire_s * fps)))
     by_first = sorted(frags, key=lambda f: (f.first, f.tid))
@@ -336,6 +392,10 @@ def candidate_links(frags: "list[Fragment]", fps: float, params: LinkParams = Li
             if gap <= max_gap:
                 if not plausible_jump(jump, gap, fps, params):
                     continue
+                if abs(math.log(b.scale / a.scale)) > max_log_ratio:
+                    if stats is not None:
+                        stats["scale_rejected"] += 1
+                    continue
                 allowed = params.jump_slack_bl + params.max_speed_bl_s * gap / fps
                 cost = (params.link_points + params.jump_points * jump / allowed
                         + params.gap_points * gap / max_gap
@@ -349,10 +409,23 @@ def candidate_links(frags: "list[Fragment]", fps: float, params: LinkParams = Li
     return links
 
 
-def eligible(f: Fragment, fps: float, params: LinkParams = LinkParams()) -> bool:
-    """Long enough, a usable body, and in the ring for at least `ring_min_share` of its frames."""
+def is_static(f: Fragment, fps: float, params: LinkParams = LinkParams()) -> bool:
+    """A still person: no credited punch, observed on at least `still_min_s` of frames, and the box
+    centre's spread (90th percentile of the distance from the median, in body lengths) below
+    `still_bl`. A shorter fragment cannot be judged (False); a fragment with a credited punch is
+    never static; an unmeasured spread (inf) is never still."""
+    return f.punches == 0 and f.n_rows >= params.still_min_s * fps - 1e-9 and f.spread_bl < params.still_bl
+
+
+def _eligible_but_for_stillness(f: Fragment, fps: float, params: LinkParams) -> bool:
     return (f.n_rows >= max(2, int(round(params.min_fragment_s * fps))) and f.scale > 0
             and f.ring_share >= params.ring_min_share)
+
+
+def eligible(f: Fragment, fps: float, params: LinkParams = LinkParams()) -> bool:
+    """Long enough, a usable body, in the ring for at least `ring_min_share` of its frames, and
+    not a still person (`is_static`)."""
+    return _eligible_but_for_stillness(f, fps, params) and not is_static(f, fps, params)
 
 
 def reward(f: Fragment, fps: float, params: LinkParams = LinkParams()) -> float:
@@ -381,6 +454,8 @@ class Linking:
     fragments: tuple = field(default=(), repr=False)
     objective: float = 0.0
     solve_s: float = field(default=0.0, compare=False)     # wall time of the integer program
+    scale_rejected: int = 0     # ordinary links refused by the body-size rule alone (candidate_links)
+    static_excluded: int = 0    # fragments the stillness rule alone kept out (static and otherwise eligible)
 
     def ids(self, k: int) -> frozenset:
         return frozenset(self.identities[k])
@@ -564,12 +639,15 @@ def link(table: PoseTable, credited: "dict[int, int]", region: Region,
     full = []
     for f in frags:
         r = rows_of[f.tid]
-        full.append(Fragment(f.tid, f.first, f.last, f.n_rows, f.start_xy, f.end_xy, f.scale, f.scale_from_joints,
-                             float(inside[r].mean()), int(credited.get(f.tid, 0))))
+        full.append(dataclasses.replace(f, ring_share=float(inside[r].mean()), punches=int(credited.get(f.tid, 0))))
     fps = table.fps
+    full = [dataclasses.replace(f, static=is_static(f, fps, params)) for f in full]
     usable = [f for f in full if eligible(f, fps, params) and reward(f, fps, params) > 0]
     by_tid = {f.tid: f for f in usable}
-    links = candidate_links(usable, fps, params)
+    static_excluded = sum(f.static and _eligible_but_for_stillness(f, fps, params) and reward(f, fps, params) > 0
+                          for f in full)
+    stats: dict = {}
+    links = candidate_links(usable, fps, params, stats)
 
     t0 = time.perf_counter()
     chains, objective = solve_chains(usable, links, fps, params)
@@ -588,7 +666,7 @@ def link(table: PoseTable, credited: "dict[int, int]", region: Region,
         for t in chain:
             membership[table.frame[rows_of[t]], k] = t
     return Linking(tuple(chains), membership, table.n_frames, table.fps, table.source, region,
-                   tuple(full), objective, solve_s)
+                   tuple(full), objective, solve_s, stats["scale_rejected"], int(static_excluded))
 
 
 def credited_counts(attrs) -> "dict[int, int]":
@@ -648,4 +726,9 @@ def summarise(lk: Linking, attrs) -> dict:
         "longest_unidentified_a_s": round(_longest_false(a) / lk.fps, 2),
         "longest_unidentified_b_s": round(_longest_false(b) / lk.fps, 2),
         "longest_neither_identified_s": round(_longest_false(either) / lk.fps, 2),
+        # Fragments flagged still; those the stillness rule alone kept out (static and otherwise
+        # eligible); ordinary links the body-size rule alone refused.
+        "static_fragments": sum(f.static for f in lk.fragments),
+        "static_excluded": lk.static_excluded,
+        "links_rejected_scale": lk.scale_rejected,
     }

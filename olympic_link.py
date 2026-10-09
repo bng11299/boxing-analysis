@@ -14,6 +14,8 @@ solved exactly as an integer program) and reports, per video:
     come from the boxers, not the crowd. Punches also drive the linking, so it is also
     given with every second punch held out of the linking (`credited_in_either_share_heldout`);
   * how that splits A vs B, the fragments per identity, the longest unidentified stretch;
+  * static fragments kept out (a still person with no credited punch is not a connector) and ordinary
+    links refused because the body size jumped (linking.py, feat/identity-continuity);
   * co-presence: how much of the shorter identity's time the other is also identified. Two
     real boxers are on screen together; one boxer split into two identities never is.
 
@@ -153,7 +155,8 @@ def main(argv=None) -> int:
               f"credited punches in A/B {r['credited_in_a']}/{r['credited_in_b']} of {r['credited_punches']} "
               f"({_pct(r['credited_in_either_share'])}; {_pct(r['credited_in_either_share_heldout'])} held out) | "
               f"co-presence {r['co_presence']:.0%} | fragments {r['fragments_a']}+{r['fragments_b']} of "
-              f"{len(table.ids())} | solve {r['link_solve_s']}s | longest gap A {r['longest_unidentified_a_s']}s B {r['longest_unidentified_b_s']}s")
+              f"{len(table.ids())} | solve {r['link_solve_s']}s | longest gap A {r['longest_unidentified_a_s']}s B {r['longest_unidentified_b_s']}s | "
+              f"static kept out {r['static_excluded']}, scale-rule links refused {r['links_rejected_scale']}")
         if want_overlay == vid:
             out = (a.tracks / f"{vid}.linked.overlay.mp4").resolve()
             if out.parent != a.tracks.resolve():
@@ -169,6 +172,10 @@ def main(argv=None) -> int:
         "credited_in_a": sum(r["credited_in_a"] for r in ok), "credited_in_b": sum(r["credited_in_b"] for r in ok),
         "credited_heldout": sum(r["credited_heldout"] for r in ok),
         "credited_heldout_inside": sum(r["credited_heldout_inside"] for r in ok),
+        "static_fragments": sum(r["static_fragments"] for r in ok),
+        "static_excluded": sum(r["static_excluded"] for r in ok),
+        "median_static_excluded": statistics.median(r["static_excluded"] for r in ok),
+        "links_rejected_scale": sum(r["links_rejected_scale"] for r in ok),
         "videos_content_bound": sum(r["video_bound"] for r in ok),
         "link_solve_s_total": round(sum(r["link_solve_s"] for r in ok), 2),
         "link_solve_s_max": round(max(r["link_solve_s"] for r in ok), 2),
@@ -186,6 +193,8 @@ def main(argv=None) -> int:
           f"held out of the linking); median both-identified {pooled['median_both_identified']:.0%}, "
           f"median co-presence {pooled['median_co_presence']:.0%}; {pooled['videos_content_bound']} of "
           f"{pooled['videos_linked']} tables are bound to their video by content (the rest by file name only); "
+          f"{pooled['static_excluded']} still fragments kept out (median {pooled['median_static_excluded']} per video), "
+          f"{pooled['links_rejected_scale']} links refused by the body-size rule; "
           f"solver {pooled['link_solve_s_total']} s in total, slowest {pooled['link_solve_s_max']} s -> {a.out}")
     return 1 if failed else 0
 
