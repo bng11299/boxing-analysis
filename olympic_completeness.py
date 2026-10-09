@@ -168,6 +168,7 @@ def _skip_report(a, ok: "list[dict]", tot: dict) -> "tuple[dict | None, str]":
         return None, ""
     mode = "mask" if a.skips else "measure only: nothing masked"
     tot["skips"] = pool_skip_stats([v["skips"] for v in ok])
+    tot["skip_bins"] = completeness.bin_rates(completeness.pool_bins([v["skip_bins"] for v in ok]))
     block = {"mode": "mask" if a.skips else "measure", "ratio": skipmod.SKIP_RATIO, "half_window": skipmod.HALF_WINDOW,
              "step": skipmod.STEP, "near_frames": completeness.NEAR_SKIP,
              "rule": "frame f is a skip when its frame change exceeds ratio x the median over [f-10, f+10] without f",
@@ -175,7 +176,14 @@ def _skip_report(a, ok: "list[dict]", tot: dict) -> "tuple[dict | None, str]":
              "mask": "the frames within smooth_window // 2 + 1 of a skip (3 at 50 fps), widened over a bridged hole, get signal 0 "
                      "and leave the exposure; segments, body scale and smoothing are untouched" if a.skips
                      else "nothing was masked: the same bursts as a run without skips"}
-    return block, skip_line(tot["skips"], mode)
+    return block, skip_line(tot["skips"], mode) + bins_line(tot["skip_bins"])
+
+
+def bins_line(b: dict) -> str:
+    cells = [f"{n}: {_num(r, 1)} (x{_num(v, 2)})" for n, r, v in zip(b["bins"], b["unexplained_per_1000"], b["unexplained_vs_far"])]
+    gate = {True: "PASS", False: "FAIL", None: "n/a"}[b["gate_unexplained"]]
+    return ("Unexplained bursts per 1,000 exposure frames by distance (frames) to the nearest skip: " + " | ".join(cells)
+            + f"; gate (3-5, 6-10, 11-25 within 25% of >25, nothing in 0-2): {gate}. ")
 
 
 def read_sample(path: Path) -> "list[dict]":
@@ -357,6 +365,7 @@ def _main_credited(a, rule, only) -> int:
         row["video_bound"] = bool(table.video_fp)
         if sk is not None:
             row["skips"] = with_shares(completeness.near_skip_stats(res["bursts"], res["exposure"], sk.frames, table.n_frames))
+            row["skip_bins"] = completeness.distance_bins(res["bursts"], res["exposure"], sk.frames, table.n_frames)
         videos[t.name] = row
         print(f"{t.name}: {row['fragments_n']} credited fragments, {row['bursts']} bursts, {row['unexplained']} unexplained "
               f"in {row['exposure_min']:.1f} exposure min" + ("" if sk is None else f", {row['skips']['skips']} skips"))
@@ -510,6 +519,7 @@ def _run(a, rule) -> int:
         row["video_bound"] = bool(table.video_fp)
         if sk is not None:
             row["skips"] = with_shares(completeness.near_skip_stats(res["bursts"], res["exposure"], sk.frames, table.n_frames))
+            row["skip_bins"] = completeness.distance_bins(res["bursts"], res["exposure"], sk.frames, table.n_frames)
         videos[t.name] = row
         print(f"{t.name}: {row['bursts']} bursts, {row['unexplained']} unexplained | " + " | ".join(
             f"{n}: {i['unexplained']}/{i['bursts']} in {i['exposure_min']:.1f} exposure min" for n, i in row["boxers"].items()))

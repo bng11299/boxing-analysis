@@ -714,6 +714,60 @@ def near_skip_stats(bursts: "list[Burst]", exposure: "dict[object, np.ndarray]",
             "explained": len(ex), "explained_near_skip": sum(bool(near[b.frame]) for b in ex)}
 
 
+BIN_UPPER = (2, 5, 10, 25)                        # a frame is in bin i when its distance to the nearest skip is <= BIN_UPPER[i]
+BIN_NAMES = ("0-2", "3-5", "6-10", "11-25", ">25")   # the last bin has no upper edge: the far field
+GATE_BINS = (1, 2, 3)                              # the bins that must sit within GATE_TOL of the far field
+GATE_TOL = 0.25
+
+
+def distance_bins(bursts: "list[Burst]", exposure: "dict[object, np.ndarray]", skips, n_frames: int) -> dict:
+    """Bursts and exposure frames by DISTANCE (in frames, either side) to the nearest skip, in the bins BIN_NAMES.
+
+    This is the computation behind the frame-skip gate in docs/quality-loop.md, in the repo so it can be audited: every
+    exposure frame (summed over the masks in `exposure`, one per person) and every burst is assigned to the bin of its
+    distance to the nearest skip (a video without skips is all far field), unexplained and explained bursts counted
+    separately. Counts only: add them across videos, divide once (`bin_rates`)."""
+    sk = check_skips(skips, n_frames)
+    dist = np.full(n_frames, 10 ** 6, dtype=np.int64)
+    reach = BIN_UPPER[-1] + 1
+    for f in sk.tolist():
+        lo, hi = max(0, f - reach), min(n_frames, f + reach + 1)
+        dist[lo:hi] = np.minimum(dist[lo:hi], np.abs(np.arange(lo, hi) - f))
+    which = np.searchsorted(np.array(BIN_UPPER), dist, side="left")     # distance <= BIN_UPPER[i] -> i; beyond -> last bin
+    k = len(BIN_NAMES)
+    for b in bursts:
+        if not 0 <= b.frame < n_frames:
+            raise ValueError(f"a burst at frame {b.frame} is outside the {n_frames}-frame video")
+    return {"bins": list(BIN_NAMES),
+            "exposure_frames": sum(np.bincount(which[m], minlength=k) for m in exposure.values()).tolist() if exposure else [0] * k,
+            "unexplained": np.bincount([which[b.frame] for b in bursts if not b.explained], minlength=k).tolist(),
+            "explained": np.bincount([which[b.frame] for b in bursts if b.explained], minlength=k).tolist()}
+
+
+def bin_rates(counts: dict) -> dict:
+    """Pooled bin counts (sums over videos) -> bursts per 1,000 exposure frames in each bin, the ratio of each to the
+    far-field (last) bin, and the gate: every bin of GATE_BINS within GATE_TOL of the far field AND no unexplained burst in
+    the first bin (it is masked). None where a bin has no exposure (nothing to divide). The gate chose the final design of
+    the frame-skip mask, so a PASS is a check on that design, not independent evidence."""
+    out = {"bins": counts["bins"], "exposure_frames": counts["exposure_frames"]}
+    for kind in ("unexplained", "explained"):
+        rate = [None if e == 0 else c / e * 1000 for c, e in zip(counts[kind], counts["exposure_frames"])]
+        far = rate[-1]
+        out[kind] = counts[kind]
+        out[f"{kind}_per_1000"] = rate
+        out[f"{kind}_vs_far"] = [None if r is None or not far else r / far for r in rate]
+    ratios = [out["unexplained_vs_far"][i] for i in GATE_BINS]
+    out["gate_unexplained"] = None if any(r is None for r in ratios) else bool(
+        all(1 - GATE_TOL <= r <= 1 + GATE_TOL for r in ratios) and counts["unexplained"][0] == 0)
+    return out
+
+
+def pool_bins(rows: "list[dict]") -> dict:
+    """Sum per-video `distance_bins` counts."""
+    return {"bins": list(BIN_NAMES), **{k: np.sum([r[k] for r in rows], axis=0).tolist()
+                                       for k in ("exposure_frames", "unexplained", "explained")}}
+
+
 def mss(seconds: float) -> str:
     """Seconds as m:ss.s, rounded to a tenth FIRST so 59.96 s is 1:00.0 and never 0:60.0."""
     if not (isinstance(seconds, (int, float, np.floating)) and np.isfinite(seconds) and seconds >= 0):

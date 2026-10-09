@@ -565,6 +565,43 @@ nobase = olympic_completeness.pool_skip_stats([completeness.near_skip_stats([], 
 check("with nothing in exposure every share is None (written as null), not a crash",
       nobase["base_rate"] is None and nobase["unexplained_near_skip_share"] is None and nobase["unexplained_excess_over_base"] is None)
 
+print("distance_bins / bin_rates / pool_bins: the computation behind the gate table, auditable")
+B_ = lambda f, m="none": completeness.Burst("V", f, f / 50, "1", "left", 5.0, m, track_id=1)    # noqa: E731
+bb = [B_(100), B_(102), B_(103), B_(95), B_(94), B_(110), B_(111), B_(125), B_(126), B_(200), B_(99, "own"), B_(130, "own")]
+m300 = np.ones(300, bool)
+db = completeness.distance_bins(bb, {1: m300}, np.array([100]), 300)
+check("one skip at 100 in a 300-frame video: exposure frames by distance 0-2 / 3-5 / 6-10 / 11-25 / >25 are 5 / 6 / 10 / 30 / 249 (98..102, 95..97 and 103..105, ...)",
+      db["exposure_frames"] == [5, 6, 10, 30, 249] and db["bins"] == ["0-2", "3-5", "6-10", "11-25", ">25"], str(db))
+check("... unexplained bursts at distances 0, 2 | 3, 5 | 6, 10 | 11, 25 | 26, 100 are two in every bin; the explained ones at 99 and 130 are in 0-2 and >25",
+      db["unexplained"] == [2, 2, 2, 2, 2] and db["explained"] == [1, 0, 0, 0, 1], str(db))
+d2 = completeness.distance_bins([], {1: m300}, np.array([100, 108]), 300)
+check("two skips: each frame goes to its NEAREST one (100 and 108: frames 98..102 and 106..110 are in 0-2, 104 is 4 from both) and every frame is counted once",
+      d2["exposure_frames"][0] == 10 and sum(d2["exposure_frames"]) == 300, str(d2))
+d0 = completeness.distance_bins(bb, {1: m300}, np.array([], np.int64), 300)
+check("a video without skips is all far field", d0["exposure_frames"] == [0, 0, 0, 0, 300] and d0["unexplained"] == [0, 0, 0, 0, 10], str(d0))
+half_ = np.zeros(300, bool)
+half_[:150] = True
+check("only exposure frames are counted (a mask over half the video gives 150), summed over people (two masks give 300)",
+      sum(completeness.distance_bins([], {1: half_}, np.array([100]), 300)["exposure_frames"]) == 150
+      and sum(completeness.distance_bins([], {1: half_, 2: half_}, np.array([100]), 300)["exposure_frames"]) == 300)
+raises("a burst outside the video is refused", lambda: completeness.distance_bins([B_(300)], {1: m300}, np.array([100]), 300), "outside")
+raises("a bad skip list is refused", lambda: completeness.distance_bins([], {1: m300}, np.array([100, 50]), 300), "sorted")
+cnt = lambda un: {"bins": completeness.BIN_NAMES, "exposure_frames": [1000] * 5, "unexplained": un, "explained": [0, 5, 5, 5, 5]}    # noqa: E731
+rt = lambda un: completeness.bin_rates(cnt(un))    # noqa: E731
+check("bin_rates: rates per 1,000 exposure frames and ratios to the far field: [0, 50, 30, 40, 40] -> 40.0 far, 1.25 / 0.75 / 1.0",
+      rt([0, 50, 30, 40, 40])["unexplained_per_1000"] == [0.0, 50.0, 30.0, 40.0, 40.0] and rt([0, 50, 30, 40, 40])["unexplained_vs_far"][1:4] == [1.25, 0.75, 1.0])
+check("the gate passes at exactly +25% and -25% (50 and 30 against 40 per 1,000) with nothing in 0-2", rt([0, 50, 30, 40, 40])["gate_unexplained"] is True)
+check("... fails at +25.1% (251 per 10,000), at -26% (a bin of 29), in each of the three gated bins, and with one burst in 0-2",
+      rt([0, 51, 30, 40, 40])["gate_unexplained"] is False and rt([0, 50, 29, 40, 40])["gate_unexplained"] is False
+      and rt([0, 50, 30, 51, 40])["gate_unexplained"] is False and rt([0, 50, 30, 29, 40])["gate_unexplained"] is False
+      and rt([1, 50, 30, 40, 40])["gate_unexplained"] is False)
+nogate = completeness.bin_rates({"bins": completeness.BIN_NAMES, "exposure_frames": [0, 0, 1000, 1000, 1000], "unexplained": [0, 0, 5, 5, 5], "explained": [0] * 5})
+check("a gated bin with no exposure has no rate and no verdict (None, not a pass)", nogate["gate_unexplained"] is None and nogate["unexplained_per_1000"][1] is None)
+pb = completeness.pool_bins([db, d2])
+check("pool_bins adds the counts bin by bin", pb["exposure_frames"] == [15, db["exposure_frames"][1] + d2["exposure_frames"][1], pb["exposure_frames"][2],
+                                                                      pb["exposure_frames"][3], pb["exposure_frames"][4]] and sum(pb["exposure_frames"]) == 600
+      and pb["unexplained"] == db["unexplained"], str(pb))
+
 print("skipcheck_rows: a sampled burst is 'still unexplained' only for the same video, track, hand, within 2 frames, and not explained")
 nfx = {"V": 400, "W": 400}
 bx = {"V": [completeness.Burst("V", 100, 2.0, "1", "left", 5.0, "none", track_id=1),
@@ -678,6 +715,12 @@ check("REAL FACT: pooled near-skip counts after masking: 1 skip, 1 unexplained b
       sk_on["skips"] == 1 and sk_on["unexplained"] == 1 and sk_on["unexplained_near_skip"] == 0 and sk_on["exposure_frames"] == NC - 9
       and sk_on["exposure_near_skip"] == 0 and sk_on["base_rate"] == 0 and sk_on["unexplained_near_skip_share"] == 0,
       str(sk_on))
+bn_on = ja_on["all"]["skip_bins"]
+check("the --skips json carries the distance bins: 1,491 exposure frames in all (the 9 masked ones are gone, none in 0-2), no unexplained burst within 2 frames, "
+      "and the print gives the per-bin rates and the gate verdict",
+      sum(bn_on["exposure_frames"]) == NC - 9 and bn_on["exposure_frames"][0] == 0 and bn_on["unexplained"][0] == 0 and sum(bn_on["unexplained"]) == 1
+      and ja_on["videos"]["task_kam2_gh000001"]["skip_bins"]["exposure_frames"] == bn_on["exposure_frames"]
+      and "Unexplained bursts per 1,000 exposure frames by distance" in o_on and "gate (3-5, 6-10, 11-25 within 25% of >25, nothing in 0-2)" in o_on, str(bn_on))
 check("the per-video row carries the same block and the print leads with the SKIPS line",
       ja_on["videos"]["task_kam2_gh000001"]["skips"]["skips"] == 1 and "SKIPS (mask; 1 skips): bursts within 2 frames of a skip: unexplained 0/1" in o_on, o_on[:300])
 rows_chk = list(csv.reader(k_on.read_text(encoding="utf-8").splitlines()))
@@ -702,6 +745,10 @@ check("REAL FACT: before masking, 1 of the 2 unexplained bursts (50%) is within 
       "the excess is about 150x",
       sk_m["unexplained"] == 2 and sk_m["unexplained_near_skip"] == 1 and sk_m["unexplained_near_skip_share"] == 0.5
       and sk_m["exposure_near_skip"] == 5 and 100 < sk_m["unexplained_excess_over_base"] < 200, str(sk_m))
+bn_m = ja_m["all"]["skip_bins"]
+check("--skips-measure's bins are the b912027 behaviour: all 1,500 exposure frames, with the jump's burst in 0-2 (and the gate says FAIL)",
+      sum(bn_m["exposure_frames"]) == NC and bn_m["exposure_frames"][0] == 5 and bn_m["unexplained"][0] == 1 and sum(bn_m["unexplained"]) == 2
+      and bn_m["gate_unexplained"] is False, str(bn_m))
 check("... every other number of the measure-only run equals the run without skips (same fragments, bursts, rates)",
       ja_m["all"]["bursts"] == ja_off["all"]["bursts"] and ja_m["all"]["exposure_min"] == ja_off["all"]["exposure_min"]
       and ja_m["all"]["unexplained_per_exposure_min"] == ja_off["all"]["unexplained_per_exposure_min"])
