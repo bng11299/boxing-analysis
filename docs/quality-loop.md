@@ -1000,16 +1000,18 @@ The completeness test on CREDITED fragments only, no linking (`completeness.find
 - **Decision beyond the brief:** a label credited to a track id that is NOT in the population (fewer than `min_punches` credited
   punches) belongs to a person this test does not follow. It is neither owned nor unattributed: it explains nothing and is counted as
   `credited_to_excluded`. Treating it as unattributed would let a person we do not follow excuse the bursts of those we do (mutation 8).
-- **The stated bias (in the module docstring, the json `bias`, the CLI print and here).** This sees only credited fragments. Boxer
-  time in a fragment with no credited punch is outside it, and so are punches too close to call (attribution ambiguity). It can
-  therefore only UNDERCOUNT missed labels relative to the whole bout: a clean result is weak evidence, a dirty one (many sampled
-  bursts classified as real unlabelled punches) is decisive. A credited fragment can be a non-boxer wrongly credited (a referee, a
+- **The stated limits (in the module docstring, the json `bias`, the CLI print and here; WORDING CORRECTED in Iteration 2, which
+  replaced "can only UNDERCOUNT").** This sees only credited fragments. Missed punches outside them (boxer time in a fragment with no
+  credited punch, punches too close to call) are never seen, so coverage can only lose; but fragment-level detections can DUPLICATE
+  one physical punch when two overlapping ids follow the same person. So neither a bout-level upper nor a lower bound follows
+  without de-duplication. A clean result is weak evidence of completeness; a dirty one shows labels are missing inside the credited
+  fragments, though the count may include duplicates. A credited fragment can be a non-boxer wrongly credited (a referee, a
   coach, a spectator); the fragments with exactly one credited punch are the least certain and are counted.
 - **Tests:** new `tests/test_completeness_credited.py`, 75 checks on planted scenes (two co-present credited fragments with a
   simultaneous burst, an uncredited referee, a one-punch fragment; `min_punches` 1/2/3 and bad values; an ambiguous label explains one
   burst once across fragments and the tie goes to the lower id; own labels first; a bridged-frame peak counted in numerator and
   exposure with its interpolated box; a 3-row segment adds no exposure and its label is outside it; a 2-frame hole stays one
-  segment and a 3-frame hole ends it; the exposure RuntimeError; attributions from another table refused; box_at / mss including
+  segment and a 3-frame hole ends it; the exposure RuntimeError; a punch credited to an id missing from the table refused (Iteration 2 widens this to any attribution that differs from the table's own); box_at / mss including
   59.96 s = 1:00.0; the CLI end to end on a planted dataset: exact `track_id`, box centre and height, `time_s`, `time_mss` for a burst
   on a bridged frame and one after the first minute, `inclusion_prob` = n/N = 0.666667, reproducible sample, `--credited
   --reacquire` refused with nothing written, `--min-punches 0 / -3` and `--min-punches` alone refused, default outputs leave sentinel
@@ -1064,8 +1066,51 @@ bool refused) and a track id taken from the attributions (refused when it is not
 no dependency, the CLI computes everything before writing, JSON written with `allow_nan=False`, a burst outside its exposure still
 raises.
 
-**Residual risks:** (1) the bias above: credited fragments only, so a clean result is weak evidence; (2) a credited fragment can be a
+**Residual risks:** (1) the limits above: credited fragments only, so a clean result is weak evidence, and duplicate ids can inflate a dirty one; (2) a credited fragment can be a
 non-boxer, and one-punch fragments carry 38% of the bursts; (3) an id switch inside a fragment is undetected; (4) the same person under
-two overlapping ids is counted twice, so the pooled exposure is fragment-minutes, not video time; (5) the rule is V6's (AlphaPose,
+two overlapping ids is counted twice (Iteration 2 counts the likely cases, `possible_duplicates`, and does not subtract them), so the pooled exposure is fragment-minutes, not video time; (5) the rule is V6's (AlphaPose,
 24 fps) and untuned for 50 fps sparring; (6) the 29 tables are bound by file name only; (7) matching is optimal within each phase,
 ties go to the lower track id.
+
+### Iteration 2 -- Astra 6 review of `feat/completeness-credited` (2026-10-09; verdict FIX FIRST: 1 blocking, 2 not)
+
+| # | Finding | Fix | Evidence |
+|---|---|---|---|
+| B1 blocking | Attributions were not bound to the table that produced them: with the same id set but the people swapped (a re-tracked video), attributions of table A passed with table B went through every check and silently changed the population, matches and rates | `completeness.check_attrs_bound`, called by BOTH `find_bursts_credited` and `find_bursts`: recompute `olympic.attribute(events, table)` (default parameters) and require, event by event, the same credited track id, wrist, distance, runner-up distance, ambiguity flag and hand-clear flag (`ValueError` naming the event). What is checked is exactly that, not "ids exist in the table": the earlier missing-id test is kept and checked first. The CLI passes the attributions `load_video` made (computed once per video there) and the test recomputes them once more; nothing else changed | same ids, ownership swapped (ids 1 / 2 credited 1,1,1,2,2,2 in table A and 2,2,2,1,1,1 in table B): refused by both functions, accepted with the table's own attributions; credit removed, ambiguity flipped and wrist changed after the fact are refused. Attributions made with non-default `attribute` parameters would be refused too by construction (not separately tested; pass the defaults) |
+| N1 wording | "can only UNDERCOUNT" overstated the inference: two overlapping ids on one person each report the same unlabelled punch | Wording replaced in the module docstring, `BIAS_CREDITED` (json `bias`, CLI print), the CLI docstring, the project rules and above: restricting to credited fragments loses missed punches outside them (coverage can only lose), while fragment detections can duplicate a punch, so neither a bout-level upper nor a lower bound follows without de-duplication. New number `possible_duplicates` (per fragment, per video, pooled; `possible_duplicate_pairs` beside it): an unexplained burst with an unexplained burst of ANOTHER credited fragment within the matching tolerance (0.1 s) whose boxes overlap at IoU >= `DUP_IOU` = 0.3 at the earlier of the two frames. 0.3 is a generous screening level (one person under two ids gives IoU far above 0.5, two fighters in a clinch overlap partly); it comes from the review brief and was not tuned on the Olympic numbers. Reported, never subtracted | two ids on one person (4 px apart, IoU 0.87): 2 bursts, 1 pair; two separate people bursting together: 0; 20 px shift (IoU 0.47) counts, 35 px (0.23) does not; a twin 5 frames later counts, 6 does not; an explained twin does not count |
+| N2 tests | Nothing protected pooling or the summed exposure of overlapping fragments (a mean of per-video rates, or a union exposure, passed the one-fragment fixture) | tests only | videos of 2 unexplained / 1.0 min (2.0 per min) and 18 / 3.0 min (6.0 per min) pool to 5.0, not the mean 4.0; own labels 3 / 1.0 min and 3 / 3.0 min pool to 1.5, not 2.0; two fragments on screen for the same 400 frames keep 800 exposure frames, not the union's 400, and the rates divide by 800 |
+
+The CSV was NOT changed (no `possible_duplicate` column); a sampled row's twin can be found by its frame and box.
+
+**Existing assertions replaced (nothing weakened):** the two checks that asserted the words "UNDERCOUNT" / "decisive" in the json bias and
+the CLI print now assert the corrected statement ("coverage can only lose", "DUPLICATE", "neither a bout-level upper nor a lower bound",
+"weak evidence", no "UNDERCOUNT", "possible twin"), which is a stricter set of facts about the same text.
+
+**Mutation check (change applied in a scratch copy; the named suite must fail)**
+| # | Mutation | Suite | Result | First failing checks |
+|---|---|---|---|---|
+| 15 | B1: `find_bursts_credited` does not verify the attributions | credited | caught, 3 fail | swapped ownership refused; credit removed; ambiguity flipped |
+| 16 | B1: `find_bursts` does not verify them | credited / linking | caught, 2 / 0 | `find_bursts` refuses swapped ownership; wrist changed (the linking suite never swaps tables) |
+| 17 | B1: verification compares only whether a track is credited, not which | credited | caught, 4 | swapped ownership refused by both functions |
+| 18 | N1: duplicate counter without the IoU check | credited | caught, 2 | two separate people are not duplicates; the threshold bites on both sides |
+| 19 | N1: duplicate counter ignores the time window | credited | caught, 1 | 5 frames counts, 6 does not |
+| 20 | N1: duplicate counter counts explained twins | credited | caught, 1 | an explained twin does not count |
+| 21 | N2: pooled rate is the mean of per-video rates | credited | caught, 3 | 5.0 not 4.0; 1.5 not 2.0; the no-credited-punch run |
+| 22 | N2: a video's exposure is the longest fragment, not the sum | credited | caught, 2 | 800 frames, not 400; rates over 800 |
+
+**Real data, `--credited` and `--credited --min-punches 2`, re-run:** every pre-existing number is unchanged (the same fragments, bursts,
+unexplained, exposure, labels, rates, and the two samples are byte-identical); only the new keys appear.
+| Quantity | Credited, min 1 | Credited, min 2 |
+|---|---|---|
+| unexplained bursts / `possible_duplicates` (share) | 7,318 / 177 (2.4%) | 4,342 / 66 (1.5%) |
+| `possible_duplicate_pairs` | 89 | 33 |
+| videos with no possible duplicate | 6 of 29 | 16 of 29 |
+| most in one video | 22 (GH089681), 16 (GH109681, GH069681) | 10 (the same three videos) |
+
+So on this data duplicate ids inflate the unexplained count by at most one burst per pair, 89 of 7,318 (1.2%) at min 1 and 33 of 4,342
+(0.8%) at min 2 (a pair is two unexplained bursts for at most one physical punch); it does not explain 45 unexplained bursts per exposure minute. Whether those are punches is still for the sample to say.
+**Tests (all suites):** `test_completeness_credited.py` 95 (was 75), `test_linking.py` 266, `test_tracks.py` 79, `test_olympic.py` 33,
+`test_hands.py` 38, `test_labels.py` 50, `test_ingest.py` 124, `test_env.py` 36, `test_pipeline.py` 260.
+**Residual risks added:** (1) `possible_duplicates` is a screen: boxes that overlap at IoU >= 0.3 and bursts within 0.1 s, not a proof of
+one person, and a twin that was matched to a label is not counted; (2) the verification recomputes attribution with default parameters,
+so attributions made with other parameters are refused rather than trusted.
