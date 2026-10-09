@@ -1117,3 +1117,137 @@ duplication could not explain the rate; the counter cannot establish either.) Wh
 **Residual risks added:** (1) `possible_duplicates` is a screen: boxes that overlap at IoU >= 0.3 and bursts within 0.1 s, not a proof of
 one person, and a twin that was matched to a label is not counted; (2) the verification recomputes attribution with default parameters,
 so attributions made with other parameters are refused rather than trusted.
+
+
+## `feat/frame-skips` -- 2026-10-09
+
+Branch from `feat/completeness-credited` (b912027, PR #12 untouched).
+
+**The finding (Brendan; confirmed numerically on GH069681).** The Olympic GoPro files have perfectly regular packet timestamps (every
+interval 20 ms; `probe` reports no VFR), but the camera drops CAPTURED frames: what is on screen jumps forward in one frame while the
+timestamps stay regular, and the wrist-speed rule reads the jump as a fast punch. Of the four unexplained bursts of GH069681 Brendan
+classified, the two he called "not a punch" (frames 1287 and 7018, tracks 64 and 1203) sit on such a jump; the two real unlabelled
+punches (1965, 13293) do not. Measured as the mean absolute grey difference between consecutive frames (image decimated 4x), divided by the
+video's median: 3.46x at frame 1287 and 5.36x at 7019 (a reviewer's earlier inspection read 3.39x and 5.43x), nothing comparable at 1965 or
+13293. No exact duplicate frame exists (the minimum change is 0.07 grey levels against a median of 1.18), so it is a skip, not a repeat.
+
+**The rule (`src/boxingvi/skips.py`).** Frame f is a SKIP when `change[f] > 3.0 x` the median of `change` over [f-10, f+10] EXCLUDING f.
+The neighbours' median is the local normal: a pan or a crowd surge raises it and is not flagged, an isolated jump is. Frame 0 (NaN) is
+never a skip; NaN never enters a median; there is no absolute floor (none was observed to be needed; one would be a tuned constant). On
+GH069681 it finds 147 skips (one every 1.9 s) where the first inspection found 145; the small difference is the grey conversion and the
+decimation.
+
+**Declaration.** The rule and `SKIP_RATIO = 3.0` come from Brendan's observation and a reviewer's inspection of ONE development video
+(GH069681). They were fixed by reading that observation, not tuned to any completeness, precision or score, and no other video was used to
+choose them. That they transfer to the other 28 videos is a claim the numbers below test, not one the code makes. (Brendan's four classified rows are the only ground truth about skips used in this section; the rest of the sample he is still
+classifying was not used for anything.)
+
+**What was built.**
+1. `video.frame_change(path, info=None, step=4)`: one float per frame, NaN for frame 0, decoded once through `iter_frames`; no pixel
+   leaves the function (an aggregate per frame only). 2. `skips.find_skips`, `skips.Skips` (change array bound to the source file name,
+   the frame count and the video's content fingerprint; `<tracks>/<id>.framechange.npz`, saved atomically, strict loader, no pickle).
+3. `olympic_framechange.py --data --tracks [--only] [--overwrite]`. 4. `completeness.cut_at_skips` inside `_scan_segments`, so
+   `find_bursts` and `find_bursts_credited` take `skips=`: every segment is cut between f-1 and f for each skip f inside it (also a skip on
+   a frame the segment is missing: the hole the bridge would have interpolated across), BEFORE bridging, smoothing or differencing;
+   `skips=None` is the old output exactly (every existing check unchanged). 5. `olympic_completeness.py --skips`
+   (both modes), `--skips-measure` (loads the same files, reports the same numbers, does NOT cut: the "before"), `--skipcheck SAMPLE.csv
+   --skipcheck-out OUT.csv`. New default output names (`..._skips.json`, `..._skips_sample.csv`; `..._skipsmeasure...`); a missing,
+   malformed or mismatched framechange file stops the whole run with exit 2 and writes nothing.
+
+**Deviations from the brief (and why).** (a) `--skips-measure` and `--skipcheck` are added: "before and after" needs the near-skip counts
+of the b912027 behaviour, and the existing JSONs do not contain them; the measure run reproduces every pre-existing number (below), so it
+is also a regression check on the real data. (b) The framechange file stores the fingerprint of the VIDEO FILE it decoded (always
+present), and the run checks it against the video and, when the table has one, against the table's `video_fp`; the brief said "the table's
+video_fp if present", which is the weaker half of that. (c) A synthetic "dropped frame" in the tests is a dropped STRETCH (the pattern
+jumps 6 px where it moves 1 px a frame): a one-frame drop of a 1 px/frame pattern is a 2x change and, correctly, not a skip; the real
+camera's jumps are 3-5x. (d) `still scene -> no skip` is tested on a flat picture: a static GRATING re-encoded by H.264 at crf 18 is not
+bit-still (changes of 0.001-0.006, median 0.0013) and the rule, having no floor, flags its frame 1 (0.0059). Real footage is orders of
+magnitude above that (smallest per-video median change 1.04), so it did not occur there, but it is a property of the rule (residual risk 4).
+
+**Tests (all suites):** `test_frame_skips.py` 155 (new), `test_completeness_credited.py` 95, `test_linking.py` 266, `test_tracks.py` 79,
+`test_olympic.py` 33, `test_hands.py` 38, `test_labels.py` 50, `test_ingest.py` 124, `test_env.py` 36, `test_pipeline.py` 260; every
+pre-existing count and result is unchanged. Negative tests at the trust boundaries: a skip list that is unsorted, repeated, at frame 0, past
+the video, float or 2-D; a change array that is integer, 2-D, negative, infinite, NaN anywhere but frame 0; a framechange file with a wrong
+source, length or fingerprint, a missing field, a pickled array, garbage, a truncated zip, a bad ratio / window / step; both CLIs'
+refusals leave no output behind.
+
+**Mutation check (change applied in a scratch copy; `test_frame_skips.py` must fail)**
+| # | Mutation | Result | First failing checks |
+|---|---|---|---|
+| M1 | skips ignored in `_scan_segments` | caught, 8 fail | the jump is cut out; two segments; `find_bursts` cuts; `--skips` leaves one unexplained |
+| M2 | the window includes f itself | caught, 1 | 4.6 between ten 1.0s and ten 2.0s is a skip |
+| M3 | ratio test replaced by a fixed absolute threshold | caught, 6 | 30.1 over 10 is a skip and 25 is not; a pan is not flagged; a ramp; a still stretch |
+| M4a | `Skips.verify` checks nothing | caught, 11 | wrong name / length / fingerprint all accepted |
+| M4b | the CLI does not compare the file's fingerprint to the video | caught, 5 | a file measured on another file (the later failures are the first's leftover output) |
+| M5 | `>=` instead of `>` | caught, 3 | exactly 3.0x is not a skip; zeros in a still stretch |
+| M6 | a skip cuts only at a row, not at a hole | caught, 1 | a skip on a missing frame cuts there |
+| M7 | `--skips-measure` also cuts | caught, 3 | same bursts as without skips; the before numbers |
+| M8 | skipcheck ignores the hand | **missed at first** (151 checks), caught after adding 9 rows, 1 | other hand is false |
+| M9 | base rate counts all video frames, not exposure | caught, 4 | 10 of 150 exposure frames |
+| M10 | NaN not ignored in the medians | caught, 26 | 2.99x / 3.01x boundary and 25 more |
+| M11 | the near-skip window is one-sided | caught, 7 | counts, base rate, no wrap at the start |
+| M12 | skipcheck ignores the track id | **missed at first**, caught after the same 9 rows, 1 | other track is false |
+
+**Real data.** `olympic_framechange.py` on all 29 videos: 312,774 frames (104.3 video minutes), **3,367 skips = 32.3 per video minute**
+pooled (one every 1.9 s), per video 22.1 (GH089681) to 50.4 (GH128416) per minute, median 32.8; the smallest per-video median change is
+1.04 grey levels. Wall time: 5,560 s summed over videos (1.5 h of CPU-bound decoding at ~10-20 ms a frame, measured with up to four of
+these running at once beside another job on the same machine; GH069681 alone, 13,800 frames, took 147 s). Two videos were measured twice
+by two of the parallel processes (a race on the output name, harmless: atomic replace, same content).
+
+| Quantity (`--credited`) | min 1, b912027 | min 1, `--skips` | min 2, b912027 | min 2, `--skips` |
+|---|---|---|---|---|
+| bursts | 10,077 | 9,685 | 6,227 | 6,029 |
+| unexplained | 7,318 | 6,903 | 4,342 | 4,117 |
+| explained | 2,759 | 2,782 | 1,885 | 1,912 |
+| exposure minutes (summed over fragments) | 161.36 | 161.21 | 96.05 | 95.98 |
+| unexplained per exposure minute | 45.35 | 42.82 | 45.21 | 42.90 |
+| bursts per exposure minute | 62.45 | 60.08 | 64.83 | 62.82 |
+| own labels per exposure minute | 14.92 | 14.93 | 18.13 | 18.14 |
+| segments (short) | 2,758 (260) | 6,689 (403) | 1,380 (116) | 3,667 (191) |
+| `possible_duplicates` | 177 | 145 | 66 | 56 |
+| unexplained within 2 frames of a skip | 1,113 / 7,318 = 15.2% | 52 / 6,903 = 0.8% | 624 / 4,342 = 14.4% | 35 / 4,117 = 0.9% |
+| explained within 2 frames of a skip | 209 / 2,759 = 7.6% | 32 / 2,782 = 1.2% | 137 / 1,885 = 7.3% | 26 / 1,912 = 1.4% |
+| base rate (exposure frames within 2 of a skip) | 4.8% (23,032 / 484,084) | 4.7% (22,631 / 483,614) | 4.6% (13,163 / 288,154) | 4.5% (12,962 / 287,935) |
+| unexplained share / base rate | 3.20x | 0.16x | 3.15x | 0.19x |
+| explained share / base rate | 1.59x | 0.25x | 1.59x | 0.30x |
+
+The "b912027" columns are from `--skips-measure` and equal the pre-existing `olympic_completeness_credited.json` / `_min2.json` in
+every burst, label, exposure and rate (compared programmatically): no burst was lost to a re-implementation. The pooled near-skip
+excess before the fix is real and general (15% of unexplained bursts against a 5% base rate, in 29 videos, not only GH069681's 14%),
+and within 2 frames of a skip it is gone after.
+
+**Three things the table says that the brief did not expect.** (1) The excess did not just vanish, it reversed: 0.16x. (2) The
+unexplained rate fell by only 5.6% (45.35 to 42.82 per exposure minute), although 1,061 unexplained bursts were removed near skips,
+because the cut ADDS bursts a little further out. Bursts per 1,000 exposure frames by distance to the nearest skip (min 1, unexplained /
+explained), before then after: 0-2 frames 48.3 / 9.1 then 2.3 / 1.4; 3-5 frames 12.9 / 4.0 then 22.8 / 7.1; 6-10 frames 11.4 / 4.4 then
+16.7 / 6.1; 11 or more frames 13.7 / 5.8 then 14.1 / 5.9. So the far field is unchanged and a ring of extra bursts now sits 3-10 frames
+from each skip (1.6x and 1.2x the far-field rate). The likely cause, not isolated: the cut pieces are about 1.9 s long, the smoothing is
+edge-normalised (less smoothing at a piece's end, so a noisier speed), the body scale is re-estimated per piece, and `find_peaks` never
+reports a piece's first or last sample. (3) Explained went UP (+23 at min 1, +27 at min 2): the one-to-one matching ran on a changed burst set.
+The four 2-frame-window numbers (0.8% / 1.2%) therefore overstate what the cut achieved: a real fix would also have to stop the edge ring
+(for example by giving a cut piece the scale of the fragment and ignoring peaks inside the smoothing half-window of a cut), which this
+branch did not do because it would be a second, unevaluated tuning.
+
+**Brendan's four GH069681 rows (min 2).** 1287 / track 64: **gone** (no burst within 10 frames of it remains; skip at that frame).
+7018 / track 1203: **gone** (skip one frame away). 1965 / track 253: **still an unexplained burst**. 13293 / track 2268: **still an
+unexplained burst**. Exactly the expected outcome.
+
+**The sample** (`results/olympic_completeness_credited_min2_sample_skipcheck.csv`, the 40 existing rows with
+`still_unexplained_with_skips`; the original CSV was only read, its hash is unchanged): 27 true, 13 false. Eight of the 13 are within
+2 frames of a skip (distance 0, 0, 1, 1, 1, 1, 1, 2 frames) and all of those vanished, as intended. Five are not: they are 5, 6, 9, 13
+and 174 frames from the nearest skip. Four of them lost their burst outright (no burst of that track within 10 frames remains); three
+of the four had peaks of only 3.67 to 4.48 in the old run against the threshold 3.62, which is consistent with the per-piece scale effect
+above, not proven. The fifth (GH178416 frame 14485) still has its burst, three frames earlier (14482), so the strict 2-frame
+test calls it false. The 27 rows kept had skips 4 to 444 frames away. This is also why `still_unexplained_with_skips = false` does not
+mean "was caused by a skip": for 5 of the 13 it means "changed".
+
+**Residual risks.** (1) A real punch exactly across a skip is now split in two (a punch at 150 with a skip 2 frames away came out as
+one or two bursts within 140..160 in the synthetic test; on the real data it is the edge ring above); the cut cannot tell a real
+jump from a skip-made one when a real punch coincides with a dropped frame. (2) Skips at a scene cut or a replay edit would be cut as
+well (harmless: a cut only removes differencing across it) and counted. (3) The rule is GoPro-specific in the sense that it was seen
+on this camera's drops; another encoder's frame-doubling would not trace as a spike. (4) No absolute floor: on a stretch where the
+picture hardly changes at all (a frozen frame, a black leader) codec noise can be flagged; none was seen in the 29 videos, and the
+consequence of a false skip is a cut, not a burst. (5) The `skipcheck` window is exactly 2 frames and the track, hand and video: a
+burst that the cut shifted by 3 frames counts as gone. (6) The skip signal is one aggregate per frame on a 4x-decimated grey image,
+so a drop during uniform motion of a small part of the picture (a dropped frame that only moved the boxers a little) is under the
+rule's ratio and is not found. (7) The fingerprint is still the first and last 4 MiB, not every byte.
