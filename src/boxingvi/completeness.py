@@ -53,6 +53,20 @@ only; whole-video label density is another population and is never compared with
 
 Caveat carried into the report: the rule's threshold is V6's (AlphaPose, 24 fps, hooks and
 uppercuts of one athlete).
+
+CREDITED FRAGMENTS (ADR-0012 Option 2, `find_bursts_credited`): the same test with NO linking and no
+boxer identity. The population is every track id that is credited with at least `min_punches`
+labelled punches; each such id (a FRAGMENT) is one person for its whole length, because ByteTrack
+never gives one id to two people by design (an id switch inside a fragment is the tracker's residual
+error and is not detected here). A label is OWNED by the fragment it is credited to; matching, exposure
+and the sample rules are the ones above, with the fragment in the place of the boxer.
+
+BIAS, stated once and carried into every output: this sees ONLY credited fragments. Boxer time in a
+fragment with no credited punch is outside it, and so are punches too close to call (attribution
+ambiguity). It can therefore only UNDERCOUNT missed labels relative to the whole bout: a clean result
+is weak evidence; a dirty one (many sampled bursts classified as real unlabelled punches) is decisive.
+A credited fragment can also be a non-boxer wrongly credited (a referee, a spectator): the fragments
+with exactly one credited punch are the least certain, and are counted.
 """
 
 from __future__ import annotations
@@ -88,6 +102,8 @@ class Burst:
     peak_speed: float   # body lengths per second
     match: str = "none"           # "own" | "unattributed" | "none": see the module docstring
     hand_agrees: "bool | None" = None   # matched label's hand == this burst's hand; None if unmatched. Information only.
+    track_id: "int | None" = None       # credited mode only: the ByteTrack id (the fragment) the burst is in
+    box: "tuple | None" = None          # credited mode only: that fragment's box (centre x, centre y, height) at the burst frame, pixels
 
     def __post_init__(self) -> None:
         if self.match not in MATCHES:
@@ -124,6 +140,16 @@ def boxer_track(table: PoseTable, linking: Linking, k: int) -> "Track | None":
     return _track_of(table, rows, f"{table.source}#boxer{'AB'[k]}")
 
 
+def _split_rows(table: PoseTable, rows: np.ndarray, max_gap: int) -> "list[np.ndarray]":
+    """`rows` (frame order) cut into segments wherever the track id changes or the frames are more
+    than `max_gap` missing frames apart. The one place a segment is defined."""
+    if len(rows) == 0:
+        return []
+    tid, fr = table.track_id[rows], table.frame[rows]
+    cut = np.flatnonzero((np.diff(tid) != 0) | (np.diff(fr) > max_gap + 1)) + 1
+    return [rows[a:b] for a, b in zip(np.r_[0, cut], np.r_[cut, len(rows)])]
+
+
 def boxer_segments(table: PoseTable, linking: Linking, k: int, max_gap: int = 0) -> "list[np.ndarray]":
     """Boxer k's rows split into SEGMENTS (arrays of row indices, frame order): a new segment
     starts wherever the track id changes (a handover: two detections of possibly different
@@ -132,12 +158,7 @@ def boxer_segments(table: PoseTable, linking: Linking, k: int, max_gap: int = 0)
     as on the footage the rule was tuned on."""
     if isinstance(max_gap, bool) or not isinstance(max_gap, (int, np.integer)) or max_gap < 0:
         raise ValueError("max_gap must be a whole number >= 0")
-    rows = boxer_rows(table, linking, k)
-    if len(rows) == 0:
-        return []
-    tid, fr = table.track_id[rows], table.frame[rows]
-    cut = np.flatnonzero((np.diff(tid) != 0) | (np.diff(fr) > max_gap + 1)) + 1
-    return [rows[a:b] for a, b in zip(np.r_[0, cut], np.r_[cut, len(rows)])]
+    return _split_rows(table, boxer_rows(table, linking, k), max_gap)
 
 
 def event_owner(attr, linking: Linking) -> "int | None":
@@ -204,6 +225,41 @@ def _match(bursts: "list[tuple]", labels: "list[int]", events, tol: int, taken: 
     return got
 
 
+def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: str, bridge: int,
+                   min_rows: int) -> dict:
+    """The rule on each segment (bridge, wrist_signal, detect) and the EXPOSURE it ran on, for one
+    person: the single implementation behind `find_bursts` (a linked boxer) and
+    `find_bursts_credited` (a credited fragment). Returns {"mask", "raw" [(frame, hand index, peak
+    speed)], "segments", "short_segments", "bodyless_segments", "valid" (frames with a valid
+    signal: left, right)}. Every burst is asserted to lie in the mask (RuntimeError otherwise)."""
+    out = {"mask": np.zeros(table.n_frames, dtype=bool), "raw": [], "segments": 0, "short_segments": 0,
+           "bodyless_segments": 0, "valid": np.zeros(2)}
+    mask = out["mask"]
+    for seg in segs:
+        out["segments"] += 1
+        if len(seg) < min_rows:
+            out["short_segments"] += 1
+            continue
+        track = punchfind.bridge(_track_of(table, seg, f"{table.source}#{who}"), bridge)
+        try:
+            sig = punchfind.wrist_signal(track, rule["variant"])
+        except ValueError:                           # no confident body anywhere in this segment
+            out["bodyless_segments"] += 1
+            continue
+        have = punchfind.signal_frames(track)
+        out["valid"] += have.sum(axis=0)
+        mask[track.frame_ids[have.any(axis=1)]] = True
+        frames, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
+        row = {int(f): i for i, f in enumerate(track.frame_ids)}
+        for f, h in zip(frames, hands):
+            out["raw"].append((int(f), int(h), float(sig[row[int(f)], int(h)])))
+    for f, _h, _p in out["raw"]:
+        if not mask[f]:
+            raise RuntimeError(f"{who}: a burst at frame {f} lies outside the exposure it was "
+                               "counted against; numerator and denominator would differ")
+    return out
+
+
 def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, video: str = "",
                 tol_s: float = TOL_S) -> dict:
     """Bursts per boxer, matched one-to-one to labels (see the module docstring), the EXPOSURE
@@ -245,36 +301,18 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
                 "own_labels_in_exposure": 0, "own_labels_outside_exposure": 0,
                 "labels_matched_own": 0, "note": ""}
         boxers["AB"[k]] = info
-        mask = np.zeros(table.n_frames, dtype=bool)
+        scan = _scan_segments(table, boxer_segments(table, linking, k, max_gap=bridge), rule,
+                              f"boxer{'AB'[k]}", bridge, min_rows)
+        mask = scan["mask"]
         masks["AB"[k]] = mask
-        valid = np.zeros(2)                          # frames with a valid signal: left, right
-        for seg in boxer_segments(table, linking, k, max_gap=bridge):
-            info["segments"] += 1
-            if len(seg) < min_rows:
-                info["short_segments"] += 1
-                continue
-            track = punchfind.bridge(_track_of(table, seg, f"{table.source}#boxer{'AB'[k]}"), bridge)
-            try:
-                sig = punchfind.wrist_signal(track, rule["variant"])
-            except ValueError:                       # no confident body anywhere in this segment
-                info["bodyless_segments"] += 1
-                continue
-            have = punchfind.signal_frames(track)
-            valid += have.sum(axis=0)
-            mask[track.frame_ids[have.any(axis=1)]] = True
-            frames, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
-            row = {int(f): i for i, f in enumerate(track.frame_ids)}
-            for f, h in zip(frames, hands):
-                raw[k].append((int(f), int(h), float(sig[row[int(f)], int(h)])))
+        raw[k] = scan["raw"]
+        for key in ("segments", "short_segments", "bodyless_segments"):
+            info[key] = scan[key]
         info["exposure_frames"] = int(mask.sum())
         info["exposure_min"] = int(mask.sum()) / table.fps / 60
-        info["signal_min_left"], info["signal_min_right"] = (valid / table.fps / 60).tolist()
+        info["signal_min_left"], info["signal_min_right"] = (scan["valid"] / table.fps / 60).tolist()
         if len(rows) < 2:
             info["note"] = "fewer than two identified frames"
-        for f, _h, _p in raw[k]:
-            if not mask[f]:
-                raise RuntimeError(f"boxer {'AB'[k]}: a burst at frame {f} lies outside the exposure it was "
-                                   "counted against; numerator and denominator would differ")
 
     def in_exposure(e, which) -> bool:
         lo, hi = e.first, min(e.last, table.n_frames - 1)
@@ -336,3 +374,144 @@ def random_sample(unexplained: "dict[str, list[Burst]]", n: int = SAMPLE_N, seed
     big_n = len(pop)
     take = sorted(random.Random(seed).sample(range(big_n), min(n, big_n)))
     return [pop[i] for i in take], big_n
+
+
+BIAS_CREDITED = ("Only fragments (track ids) credited with a labelled punch are tested. Boxer time in a fragment with no "
+                 "credited punch is outside this test, and so are punches too close to call (attribution ambiguity), so it can "
+                 "only UNDERCOUNT missed labels relative to the whole bout: a clean result is weak evidence, a dirty one "
+                 "(many sampled bursts classified as real unlabelled punches) is decisive. A credited fragment can be a "
+                 "non-boxer wrongly credited; an id switch inside a fragment is the tracker's residual error.")
+
+
+def box_at(table: PoseTable, rows: np.ndarray, frame: int) -> "tuple[float, float, float]":
+    """(centre x, centre y, height) in pixels of the box of ONE track id at `frame`: its own row's
+    box, or, on a frame the bridge interpolated across (no row), the linear interpolation between the
+    rows on either side. `rows` are that id's row indices in frame order; `frame` must lie inside
+    their span (a burst always does)."""
+    fr = table.frame[rows].astype(np.float64)
+    if not (fr[0] <= frame <= fr[-1]):
+        raise ValueError(f"frame {frame} is outside this fragment's span {int(fr[0])}-{int(fr[-1])}")
+    b = [float(np.interp(frame, fr, table.box[rows, c].astype(np.float64))) for c in range(4)]
+    return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[3] - b[1]
+
+
+def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str = "",
+                         tol_s: float = TOL_S, min_punches: int = 1) -> dict:
+    """The completeness test on CREDITED FRAGMENTS, with no linking (module docstring: ADR-0012
+    Option 2 and its bias). Population: every track id credited (`attrs` from `olympic.attribute`,
+    one per event, same order) with at least `min_punches` labelled punches.
+
+    Per fragment: its rows are split into segments exactly as `boxer_segments` does (the id never
+    changes inside a fragment, so only a hole longer than the bridge splits it), and the same
+    `_scan_segments` runs the rule, builds the EXPOSURE (processed segments, bridged frames included,
+    at least one hand valid) and asserts every burst lies in it.
+
+    Ownership: a label is OWNED by the fragment it is credited to. Phase 1 matches each fragment's
+    bursts to its OWN labels; phase 2 matches every burst still unmatched, of all fragments together,
+    to the UNATTRIBUTED labels (credited to no one: ambiguous or unreached), each label once. Both
+    use `_match` (optimal within the phase, ties to the burst that sorts first by (frame, key), here
+    the lower track id). A label credited to a track id that is NOT in the population (fewer than
+    `min_punches` credited punches) belongs to a person this test does not follow; it explains
+    nothing (counted as `credited_to_excluded`), exactly as another fragment's label does not.
+    Two fragments on screen together are two people: their bursts are kept apart. The same person
+    under two overlapping ids would be counted twice (the tracker's error, not detected).
+
+    Returns {"bursts": [Burst] (track_id and box set), "fragments": {track id: info}, "labels": {...},
+    "exposure": {track id: bool mask}, "min_punches": int, "bias": str}."""
+    if not tol_s >= 0:
+        raise ValueError("tol_s must be non-negative")
+    if isinstance(min_punches, bool) or not isinstance(min_punches, (int, np.integer)) or min_punches < 1:
+        raise ValueError("min_punches must be a whole number >= 1")
+    if len(attrs) != len(events) or any(a.event is not e for a, e in zip(attrs, events)):
+        raise ValueError("attrs must be olympic.attribute(events, table): one attribution per event, in order")
+    present = set(np.unique(table.track_id).tolist())
+    credited: "dict[int, int]" = {}
+    for a in attrs:
+        if a.track_id is not None:
+            if a.track_id not in present:
+                raise ValueError(f"a punch is credited to track id {a.track_id}, which is not in this pose table "
+                                 "(attributions from another video?)")
+            credited[int(a.track_id)] = credited.get(int(a.track_id), 0) + 1
+    tids = sorted(t for t, n in credited.items() if n >= int(min_punches))
+    index = {t: i for i, t in enumerate(tids)}
+    tol = int(round(tol_s * table.fps))
+    bridge = int(round(punchfind.BRIDGE_S * table.fps))
+    min_rows = max(2, int(np.ceil(MIN_SEGMENT_S * table.fps - 1e-9)))
+    owner = [index.get(int(a.track_id)) if a.track_id is not None else None for a in attrs]
+    excluded = [a.track_id is not None and int(a.track_id) not in index for a in attrs]
+
+    frags, masks, raw, rowsof = {}, {}, [], []
+    for t in tids:
+        rows = np.flatnonzero(table.track_id == t)
+        rows = rows[np.argsort(table.frame[rows], kind="stable")]
+        rowsof.append(rows)
+        scan = _scan_segments(table, _split_rows(table, rows, bridge), rule, f"fragment{t}", bridge, min_rows)
+        mask = scan["mask"]
+        masks[t] = mask
+        raw.append(scan["raw"])
+        frags[t] = {"track_id": t, "first_frame": int(table.frame[rows[0]]), "last_frame": int(table.frame[rows[-1]]),
+                    "rows": int(len(rows)), "credited_punches": credited[t],
+                    "exposure_frames": int(mask.sum()), "exposure_min": int(mask.sum()) / table.fps / 60,
+                    "signal_min_left": float(scan["valid"][0] / table.fps / 60),
+                    "signal_min_right": float(scan["valid"][1] / table.fps / 60),
+                    "segments": scan["segments"], "short_segments": scan["short_segments"],
+                    "bodyless_segments": scan["bodyless_segments"], "bursts": 0, "unexplained": 0,
+                    "bursts_by_hand": {"left": 0, "right": 0}, "unexplained_by_hand": {"left": 0, "right": 0},
+                    "own_labels_in_exposure": 0, "own_labels_outside_exposure": 0, "labels_matched_own": 0}
+
+    def in_exposure(e, which) -> bool:
+        lo, hi = e.first, min(e.last, table.n_frames - 1)
+        return lo <= hi and any(masks[t][lo:hi + 1].any() for t in which)
+
+    for i, o in enumerate(owner):
+        if o is not None:
+            key = "own_labels_in_exposure" if in_exposure(events[i], (tids[o],)) else "own_labels_outside_exposure"
+            frags[tids[o]][key] += 1
+
+    # Matching. Keys are (fragment index, index in raw[fragment]).
+    taken: set = set()
+    matched: "dict[tuple, int]" = {}
+    how: "dict[tuple, str]" = {}
+    for fi in range(len(tids)):
+        own = [i for i, o in enumerate(owner) if o == fi]
+        got = _match([((fi, j), b[0]) for j, b in enumerate(raw[fi])], own, events, tol, taken)
+        matched.update(got)
+        how.update({key: "own" for key in got})
+    left = [((fi, j), b[0]) for fi in range(len(tids)) for j, b in enumerate(raw[fi]) if (fi, j) not in matched]
+    unattr = [i for i, a in enumerate(attrs) if a.track_id is None]
+    got = _match(left, unattr, events, tol, taken)
+    matched.update(got)
+    how.update({key: "unattributed" for key in got})
+
+    bursts = []
+    for fi, t in enumerate(tids):
+        info = frags[t]
+        for j, (f, h, peak) in enumerate(raw[fi]):
+            li = matched.get((fi, j))
+            bursts.append(Burst(video, f, float(f) / table.fps, str(t), HAND_NAMES[h], peak, how.get((fi, j), "none"),
+                                None if li is None else bool(events[li].hand == HAND_NAMES[h]),
+                                t, box_at(table, rowsof[fi], f)))
+            info["bursts"] += 1
+            info["bursts_by_hand"][HAND_NAMES[h]] += 1
+            if li is None:
+                info["unexplained"] += 1
+                info["unexplained_by_hand"][HAND_NAMES[h]] += 1
+            elif how[(fi, j)] == "own":
+                info["labels_matched_own"] += 1
+    labels = {"total": len(events), "owned": sum(o is not None for o in owner),
+              "owned_in_exposure": sum(f["own_labels_in_exposure"] for f in frags.values()),
+              "owned_outside_exposure": sum(f["own_labels_outside_exposure"] for f in frags.values()),
+              "credited_to_excluded": sum(excluded), "unattributed": len(unattr),
+              "unattributed_in_exposure": sum(in_exposure(events[i], tids) for i in unattr),
+              "matched_own": sum(v == "own" for v in how.values()),
+              "matched_unattributed": sum(v == "unattributed" for v in how.values())}
+    return {"bursts": bursts, "fragments": frags, "labels": labels, "exposure": masks,
+            "min_punches": int(min_punches), "bias": BIAS_CREDITED}
+
+
+def mss(seconds: float) -> str:
+    """Seconds as m:ss.s, rounded to a tenth FIRST so 59.96 s is 1:00.0 and never 0:60.0."""
+    if not (isinstance(seconds, (int, float, np.floating)) and np.isfinite(seconds) and seconds >= 0):
+        raise ValueError("a time must be a finite number of seconds >= 0")
+    tenths = int(round(float(seconds) * 10))
+    return f"{tenths // 600}:{(tenths % 600) / 10:04.1f}"
