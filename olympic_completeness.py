@@ -45,11 +45,17 @@ person: track_id, the fragment's box centre and height at the burst frame (pixel
 m:ss.s. Writes results/olympic_completeness_credited.json and ..._credited_sample.csv by default (the
 linking-based files are never overwritten). --reacquire is a linking option and is refused here.
 
-THE STATED BIAS: this sees only credited fragments. Boxer time in fragments with no credited punch is
-outside it, and so are punches too close to call (attribution ambiguity). It can therefore only
-UNDERCOUNT missed labels relative to the whole bout: a clean result is weak evidence, a dirty one (many
-sampled bursts classified as real unlabelled punches) is decisive. A credited fragment can be a non-boxer
+THE STATED LIMITS: this sees only credited fragments. Missed punches outside them (boxer time in
+fragments with no credited punch, punches too close to call) are never seen, so coverage can only lose;
+but fragment-level detections can DUPLICATE one physical punch when two overlapping ids follow the same
+person. So neither a bout-level upper nor a lower bound follows without de-duplication:
+`possible_duplicates` (per video and pooled) counts the unexplained bursts that have an unexplained twin
+in another credited fragment within 0.1 s whose box overlaps (IoU >= 0.3); it is reported, never
+subtracted. A clean result is weak evidence of completeness; a dirty one shows labels are missing inside
+the credited fragments, though the count may include duplicates. A credited fragment can be a non-boxer
 wrongly credited; the fragments with exactly one credited punch are the least certain and are counted.
+Attribution is computed once per video (olympic_link.load_video) and verified against the pose table
+inside the test.
 """
 
 from __future__ import annotations
@@ -168,6 +174,8 @@ def video_row_credited(res: dict, n_events: int, video_min: float) -> dict:
             "bursts_by_match": {m: sum(b.match == m for b in bursts) for m in completeness.MATCHES},
             "bursts_hand_agrees": {"agree": sum(b.hand_agrees is True for b in bursts),
                                    "disagree": sum(b.hand_agrees is False for b in bursts)},
+            "possible_duplicates": sum(b.possible_duplicate for b in bursts),
+            "possible_duplicate_pairs": res["possible_duplicate_pairs"],
             "exposure_frames": sum(f["exposure_frames"] for f in frags),
             "exposure_min": sum(f["exposure_min"] for f in frags),
             "own_labels_in_exposure": sum(f["own_labels_in_exposure"] for f in frags),
@@ -179,7 +187,8 @@ def video_row_credited(res: dict, n_events: int, video_min: float) -> dict:
 def totals_credited(ok: "list[dict]") -> dict:
     """Pool the per-video rows: counts and unrounded minutes summed, every rate divided once at the end.
     The exposure is summed over fragments (two fragments on screen together are two people)."""
-    keys = ("labelled_punches", "fragments_n", "fragments_one_punch", "bursts", "unexplained", "exposure_frames",
+    keys = ("labelled_punches", "fragments_n", "fragments_one_punch", "bursts", "unexplained", "possible_duplicates",
+            "possible_duplicate_pairs", "exposure_frames",
             "exposure_min", "own_labels_in_exposure", "own_labels_outside_exposure", "segments", "short_segments",
             "bodyless_segments")
     tot = {"videos": len(ok), "video_min": sum(v["video_min"] for v in ok)} | {k: sum(v[k] for v in ok) for k in keys}
@@ -221,14 +230,16 @@ def _main_credited(a, rule, only) -> int:
     lab = tot["labels"]
     summary = (f"CREDITED FRAGMENTS (min {a.min_punches} credited punch(es)): {tot['fragments_n']} fragments, "
                f"{tot['fragments_one_punch']} with exactly one credited punch (least certain); {tot['bursts']} bursts in "
-               f"{_num(tot['exposure_min'])} exposure minutes, {tot['unexplained']} unexplained = "
+               f"{_num(tot['exposure_min'])} exposure minutes (summed over fragments), {tot['unexplained']} unexplained, "
+               f"{tot['possible_duplicates']} of them with a possible twin in another fragment ({tot['possible_duplicate_pairs']} "
+               f"pairs), i.e. "
                f"{_num(tot['unexplained_per_exposure_min'])} per exposure minute; {_num(tot['bursts_per_exposure_min'])} bursts and "
                f"{_num(tot['own_labels_in_exposure_per_exposure_min'])} own labels (span touching the exposure) per exposure minute; "
                f"labels: {lab['owned']} owned ({lab['owned_outside_exposure']} outside the exposure), {lab['unattributed']} of "
                f"{lab['total']} ({_pct(lab['unattributed_share'])}) unattributed, {lab['credited_to_excluded']} credited to an excluded "
                f"fragment; {lab['matched_to_a_burst']} matched to a burst ({lab['matched_own']} own, {lab['matched_unattributed']} "
                f"unattributed). Different population: {_num(tot['labels_per_video_boxer_min'])} labels per whole-video boxer-minute. "
-               f"BIAS: {completeness.BIAS_CREDITED} Unexplained bursts are candidates: nothing about missed labels follows "
+               f"LIMITS: {completeness.BIAS_CREDITED} Unexplained bursts are candidates: nothing about missed labels follows "
                f"until the sample is classified. -> {a.out}; sample of {len(sample)} of {population} -> {a.sample_out}")
     out_json = json.dumps(
         {"mode": "credited_fragments", "linking": None, "min_punches": a.min_punches, "rule": rule,

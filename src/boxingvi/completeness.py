@@ -61,12 +61,17 @@ never gives one id to two people by design (an id switch inside a fragment is th
 error and is not detected here). A label is OWNED by the fragment it is credited to; matching, exposure
 and the sample rules are the ones above, with the fragment in the place of the boxer.
 
-BIAS, stated once and carried into every output: this sees ONLY credited fragments. Boxer time in a
+LIMITS, stated once and carried into every output: this sees ONLY credited fragments. Boxer time in a
 fragment with no credited punch is outside it, and so are punches too close to call (attribution
-ambiguity). It can therefore only UNDERCOUNT missed labels relative to the whole bout: a clean result
-is weak evidence; a dirty one (many sampled bursts classified as real unlabelled punches) is decisive.
-A credited fragment can also be a non-boxer wrongly credited (a referee, a spectator): the fragments
-with exactly one credited punch are the least certain, and are counted.
+ambiguity): restricting to credited fragments loses missed punches outside them, so coverage can only
+lose. In the other direction, fragment-level detections can DUPLICATE one physical punch when two
+overlapping ids follow the same person. So neither a bout-level upper nor a lower bound on missed labels
+follows without de-duplication; `possible_duplicates` counts the unexplained bursts that have a likely
+twin (see `find_bursts_credited`). A clean result is weak evidence of completeness; a dirty one (many
+sampled bursts classified as real unlabelled punches) shows labels are missing inside the credited
+fragments, though the count may include duplicates. A credited fragment can also be a non-boxer wrongly
+credited (a referee, a spectator): the fragments with exactly one credited punch are the least certain,
+and are counted.
 """
 
 from __future__ import annotations
@@ -77,7 +82,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from . import punchfind
+from . import olympic, punchfind
 from .data import Track
 from .linking import Linking
 from .pose_yolo import PoseTable
@@ -104,6 +109,7 @@ class Burst:
     hand_agrees: "bool | None" = None   # matched label's hand == this burst's hand; None if unmatched. Information only.
     track_id: "int | None" = None       # credited mode only: the ByteTrack id (the fragment) the burst is in
     box: "tuple | None" = None          # credited mode only: that fragment's box (centre x, centre y, height) at the burst frame, pixels
+    possible_duplicate: bool = False    # credited mode only: unexplained, with an unexplained twin in another fragment (see DUP_IOU)
 
     def __post_init__(self) -> None:
         if self.match not in MATCHES:
@@ -260,6 +266,29 @@ def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: 
     return out
 
 
+def _attr_key(a) -> tuple:
+    return (a.track_id, a.wrist, a.dist, a.runner_up, a.ambiguous, a.hand_clear)
+
+
+def check_attrs_shape(events, attrs) -> None:
+    """One attribution per event, in order, for these very events."""
+    if len(attrs) != len(events) or any(a.event is not e for a, e in zip(attrs, events)):
+        raise ValueError("attrs must be olympic.attribute(events, table): one attribution per event, in order")
+
+
+def check_attrs_bound(table: PoseTable, events, attrs) -> None:
+    """The attributions must be the ones THIS table produces: recompute `olympic.attribute(events, table)` (default
+    parameters) and compare the credited track id, the wrist, both distances and the two flags that ownership and the
+    hand test depend on, event by event. Track ids are only labels: attributions made from another tracking of the
+    same video can carry the same id set with the people swapped, and nothing else would notice."""
+    want = olympic.attribute(events, table)
+    for i, (a, w) in enumerate(zip(attrs, want)):
+        if _attr_key(a) != _attr_key(w):
+            raise ValueError(f"event {i}: the attribution (track {a.track_id}, wrist {a.wrist}) is not what this pose "
+                             f"table gives (track {w.track_id}, wrist {w.wrist}): attributions made from another table "
+                             "(or with other parameters)?")
+
+
 def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, video: str = "",
                 tol_s: float = TOL_S) -> dict:
     """Bursts per boxer, matched one-to-one to labels (see the module docstring), the EXPOSURE
@@ -282,8 +311,8 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
     `attrs` is `olympic.attribute(events, table)`: one attribution per event, same order."""
     if not tol_s >= 0:
         raise ValueError("tol_s must be non-negative")
-    if len(attrs) != len(events) or any(a.event is not e for a, e in zip(attrs, events)):
-        raise ValueError("attrs must be olympic.attribute(events, table): one attribution per event, in order")
+    check_attrs_shape(events, attrs)
+    check_attrs_bound(table, events, attrs)
     tol = int(round(tol_s * table.fps))
     bridge = int(round(punchfind.BRIDGE_S * table.fps))
     min_rows = max(2, int(np.ceil(MIN_SEGMENT_S * table.fps - 1e-9)))
@@ -376,11 +405,19 @@ def random_sample(unexplained: "dict[str, list[Burst]]", n: int = SAMPLE_N, seed
     return [pop[i] for i in take], big_n
 
 
-BIAS_CREDITED = ("Only fragments (track ids) credited with a labelled punch are tested. Boxer time in a fragment with no "
-                 "credited punch is outside this test, and so are punches too close to call (attribution ambiguity), so it can "
-                 "only UNDERCOUNT missed labels relative to the whole bout: a clean result is weak evidence, a dirty one "
-                 "(many sampled bursts classified as real unlabelled punches) is decisive. A credited fragment can be a "
-                 "non-boxer wrongly credited; an id switch inside a fragment is the tracker's residual error.")
+BIAS_CREDITED = ("Only fragments (track ids) credited with a labelled punch are tested. Missed punches outside them (boxer "
+                 "time in fragments with no credited punch, punches too close to call) are never seen, so coverage can only "
+                 "lose; but fragment-level detections can DUPLICATE one physical punch when two overlapping ids follow the "
+                 "same person. So neither a bout-level upper nor a lower bound follows without de-duplication "
+                 "(possible_duplicates counts the unexplained bursts that have a likely twin). A clean result is weak "
+                 "evidence of completeness; a dirty one (many sampled bursts classified as real unlabelled punches) shows "
+                 "labels are missing inside the credited fragments, though the count may include duplicates. A credited "
+                 "fragment can be a non-boxer wrongly credited; an id switch inside a fragment is the tracker's residual "
+                 "error.")
+DUP_IOU = 0.3
+# DUP_IOU: two ids that follow ONE person give near-identical boxes (IoU well above 0.5), while two fighters in a clinch
+# overlap only partly. 0.3 is a deliberately generous SCREENING level: it flags a "possible" twin, it does not prove one,
+# and it was fixed from the review brief, not tuned on the Olympic numbers. The time window is the matching tolerance.
 
 
 def box_at(table: PoseTable, rows: np.ndarray, frame: int) -> "tuple[float, float, float]":
@@ -388,11 +425,27 @@ def box_at(table: PoseTable, rows: np.ndarray, frame: int) -> "tuple[float, floa
     box, or, on a frame the bridge interpolated across (no row), the linear interpolation between the
     rows on either side. `rows` are that id's row indices in frame order; `frame` must lie inside
     their span (a burst always does)."""
+    b = box_xyxy_at(table, rows, frame)
+    return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[3] - b[1]
+
+
+def box_xyxy_at(table: PoseTable, rows: np.ndarray, frame: int) -> "tuple[float, float, float, float]":
+    """(x1, y1, x2, y2) of ONE track id at `frame`, interpolated as `box_at` does."""
     fr = table.frame[rows].astype(np.float64)
     if not (fr[0] <= frame <= fr[-1]):
         raise ValueError(f"frame {frame} is outside this fragment's span {int(fr[0])}-{int(fr[-1])}")
-    b = [float(np.interp(frame, fr, table.box[rows, c].astype(np.float64))) for c in range(4)]
-    return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[3] - b[1]
+    return tuple(float(np.interp(frame, fr, table.box[rows, c].astype(np.float64))) for c in range(4))
+
+
+def iou(a, b) -> float:
+    """Intersection over union of two (x1, y1, x2, y2) boxes; 0 when they do not touch or either is empty."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    inter = w * h
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
 
 
 def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str = "",
@@ -414,7 +467,11 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
     `min_punches` credited punches) belongs to a person this test does not follow; it explains
     nothing (counted as `credited_to_excluded`), exactly as another fragment's label does not.
     Two fragments on screen together are two people: their bursts are kept apart. The same person
-    under two overlapping ids would be counted twice (the tracker's error, not detected).
+    under two overlapping ids would be counted twice (the tracker's error); `possible_duplicates` is
+    the number of unexplained bursts that have such a likely twin (unexplained, another fragment,
+    within the matching tolerance, boxes overlapping at IoU >= DUP_IOU), `possible_duplicate_pairs`
+    the number of such pairs. They are reported, never subtracted. `attrs` must be exactly
+    `olympic.attribute(events, table)` for THIS table (verified: ValueError otherwise).
 
     Returns {"bursts": [Burst] (track_id and box set), "fragments": {track id: info}, "labels": {...},
     "exposure": {track id: bool mask}, "min_punches": int, "bias": str}."""
@@ -422,8 +479,7 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
         raise ValueError("tol_s must be non-negative")
     if isinstance(min_punches, bool) or not isinstance(min_punches, (int, np.integer)) or min_punches < 1:
         raise ValueError("min_punches must be a whole number >= 1")
-    if len(attrs) != len(events) or any(a.event is not e for a, e in zip(attrs, events)):
-        raise ValueError("attrs must be olympic.attribute(events, table): one attribution per event, in order")
+    check_attrs_shape(events, attrs)
     present = set(np.unique(table.track_id).tolist())
     credited: "dict[int, int]" = {}
     for a in attrs:
@@ -432,6 +488,7 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
                 raise ValueError(f"a punch is credited to track id {a.track_id}, which is not in this pose table "
                                  "(attributions from another video?)")
             credited[int(a.track_id)] = credited.get(int(a.track_id), 0) + 1
+    check_attrs_bound(table, events, attrs)
     tids = sorted(t for t, n in credited.items() if n >= int(min_punches))
     index = {t: i for i, t in enumerate(tids)}
     tol = int(round(tol_s * table.fps))
@@ -483,14 +540,31 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
     matched.update(got)
     how.update({key: "unattributed" for key in got})
 
+    # Possible duplicates: an UNEXPLAINED burst with an unexplained burst of ANOTHER credited fragment within the matching
+    # tolerance whose box overlaps it (IoU >= DUP_IOU) at the earlier of the two frames (both fragments must be in their
+    # exposure there). Two ids that follow one person would each report the same punch. Symmetric by construction.
+    unex = sorted((raw[fi][j][0], fi, j) for fi in range(len(tids)) for j in range(len(raw[fi])) if (fi, j) not in matched)
+    twin: set = set()
+    pairs = 0
+    for a_i, (fa_, fia, ja) in enumerate(unex):
+        for b_i in range(a_i + 1, len(unex)):
+            fb_, fib, jb = unex[b_i]
+            if fb_ - fa_ > tol:
+                break
+            if fib == fia or not masks[tids[fib]][fa_]:
+                continue
+            if iou(box_xyxy_at(table, rowsof[fia], fa_), box_xyxy_at(table, rowsof[fib], fa_)) >= DUP_IOU:
+                twin.update({(fia, ja), (fib, jb)})
+                pairs += 1
     bursts = []
     for fi, t in enumerate(tids):
         info = frags[t]
+        info["possible_duplicates"] = sum((fi, j) in twin for j in range(len(raw[fi])))
         for j, (f, h, peak) in enumerate(raw[fi]):
             li = matched.get((fi, j))
             bursts.append(Burst(video, f, float(f) / table.fps, str(t), HAND_NAMES[h], peak, how.get((fi, j), "none"),
                                 None if li is None else bool(events[li].hand == HAND_NAMES[h]),
-                                t, box_at(table, rowsof[fi], f)))
+                                t, box_at(table, rowsof[fi], f), (fi, j) in twin))
             info["bursts"] += 1
             info["bursts_by_hand"][HAND_NAMES[h]] += 1
             if li is None:
@@ -506,6 +580,7 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
               "matched_own": sum(v == "own" for v in how.values()),
               "matched_unattributed": sum(v == "unattributed" for v in how.values())}
     return {"bursts": bursts, "fragments": frags, "labels": labels, "exposure": masks,
+            "possible_duplicates": len(twin), "possible_duplicate_pairs": pairs,
             "min_punches": int(min_punches), "bias": BIAS_CREDITED}
 
 
