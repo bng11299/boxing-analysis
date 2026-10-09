@@ -1286,7 +1286,12 @@ the ones that asserted cut-specific numbers (2 segments, 400 exposure frames), r
 **Gate (unexplained bursts per 1,000 exposure frames by distance to the nearest skip, each of 3-5, 6-10, 11-25 within +-25% of the
 >25 rate; 0-2 must be empty).** Final design: **PASS at min 1 (1.14x, 1.04x, 0.99x) and at min 2 (1.17x, 1.04x, 1.02x); 0-2 is empty.**
 The signal-reach-only mask FAILS the 3-5 bin (1.56x, 1.63x), as does the cut (1.61x, 1.66x). With no skips the 0-2 bin is 3.36x and 3.32x. The
-3-5 bin of the final design holds a single offset (5 frames) and ~150 bursts at min 1, 86 at min 2, so its uncertainty is a few percent.
+3-5 bin of the final design holds a single offset (5 frames) and ~150 bursts at min 1, 86 at min 2: a Poisson standard error of about
+8% and 11% of the bin's rate, so 1.14x and 1.17x are 1-2 standard errors above 1.0, not "a few percent".
+**Declared (reviewer, review):** the gate was used to CHOOSE between designs (cut, signal-reach mask, mask plus one exposure frame) on the
+same 29 videos it then reports, so the PASS is not independent evidence. The final design is physically motivated (only the frame
+`detect` can falsely call a peak is added, nothing was widened to fit), but its confirmation is Brendan's classification of the sample
+rows, not this gate.
 
 **The bin tables, all three designs side by side**
 
