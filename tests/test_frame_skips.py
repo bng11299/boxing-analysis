@@ -412,6 +412,19 @@ nobase = olympic_completeness.pool_skip_stats([completeness.near_skip_stats([], 
 check("with nothing in exposure every share is None (written as null), not a crash",
       nobase["base_rate"] is None and nobase["unexplained_near_skip_share"] is None and nobase["unexplained_excess_over_base"] is None)
 
+print("skipcheck_rows: a sampled burst is 'still unexplained' only for the same video, track, hand, within 2 frames, and not explained")
+bx = {"V": [completeness.Burst("V", 100, 2.0, "1", "left", 5.0, "none", track_id=1),
+            completeness.Burst("V", 300, 6.0, "1", "right", 5.0, "own", track_id=1)], "W": []}
+row = lambda frame, tid="1", hand="left", v="V": {"video": v, "frame": str(frame), "track_id": tid, "hand": hand}    # noqa: E731
+got = [r[4] for r in olympic_completeness.skipcheck_rows(
+    [row(100), row(102), row(98), row(103), row(97), row(100, hand="right"), row(100, tid="2"), row(300, hand="right"), row(100, v="W")], bx)]
+check("same track and hand: 100, 102 and 98 are still unexplained (true); 103 and 97 are 3 frames off (false)",
+      got[:5] == ["true", "true", "true", "false", "false"], str(got))
+check("the other hand, the other track, a burst that is now EXPLAINED, and a video with no burst there are all false",
+      got[5:] == ["false", "false", "false", "false"], str(got))
+raises("a sample row of a video that is not in the run is an error, not a quiet false", lambda: olympic_completeness.skipcheck_rows([row(100, v="Z")], bx), "not in this run")
+check("skipcheck_rows keeps video, frame, track_id and hand as given", olympic_completeness.skipcheck_rows([row(100)], bx)[0][:4] == ["V", "100", "1", "left"])
+
 # ---------------------------------------------------------------------------------------------------------------------
 print("the CLIs end to end: olympic_framechange.py and olympic_completeness.py --skips / --skips-measure / --skipcheck")
 NC = 1500
