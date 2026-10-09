@@ -972,3 +972,99 @@ written one after the other, not as one atomic transaction.
   V6's (AlphaPose, 24 fps, hooks/uppercuts) and untuned for 50 fps sparring; (6) the overlay for GH078416
   (`results/ingest/olympic/GH078416.linked.overlay.mp4`) has NOT been viewed by anyone yet: identity swaps in
   the real data are unmeasured.
+
+## `feat/identity-continuity` -- 2026-10-08, Iteration 1
+
+Step 1 of identity continuity (pose only, no pixels). Branch from `feat/boxer-linking` (1d67459).
+
+- **Problem (GH078416, a video Brendan watched; 3 swaps at 00:24, 00:38, 00:54).** Coordinates only: identity B held
+  id 218 (33.56-37.68 s, scale 132.6), then id 270 (39.52-40.26 s, 0 punches, scale 47.5, box centre
+  (1183,504) -> (1180,501): motionless), then id 284 (41.18-54.82 s, scale 109.5), then id 373 (55.48-57.04 s, 0 punches,
+  scale 47.9, motionless, same spot as 270), then id 384. 218 -> 284 is a 3.5 s gap and 284 -> 384 is 2.36 s, both beyond
+  MAX_GAP_S = 2 s: the linker crossed each by stepping through a small, still person behind the ropes (the ring prior is an
+  image-space rectangle; the area behind the ropes falls inside it). The soft scale penalty (~1.7 points for 110 -> 47) was
+  too cheap. The 00:24 swap is boxer <-> boxer after both lost their ids (B id 156 ends 23.44 s at x~1127, B continues with
+  id 177 at 25.24 s at x~1584); step 1 is not expected to fix it (step 2, corner colour, will).
+- **Rules.** S1a: an ordinary link (gap <= max_gap_s) needs `|ln(scale_b / scale_a)| <= ln(1.6)` (`MAX_SCALE_RATIO`,
+  `LinkParams.max_scale_ratio`), on top of the unchanged soft `SCALE_POINTS` cost; re-acquisition links (gap > max_gap_s)
+  are NOT subject to it and keep their behaviour and price. S1b: a fragment with no credited punch, at least
+  `STILL_MIN_S = 0.5` s of rows, and `spread_bl < STILL_BL = 0.15` (spread = 90th percentile of the distance of its box
+  centres from their median, in its own body lengths) is STATIC and not eligible, like a fragment outside the ring; a
+  shorter fragment cannot be judged; a fragment with a credited punch is never static. `Fragment.spread_bl` and
+  `Fragment.static` are recorded; `olympic_link.py` reports static fragments kept out and links refused by the size rule.
+- **Declaration.** Both rules and all three constants were chosen AFTER looking at GH078416's linking. They are physical
+  rules, not tuned to a score, but informed by one video. GH078416 is a DEVELOPMENT video; the real test is Brendan's eye on
+  OTHER videos. (Declared in the `linking.py` docstring too.) The 29-video numbers below were looked at only after the
+  constants were fixed, and no constant was changed after them.
+- **Tests.** `tests/test_linking.py` 266 -> 314 (+48), all passing; tracks 79, ingest 124, pipeline 260, labels 50, hands 38,
+  olympic 33, env 36, machine scripts 38 unchanged. Synthetic scenes only: a stepping-stone scene (one boxer, a 3.02 s hole, a
+  0.45x motionless punch-free figure inside the ring) where the parts are NOT joined (exactly `((1,), (2,))`), are joined by
+  re-acquisition when it is on (`((1, 2), ())`), and the figure is never included; S1a alone (a MOVING small figure), S1b alone
+  (a still full-size figure), each shown to be the rule that blocks it (open the rule: `((1, 31, 2), ())` again); the case that
+  must survive (a MOVING punch-free connector of the boxer's own size still bridges the hole; a still fragment of 0.4 s can
+  still connect). Boundaries: ratio 1.59 linked / 1.61 not, both directions, exactly 1.6 linked; spread 0.149 static / 0.151 not
+  (0.15 not); 24 rows never static, 25 can be; a punch keeps a still fragment eligible; one flickering box in 50 leaves the
+  spread at 0.0; measured spread of a motionless box 0.0, of a 100 px walker 44.55 / 40. 12 invalid-parameter cases refused.
+  No existing assertion was changed or removed.
+- **Mutations** (rule broken in a copy of `linking.py`, restored byte-identical; `tests/test_linking.py` must fail):
+
+| Mutation | Result |
+|---|---|
+| S1a removed (ordinary links unrestricted) | caught, 8 fail |
+| S1b removed (static fragments stay eligible) | caught, 4 fail |
+| S1a also applied to re-acquisition links | caught, 1 fail + a crash in a later re-acquisition scene |
+| S1a and S1b both removed (= the old behaviour) | the stepping-stone scenes return `((1, 31, 2), ())`: 12 fail |
+| static ignores credited punches | caught, 3 |
+| no minimum observation time for static | caught, 2 |
+| spread = maximum instead of 90th percentile | caught, 2 |
+| stillness limit inclusive (`<=`) | caught, 2 |
+| size rule one-sided (growth only) | caught, 2 |
+| scale refusals not counted | caught, 2 |
+
+- **GH078416 after, coordinates only** (default mode; `--overlay GH078416` re-rendered to
+  `results/ingest/olympic/GH078416.linked.overlay.mp4`, NOT opened by the reviewer; the previous render is kept beside it as
+  `...linked.overlay.before-identity-continuity.mp4`). Ids 270 and 373 are in NO identity now (default and `--reacquire`).
+  Identity A is now ids 135, 156, 177, 186, 218, 241 (38.04-48.14 s, 0 punches, scale 108.7), 335, 353; identity B is ids 166
+  and 219 only. Id 284 (41.18-54.82 s, 1 punch) and 384 are in neither: the identity labels A/B are reassigned (A = the one
+  with more punches, tie broken by start), so before/after cannot be compared by letter. The 156 -> 177 join (the 00:24 swap)
+  is still there, as designed. Whether 241 (a 10 s punch-free fragment that now carries the chain through 38-48 s) is a
+  boxer or the referee is not known from coordinates: it is the next thing to look at in the overlay.
+- **Pooled, 29 videos, before (1d67459) -> after.**
+
+| | default before | default after | `--reacquire` before | `--reacquire` after |
+|---|---|---|---|---|
+| credited punches on A or B, all | 1,585 of 2,423 = 65.4% | 930 of 2,423 = 38.4% | 1,980 = 81.7% | 1,964 = 81.1% |
+| ... held out of the linking | 601 of 1,185 = 50.7% | 372 of 1,185 = 31.4% | 700 = 59.1% | 692 = 58.4% |
+| both identified, median / frame-weighted | 57.2% / 50.5% | 5.7% / 9.8% | 43.5% / 44.5% | 38.3% / 41.0% |
+| co-presence, median | 77.9% | 58.9% | 68.9% | 64.8% |
+| fragments per identity, mean / median | 24.2 / 25.0 | 12.2 / 8.5 | 20.3 / 21.5 | 18.8 / 18.5 |
+| still fragments kept out, total / median per video | -- | 2,568 / 66 | -- | 2,568 / 66 |
+| ordinary links refused by the size rule | -- | 5,041 | -- | 5,041 |
+| videos whose A/B fragment lists changed | -- | 29 of 29 | -- | 25 of 29 |
+
+  (frame-weighted = sum of per-video both-identified x frames over all frames, from the rounded per-video shares.)
+  Completeness (`olympic_completeness.py`), bursts / unexplained / per exposure-minute: default 7,984 / 5,766 / 39.4 (146.4
+  exposure min) -> 4,580 / 3,124 / 39.1 (79.9 min); `--reacquire` 8,657 / 6,178 / 43.9 (140.8 min) -> 8,573 / 6,094 / 45.1
+  (135.0 min). In default mode the rate barely moves but the exposure nearly halves: the denominator, not the rate, is what the
+  rules cost.
+- **What the numbers say (not what was hoped).** In default mode the rules, as specified, cost a great deal of coverage: credited
+  share 65.4% -> 38.4%, both-identified median 57% -> 6%. `--reacquire` is nearly unchanged (81.7% -> 81.1%), because there a
+  boxer's chain is carried by re-acquisition links, which S1a does not touch. Diagnostics run afterwards on the same 29 videos
+  (NOT used to change a constant; the shipped constants are the specified ones):
+  * Of the 1,348 ordinary links inside the OLD identities, 27.1% have a size ratio above 1.6 (median ratio 1.26, 75th
+    percentile 1.66, 90th 2.18, 99th 3.0), with both scales from joints in 1,342 of them. A fragment's scale is the median
+    shoulder-to-hip length over a fragment that can be 0.2 s long, in guard, side-on or in a clinch; it is far noisier than the
+    physical argument for 1.6 assumed. The physics bound holds for the true body; the measurement does not.
+  * Ablation (default mode, credited / held-out / both-identified median): none 65.4% / 50.7% / 57%; S1a alone 42.1% / 32.7% /
+    18%; S1b alone 55.9% / 45.5% / 39%; both 38.4% / 31.4% / 6%. With `--reacquire` each is within 2 points of "none".
+    S1b alone removes 2,568 otherwise-eligible fragments (29 of 29 videos), more than a few spectators: a guarded or clinched
+    boxer with no credited punch can be motionless to 0.15 body lengths for half a second.
+  * For orientation only: a looser size limit (2.0 or 2.5 with S1b) gives 49.0% / 54.5% credited in default mode.
+- **Residual risks.** (1) As built, the rules are a large net cost in default mode and the benefit (no stepping stone through a
+  still spectator on GH078416) is not shown to outweigh it on any other video; a human has not looked at any of them. (2) The
+  00:24 boxer <-> boxer swap is unfixed by design. (3) Holes are larger: more of each boxer's time is unidentified, so per-boxer
+  exposure minutes drop (146.4 -> 79.9 in default mode). (4) 241 (GH078416) shows the opposite danger: with the connectors gone,
+  a long punch-free ring fragment can carry a chain, and only the punch evidence tells a referee from a boxer. (5) The scale
+  estimate is a per-fragment median of a joint-based length; a more robust scale (a longer window, or the box height) is a
+  possible next step but is not part of this change. (6) Constants informed by one video; a 27% violation rate among old
+  in-identity links says 1.6 is not a safe physical bound for this scale estimator.
