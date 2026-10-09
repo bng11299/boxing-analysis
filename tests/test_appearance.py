@@ -1,8 +1,9 @@
-"""Tests for kit colour per fragment (appearance.py) and olympic_colour.py.
+"""Tests for kit colour per fragment (appearance.py, version 2) and olympic_colour.py.
 
 Synthetic only: every frame is generated in memory from painted shapes (a red-vest figure, a blue-vest
-figure, a white-shirt referee, a skin-only person, ...). No Olympic video, no model, no GPU, and nothing
-here ever writes a pixel to disk except the tiny synthetic clip the CLI test builds from painted shapes.
+figure, a navy vest, a white-shirt referee, a skin-only person, ...). No Olympic video, no model, no GPU,
+and nothing here ever writes a pixel to disk except the tiny synthetic clip the CLI test builds from
+painted shapes.
 
 Run:  python tests/test_appearance.py
 """
@@ -55,8 +56,12 @@ def raises(name: str, fn, pattern: str = "") -> None:
 tmp = Path(tempfile.mkdtemp())
 W, H, FPS = 320, 240, 50.0
 BG = (110, 110, 110)                 # ring canvas: grey, no saturation
-SKIN = (225, 170, 140)               # saturation 0.38, hue 20 degrees: skin, not kit
+SKIN = (225, 170, 140)               # saturation 0.38, hue 21 degrees: skin, not kit
+SKIN_HOT = (255, 147, 89)            # skin in strong light: hue 21, saturation 0.65 (still under the red floor)
 RED, BLUE, WHITE = (220, 30, 30), (30, 60, 230), (245, 245, 245)
+ORANGE_RED = (255, 100, 40)          # the kam2 camera's red kit: hue 16.7, saturation 0.84
+NAVY = (6, 12, 40)                   # the blue boxer's vest: value 0.157, hue 230, saturation 0.85
+BLACK = (15, 15, 15)                 # value 0.059: no hue to speak of
 
 
 def person_xy(cx, cy):
@@ -107,8 +112,10 @@ def table_of(people, n_frames, conf=0.9, source="GH000001.mp4", fp=""):
                      source=source, video_fp=fp)
 
 
-def run_colours(people, looks, n_frames, every=appearance.SAMPLE_EVERY, bad_frames=None, **kw):
-    """Colours of a synthetic video. looks: {tid: (vest, head, gloves)}; bad_frames: {frame: {tid: vest}} override."""
+def run_colours(people, looks, n_frames, every=appearance.SAMPLE_EVERY, bad_frames=None, patch=None, **kw):
+    """Colours of a synthetic video. looks: {tid: (vest, head, gloves)}; bad_frames: {frame: {tid: look}}
+    override; patch: {tid: (colour, w, h)} a w x h patch painted on the torso (offset 5 px right, 5 px
+    up of the figure centre) on top of the vest, in every frame."""
     tb = table_of(people, n_frames, **kw)
 
     def frames():
@@ -120,6 +127,9 @@ def run_colours(people, looks, n_frames, every=appearance.SAMPLE_EVERY, bad_fram
                     if bad_frames and i in bad_frames and tid in bad_frames[i]:
                         vest, head, gloves = bad_frames[i][tid]
                     paint(fr, cx, cy, vest, head, gloves)
+                    if patch and tid in patch:
+                        col, pw, ph = patch[tid]
+                        fr[cy - 5:cy - 5 + ph, cx - 5:cx - 5 + pw] = col
             yield fr
     return tb, appearance.compute_colours(None, tb, frames=frames(), every=every)
 
@@ -139,26 +149,38 @@ def kit(*px):
     return r.tolist(), b.tolist()
 
 
+check("the constants are the ones the docs say: red [340, 25) / 0.70 / 0.20, blue [200, 290) / 0.50 / 0.08",
+      (appearance.RED_HUE_MIN, appearance.RED_HUE_MAX, appearance.RED_SAT_MIN, appearance.RED_VAL_MIN) == (340.0, 25.0, 0.70, 0.20)
+      and (appearance.BLUE_HUE_MIN, appearance.BLUE_HUE_MAX, appearance.BLUE_SAT_MIN, appearance.BLUE_VAL_MIN) == (200.0, 290.0, 0.50, 0.08))
 check("hue wrap: pure red (hue 0), hue 359 and hue 340.2 are red; hue 339.8 and hue 330 are not",
       kit((255, 0, 0), (255, 0, 4), (255, 0, 84), (255, 0, 86), (255, 0, 128))[0] == [True, True, True, False, False])
-check("red upper edge: hue 11.8 is red, hue 12.5 is not (a yellow-orange)",
-      kit((255, 50, 0), (255, 53, 0))[0] == [True, False])
-check("blue band: hue 200.2 and 254 are blue; 199.5 (cyan-ish) and 256 (violet) are not",
-      kit((0, 169, 255), (0, 172, 255), (60, 0, 255), (68, 0, 255))[1] == [True, False, True, False])
+check("red upper edge (the skin band starts at 25): hue 24.7 is red, hue 25.2 is not",
+      kit((255, 105, 0), (255, 107, 0))[0] == [True, False])
+check("blue band: hue 200.2 and 289.6 are blue; 199.8 (cyan-ish) and 290.2 (violet) are not",
+      kit((0, 169, 255), (0, 171, 255), (211, 0, 255), (214, 0, 255))[1] == [True, False, True, False])
 check("a red pixel is never also blue, and pure blue is not red",
       kit((255, 0, 0), (0, 0, 255)) == ([True, False], [False, True]))
-check("saturation edge: (255,140,140) has saturation 0.451 and is red, (255,141,141) has 0.447 and is not",
-      kit((255, 140, 140), (255, 141, 141))[0] == [True, False])
-check("value edge: (51,0,0) has value exactly 0.20 and is red, (50,0,0) is too dark to have a hue",
+check("red saturation edge 0.70: (255,75,75) has 0.706 and is red, (255,78,78) has 0.694 and is not",
+      kit((255, 75, 75), (255, 78, 78))[0] == [True, False])
+check("blue saturation edge 0.50: (126,126,255) has 0.506 and is blue, (129,129,255) has 0.494 and is not",
+      kit((126, 126, 255), (129, 129, 255))[1] == [True, False])
+check("red value edge 0.20: (51,0,0) is red, (50,0,0) is too dark",
       kit((51, 0, 0), (50, 0, 0))[0] == [True, False])
-check("skin (225,170,140), white, grey, black and the canvas are neither red nor blue",
-      kit(SKIN, WHITE, (128, 128, 128), (0, 0, 0), BG) == ([False] * 5, [False] * 5))
-check("skin in strong light (255,140,100: saturation 0.61 but hue 15.5) is not red; pinkish skin (255,170,160) is "
-      "red-hued but too pale (saturation 0.37)", kit((255, 140, 100), (255, 170, 160))[0] == [False, False])
-r_floor, _ = appearance.kit_masks(np.array([(255, 170, 160)], np.uint8), sat_min=0.0)
-check("... and without the saturation floor that pale pixel WOULD be red (the floor is what excludes it)", r_floor.tolist() == [True])
+check("blue value edge 0.08: (3,6,21) has value 0.0824 and is blue, (3,6,20) has 0.0784 and is not (a dark navy vest is kept, black is not)",
+      kit((3, 6, 21), (3, 6, 20))[1] == [True, False])
+check("the navy vest (6,12,40, value 0.157) is blue; with a value floor of 0.20 (version 1) it was invisible",
+      kit(NAVY)[1] == [True] and appearance.kit_masks(np.array([NAVY], np.uint8), blue_val=0.20)[1].tolist() == [False])
+check("black clothing and a near-black pixel are neither red nor blue", kit(BLACK, (0, 0, 0), (12, 8, 8)) == ([False] * 3, [False] * 3))
+check("the kam2 red kit (255,100,40: hue 16.7, saturation 0.84) is red; the kam4 red (220,30,30) is red",
+      kit(ORANGE_RED, RED)[0] == [True, True])
+check("THE SKIN BAND: skin (225,170,140), skin in strong light (255,147,89: hue 21, saturation 0.65), pale pink (255,170,160) "
+      "are not red", kit(SKIN, SKIN_HOT, (255, 170, 160))[0] == [False, False, False])
+r_skin, _ = appearance.kit_masks(np.array([SKIN_HOT], np.uint8), red_sat=0.45)
+check("... and with the version-1 saturation floor (0.45) the hot skin WOULD be red (the floor is what excludes it)", r_skin.tolist() == [True])
+check("white, grey, black, canvas and skin are neither red nor blue",
+      kit(WHITE, (128, 128, 128), (0, 0, 0), BG, SKIN) == ([False] * 5, [False] * 5))
 
-print("regions: quadrilateral shrink, discs, clipping, too few pixels")
+print("regions: quadrilateral shrink, discs, clipping, too few pixels, which regions are read")
 sq = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], float)
 check("the torso quadrilateral shrinks 20% towards its centroid: (0,0)-(100,100) becomes (10,10)-(90,90)",
       np.allclose(appearance.shrink_quad(sq), [[10, 10], [90, 10], [90, 90], [10, 90]]))
@@ -182,6 +204,14 @@ yy, xx = np.nonzero(mask)
 head_hit = ((xx + x0 - face_mean[0]) ** 2 + (yy + y0 - face_mean[1]) ** 2 <= 21.0 ** 2).sum()
 check("the head disc is centred on the MEAN of the face keypoints (160, 108.8), not on the nose",
       head_hit >= parts["head"], str((head_hit, parts)))
+check("the decision reads the TORSO only (DECISION_REGIONS), and the other regions stay available",
+      appearance.DECISION_REGIONS == ("torso",) and appearance.ALL_REGIONS == ("torso", "head", "glove_l", "glove_r"))
+parts_t_only = appearance.region_masks(xy0, conf1, box0, W, H, use=appearance.DECISION_REGIONS)[3]
+check("use=('torso',) builds and counts the torso alone", list(parts_t_only) == ["torso"] and parts_t_only["torso"] == parts["torso"],
+      str(parts_t_only))
+check("use=('head', 'glove_l') builds exactly those two",
+      sorted(appearance.region_masks(xy0, conf1, box0, W, H, use=("head", "glove_l"))[3]) == ["glove_l", "head"])
+check("a region name that is not one of the four builds nothing: None", appearance.region_masks(xy0, conf1, box0, W, H, use=("legs",)) is None)
 lowc = conf1.copy()
 lowc[[3, 4]] = 0.1
 _, _, _, parts_f = appearance.region_masks(xy0, lowc, box0, W, H)
@@ -196,6 +226,8 @@ parts_nt = appearance.region_masks(xy0, notorso, box0, W, H)[3]
 check("an unconfident hip or shoulder: no torso region, but the head and gloves remain (sized by the box height x 0.3 = 30.6)",
       "torso" not in parts_nt and "head" in parts_nt and abs(parts_nt["head"] - np.pi * (0.35 * 30.6) ** 2) < 0.1 * parts_nt["head"],
       str(parts_nt))
+check("... and with the torso-only decision such a row has NO region at all (None), never a head-and-gloves reading",
+      appearance.region_masks(xy0, notorso, box0, W, H, use=appearance.DECISION_REGIONS) is None)
 edge = appearance.region_masks(person_xy(5, 120), conf1, (0, 48, 60, 150), W, H)
 full = appearance.region_masks(person_xy(160, 120), conf1, box0, W, H)
 check("a figure at the left edge is clipped to the frame: the window starts at 0 and fewer pixels are counted",
@@ -223,84 +255,159 @@ check("min_px is per region: with 1,360 the 1,344-pixel torso falls away and the
       small is not None and sorted(small[3]) == ["glove_l", "glove_r", "head"], str(small and small[3]))
 check("MIN_REGION_PX is 30 and MIN_CONF is 0.3", appearance.MIN_REGION_PX == 30 and appearance.MIN_CONF == 0.3)
 
-print("one row: the shares of painted figures (exact where the figure is one colour)")
+print("one row: the counts of painted figures (exact where the torso is one colour)")
+N_TORSO = parts["torso"]
 f = bg()
-paint(f, 160, 120, RED, RED, RED)
-sh = appearance.row_shares(f, xy0, conf1, box0)
-check("an all-red figure: red share 1.0, blue 0.0 exactly", sh[0] == 1.0 and sh[1] == 0.0 and sh[2] > 3000, str(sh))
+paint(f, 160, 120, RED, SKIN, SKIN)
+rc = appearance.row_counts(f, xy0, conf1, box0)
+check("a red-vest figure: every torso pixel is red, none blue (counts, exactly)", rc == (N_TORSO, 0, N_TORSO), str(rc))
 f = bg()
-paint(f, 160, 120, BLUE, BLUE, BLUE)
-sh = appearance.row_shares(f, xy0, conf1, box0)
-check("an all-blue figure: blue 1.0, red 0.0", sh[1] == 1.0 and sh[0] == 0.0, str(sh))
+paint(f, 160, 120, BLUE, SKIN, SKIN)
+rc = appearance.row_counts(f, xy0, conf1, box0)
+check("a blue-vest figure: every torso pixel is blue", rc == (0, N_TORSO, N_TORSO), str(rc))
 f = bg()
-paint(f, 160, 120, RED, SKIN, RED)
-sh = appearance.row_shares(f, xy0, conf1, box0)
-want = (1344 + 2 * 1385) / (1344 + 3 * 1385)
-check(f"red vest and red gloves, skin head: red share = (torso + 2 gloves) / all regions = {want:.3f}",
-      abs(sh[0] - want) < 0.02 and sh[1] == 0.0, str(sh))
+paint(f, 160, 120, NAVY, SKIN, SKIN)
+rc = appearance.row_counts(f, xy0, conf1, box0)
+check("a navy (dark blue) vest is read as blue", rc == (0, N_TORSO, N_TORSO), str(rc))
 f = bg()
-paint(f, 160, 120, WHITE, SKIN, SKIN)
-sh = appearance.row_shares(f, xy0, conf1, box0)
-check("a white-shirt referee with bare hands and face: no red, no blue", sh[0] == 0.0 and sh[1] == 0.0, str(sh))
+paint(f, 160, 120, WHITE, RED, RED)
+rc = appearance.row_counts(f, xy0, conf1, box0)
+check("red headgear and red gloves on a white vest are NOT read: only the torso is (0 red, 0 blue)", rc == (0, 0, N_TORSO), str(rc))
+rc_all = appearance.row_counts(f, xy0, conf1, box0, use=appearance.ALL_REGIONS)
+check("... but with all four regions (version 1) the same figure reads red: more than half of the pixels",
+      rc_all[0] > 0.5 * rc_all[2] and rc_all[1] == 0, str(rc_all))
+for look, name in ((WHITE, "a white-shirt referee"), (SKIN, "a skin-only torso"), (SKIN_HOT, "skin in strong light"),
+                   ((255, 170, 160), "pale pink on skin"), (BLACK, "a black top")):
+    f = bg()
+    paint(f, 160, 120, look, SKIN, SKIN)
+    check(f"{name}: no red, no blue", appearance.row_counts(f, xy0, conf1, box0)[:2] == (0, 0))
 f = bg()
-paint(f, 160, 120, SKIN, SKIN, SKIN)
-sh = appearance.row_shares(f, xy0, conf1, box0)
-check("a skin-only person: no red, no blue", sh[0] == 0.0 and sh[1] == 0.0, str(sh))
-f = bg()
-paint(f, 160, 120, (255, 170, 160), SKIN, SKIN)
-sh = appearance.row_shares(f, xy0, conf1, box0)
-sh_nofloor = appearance.row_shares(f, xy0, conf1, box0, sat_min=0.0)
-check("pale pink on skin (red-hued, saturation 0.37): not red with the floor; with the floor removed the torso reads red",
-      sh[0] == 0.0 and sh_nofloor[0] > 0.2, str((sh, sh_nofloor)))
+paint(f, 160, 120, ORANGE_RED, SKIN, SKIN)
+check("the kam2 orange-red vest is red", appearance.row_counts(f, xy0, conf1, box0)[0] == N_TORSO)
 f = bg()
 f[:, :160] = RED
 f[:, 160:] = BLUE
-sh = appearance.row_shares(f, xy0, conf1, box0)
-check("a figure half in red, half in blue pixels reads both: neither share is small",
-      sh[0] > 0.3 and sh[1] > 0.3, str(sh))
+rc = appearance.row_counts(f, xy0, conf1, box0)
+check("a torso half in red, half in blue pixels reads both: neither count is small", rc[0] > 0.3 * rc[2] and rc[1] > 0.3 * rc[2], str(rc))
 check("a frame with no readable region gives None (nothing to count)",
-      appearance.row_shares(bg(), person_xy(-500, 120), conf1, box0) is None)
+      appearance.row_counts(bg(), person_xy(-500, 120), conf1, box0) is None)
+check("... and so does a figure whose torso keypoints are unconfident, even with a face and wrists",
+      appearance.row_counts(f, xy0, notorso, box0) is None)
 
-print("the decision from medians and rows (boundaries)")
+print("kit rows, and the decision from medians and rows (boundaries)")
+kr = appearance.is_kit_row
+check("a kit row needs 20 pixels AND 5% of the region: 19 of 100 is not (too few pixels), 20 of 100 is",
+      kr(19, 0, 100) is False and kr(20, 0, 100) is True)
+check("... 20 of 1,000 is not (2%), 50 of 1,000 is (5% exactly); red and blue add up", kr(20, 0, 1000) is False and kr(50, 0, 1000) is True
+      and kr(30, 20, 1000) is True and kr(0, 49, 1000) is False)
+check("an empty region is never a kit row", kr(0, 0, 0) is False)
 d = appearance.decide
-check("red: 3 rows, red 0.10, blue 0 is red; red 0.0999 is not", d(0.10, 0.0, 3) == "red" and d(0.0999, 0.0, 3) == "unsure")
-check("blue is symmetric", d(0.0, 0.10, 3) == "blue" and d(0.0, 0.0999, 3) == "unsure")
-check("the margin is 3x: 0.375 vs 0.125 is red, 0.375 vs 0.1251 is not", d(0.375, 0.125, 5) == "red" and d(0.375, 0.1251, 5) == "unsure")
-check("both colours present (0.3 and 0.2): unsure, whatever the rows", d(0.3, 0.2, 50) == "unsure")
-check("2 rows is never a colour: a clear red with 2 rows is unsure; with 3 it is red", d(0.9, 0.0, 2) == "unsure" and d(0.9, 0.0, 3) == "red")
-check("none needs 5 rows: 4 rows with nothing is unsure, 5 is none", d(0.0, 0.0, 4) == "unsure" and d(0.0, 0.0, 5) == "none")
-check("none needs BOTH medians under 0.02: 0.0199 is none, 0.02 is not", d(0.0199, 0.0199, 9) == "none" and d(0.02, 0.0, 9) == "unsure"
-      and d(0.0, 0.02, 9) == "unsure")
-check("a weak signal (0.05) with plenty of rows is unsure: neither a colour nor nothing", d(0.05, 0.0, 30) == "unsure")
-check("no rows at all is unsure", d(0.0, 0.0, 0) == "unsure")
+check("red: index -0.5 with 3 rows, 3 kit rows is red; -0.4999 is not", d(-0.5, 0.5, 3, 3) == "red" and d(-0.4999, 0.5, 3, 3) == "unsure")
+check("blue is symmetric: +0.5 is blue, +0.4999 is not", d(0.5, 0.5, 3, 3) == "blue" and d(0.4999, 0.5, 3, 3) == "unsure")
+check("index +-1 are red / blue; index 0 (both colours alike) is unsure whatever the rows",
+      d(-1.0, 0.9, 9, 9) == "red" and d(1.0, 0.9, 9, 9) == "blue" and d(0.0, 0.9, 50, 50) == "unsure")
+check("an index of 0.5 means one colour 3x the other: (B - R) / (B + R) with B = 3R is exactly 0.5", (3 - 1) / (3 + 1) == 0.5)
+check("2 kit rows is never a colour: a clear red with 2 rows is unsure; with 3 it is red",
+      d(-1.0, 0.9, 2, 2) == "unsure" and d(-1.0, 0.9, 3, 3) == "red")
+check("kit rows must be at least half of the rows: 3 of 7 is not, 4 of 7 is, 3 of 6 is",
+      d(-1.0, 0.9, 7, 3) != "red" and d(-1.0, 0.9, 7, 4) == "red" and d(-1.0, 0.9, 6, 3) == "red")
+check("none needs 5 rows: 4 rows with nothing is unsure, 5 is none", d(0.0, 0.0, 4, 0) == "unsure" and d(0.0, 0.0, 5, 0) == "none")
+check("none needs the median kit share under 0.02: 0.0199 is none, 0.02 is not", d(0.0, 0.0199, 9, 0) == "none" and d(0.0, 0.02, 9, 0) == "unsure")
+check("a weak signal (0.03) with plenty of rows is unsure: neither a colour nor nothing", d(0.0, 0.03, 30, 0) == "unsure")
+check("no rows at all is unsure", d(0.0, 0.0, 0, 0) == "unsure")
 
 print("a fragment through the pipeline: synthetic video, rows, medians")
 P = [(1, 0, 30, 80, 120), (2, 0, 30, 240, 120)]
 tb7, col7 = run_colours(P, {1: (RED, SKIN, RED), 2: (BLUE, SKIN, BLUE)}, 31)
-check("a red-vest figure and a blue-vest figure side by side: exactly red and blue, 7 sampled rows each (frames 0, 5 ... 30)",
-      col7.decision(1) == "red" and col7.decision(2) == "blue" and col7.by_id[1].rows == 7 and col7.by_id[2].rows == 7,
+check("a red-vest figure and a blue-vest figure side by side: exactly red and blue, 7 sampled rows (frames 0, 5 ... 30), all kit rows",
+      col7.decision(1) == "red" and col7.decision(2) == "blue" and col7.by_id[1].rows == 7 and col7.by_id[2].rows == 7
+      and col7.by_id[1].kit_rows == 7 and col7.by_id[2].kit_rows == 7, str(col7.by_id))
+check("... with the numbers the painting implies: index exactly -1.0 / +1.0, kit share exactly 1.0",
+      col7.by_id[1].index == -1.0 and col7.by_id[2].index == 1.0 and col7.by_id[1].kit == 1.0 and col7.by_id[2].kit == 1.0,
       str(col7.by_id))
-check("... with the medians the painting implies (red ~0.75 / blue 0 and the reverse)",
-      0.70 < col7.by_id[1].red < 0.80 and col7.by_id[1].blue == 0.0 and 0.70 < col7.by_id[2].blue < 0.80 and col7.by_id[2].red == 0.0,
-      str(col7.by_id))
+_, col_n = run_colours([(1, 0, 30, 80, 120)], {1: (NAVY, SKIN, SKIN)}, 31)
+check("REAL FACT: a navy vest (value 0.157) is blue, not unsure or none", col_n.decision(1) == "blue" and col_n.by_id[1].index == 1.0,
+      str(col_n.by_id))
+_, col_o = run_colours([(1, 0, 30, 80, 120)], {1: (ORANGE_RED, SKIN, SKIN)}, 31)
+check("an orange-red vest (kam2 red) is red", col_o.decision(1) == "red")
 tbr, colr = run_colours([(1, 0, 30, 80, 120)], {1: (WHITE, SKIN, SKIN)}, 31)
-check("a white-shirt referee seen on 7 rows is none (well seen, no kit colour)", colr.decision(1) == "none" and colr.by_id[1].rows == 7)
-tbs, cols = run_colours([(1, 0, 30, 80, 120)], {1: (SKIN, SKIN, SKIN)}, 31)
-check("a skin-only person is none too", cols.decision(1) == "none")
-tbp, colp = run_colours([(1, 0, 30, 80, 120)], {1: ((255, 170, 160), SKIN, SKIN)}, 31)
-check("the red-on-skin edge case (pale pink, saturation 0.37) is none, not red", colp.decision(1) == "none", str(colp.by_id))
+check("a white-shirt referee seen on 7 rows is none (well seen, no kit colour)",
+      colr.decision(1) == "none" and colr.by_id[1].rows == 7 and colr.by_id[1].kit_rows == 0 and colr.by_id[1].index == 0.0)
+for look, name in ((SKIN, "a skin-only torso"), (SKIN_HOT, "skin in strong light"), ((255, 170, 160), "pale pink on skin"),
+                   (BLACK, "a black top")):
+    _, c_ = run_colours([(1, 0, 30, 80, 120)], {1: (look, SKIN, SKIN)}, 31)
+    check(f"{name} is none, not red or blue", c_.decision(1) == "none", str(c_.by_id))
+_, col_h = run_colours([(1, 0, 30, 80, 120)], {1: (WHITE, RED, RED)}, 31)
+check("a white vest with red headgear and gloves is none: the decision reads the torso only (documented limit of version 2)",
+      col_h.decision(1) == "none", str(col_h.by_id))
+# a split vest: left of x_s red, right of x_s blue; the expected index is counted from the torso mask itself
+mx0, my0, tmask, _ = appearance.region_masks(person_xy(80, 120), conf1, box0, W, H, use=("torso",))
+
+
+def split_vest_look(x_s):
+    """(frame painter, expected index) for a vest red left of column x_s and blue from x_s on."""
+    n_red = int(tmask[:, :max(0, x_s - mx0)].sum())
+    n_blue = int(tmask.sum()) - n_red
+    return n_red, n_blue, (n_blue - n_red) / (n_blue + n_red)
+
+
+def run_split(x_s):
+    tb = table_of([(1, 0, 30, 80, 120)], 31)
+
+    def frames():
+        for i in range(31):
+            fr = bg()
+            paint(fr, 80, 120, WHITE, SKIN, SKIN)
+            fr[90:151, 60:x_s] = RED          # the torso lies inside x 60..100, y 90..150
+            fr[90:151, x_s:101] = BLUE
+            yield fr
+    return appearance.compute_colours(None, tb, frames=frames())
+
+
+def last_x(target):
+    """The widest red part (largest split column) whose index is still >= target."""
+    return max(x for x in range(60, 101) if split_vest_look(x)[2] >= target)
+
+
+xs_blue = last_x(0.6)          # index 0.6-0.67: about 80% blue
+xs_mid = last_x(0.0)           # index 0-0.07: about half and half
+xs_edge = last_x(0.4)          # index 0.4-0.47: blue about 2.3x red
+n_r, n_b, idx_blue = split_vest_look(xs_blue)
+c_blue = run_split(xs_blue)
+check(f"a vest ~80% blue and ~20% red (red {n_r}, blue {n_b} px) has the index the pixel counts imply ({idx_blue:.3f}) and is blue",
+      abs(c_blue.by_id[1].index - idx_blue) < 1e-9 and c_blue.decision(1) == "blue", str((c_blue.by_id, idx_blue)))
+c_mid = run_split(xs_mid)
+check(f"a vest half red, half blue (index {split_vest_look(xs_mid)[2]:+.3f}) is unsure: both colours present, neither 3x the other",
+      c_mid.decision(1) == "unsure" and abs(c_mid.by_id[1].index) < 0.5, str(c_mid.by_id))
+c_edge = run_split(xs_edge)
+check(f"a vest at index {split_vest_look(xs_edge)[2]:+.3f} (blue 2.3x red) is still unsure: the margin is 3x",
+      c_edge.decision(1) == "unsure" and 0.4 <= c_edge.by_id[1].index < 0.5, str(c_edge.by_id))
+# a small patch of kit on a white vest: the relative index decides, not an absolute share
+for (col_, pw, ph, want_rows, want_dec, why) in (
+        (RED, 3, 3, 0, "none", "9 pixels: under the 20-pixel floor, a speck"),
+        (RED, 9, 5, 0, "unsure", "45 pixels (3.3%): under the 5% kit-row floor but over the 2% 'nothing' line, a weak signal"),
+        (RED, 10, 8, 7, "red", "80 pixels (6.0%): a kit row; red because nothing opposes it, though far under version 1's 10% share floor"),
+        (NAVY, 10, 8, 7, "blue", "80 pixels (6.0%) of navy: blue by the same relative test")):
+    _, c_ = run_colours([(1, 0, 30, 80, 120)], {1: (WHITE, SKIN, SKIN)}, 31, patch={1: (col_, pw, ph)})
+    check(f"a {pw}x{ph} {'red' if col_ == RED else 'navy'} patch on a white vest ({why}): {want_rows} kit rows, {want_dec}",
+          c_.by_id[1].kit_rows == want_rows and c_.decision(1) == want_dec, str(c_.by_id))
 # median robustness: frames 10 and 20 (2 of the 7 sampled rows) are completely blue around the red figure
 tbm, colm = run_colours([(1, 0, 30, 80, 120)], {1: (RED, SKIN, RED)}, 31, bad_frames={10: {1: (BLUE, BLUE, BLUE)}, 20: {1: (BLUE, BLUE, BLUE)}})
-check("median robustness: a red figure with 2 of its 7 sampled rows full of blue stays red (median blue 0)",
-      colm.decision(1) == "red" and colm.by_id[1].rows == 7 and colm.by_id[1].blue == 0.0, str(colm.by_id))
-mean_red = np.mean([0.748] * 5 + [0.0] * 2)
-mean_blue = np.mean([0.0] * 5 + [1.0] * 2)
-check("... and the MEAN would not have: mean red 0.53 vs mean blue 0.29 is under the 3x margin, so unsure",
-      appearance.decide(mean_red, mean_blue, 7) == "unsure", str((mean_red, mean_blue)))
+check("median robustness: a red figure with 2 of its 7 sampled rows full of blue stays red (median index -1.0)",
+      colm.decision(1) == "red" and colm.by_id[1].rows == 7 and colm.by_id[1].index == -1.0, str(colm.by_id))
+mean_idx = float(np.mean([-1.0] * 5 + [1.0] * 2))
+check("... and the MEAN would not have: mean index -0.43 is inside the +-0.5 margin, so unsure",
+      appearance.decide(mean_idx, 0.8, 7, 7) == "unsure", str(mean_idx))
 tbm3, colm3 = run_colours([(1, 0, 30, 80, 120)], {1: (RED, SKIN, RED)}, 31,
                           bad_frames={f_: {1: (BLUE, BLUE, BLUE)} for f_ in (5, 10, 15, 20)})
 check("... but with 4 of 7 rows blue the median IS blue: the test follows the majority of the evidence",
       colm3.decision(1) == "blue", str(colm3.by_id))
+# only some rows carry kit: red on 3 of the 7 rows, plain white on the other 4
+tbk, colk = run_colours([(1, 0, 30, 80, 120)], {1: (WHITE, SKIN, SKIN)}, 31, bad_frames={f_: {1: (RED, SKIN, SKIN)} for f_ in (5, 10, 15)})
+check("red on 3 of 7 rows (under half are kit rows) is not red: the median row has no kit, so none",
+      colk.by_id[1].kit_rows == 3 and colk.by_id[1].rows == 7 and colk.decision(1) == "none", str(colk.by_id))
+tbk4, colk4 = run_colours([(1, 0, 30, 80, 120)], {1: (WHITE, SKIN, SKIN)}, 31, bad_frames={f_: {1: (RED, SKIN, SKIN)} for f_ in (0, 5, 10, 15)})
+check("... while red on 4 of 7 rows is red", colk4.by_id[1].kit_rows == 4 and colk4.decision(1) == "red", str(colk4.by_id))
 # rows thresholds through the pipeline
 for last, want_rows, want_dec in ((5, 2, "unsure"), (10, 3, "red")):
     _, c_ = run_colours([(1, 0, last, 80, 120)], {1: (RED, SKIN, RED)}, last + 1)
@@ -338,7 +445,8 @@ col7.save(col_path)
 back = Colours.load(col_path)
 check("save then load gives back exactly the same colours", back == col7 and back.counts() == {"red": 1, "blue": 1, "none": 0, "unsure": 0})
 check("the file holds only numbers and the decision (no pixel data of any kind)",
-      set(json.loads(col_path.read_text())["fragments"]["1"]) == {"decision", "red", "blue", "rows"})
+      set(json.loads(col_path.read_text())["fragments"]["1"]) == {"decision", "index", "kit", "rows", "kit_rows"})
+check("the format is version 2 (a version-1 file cannot be loaded as if it were)", json.loads(col_path.read_text())["format"] == "boxingvi-colours-2")
 col7.check_table(tb7)
 doc = json.loads(col_path.read_text())
 
@@ -349,29 +457,36 @@ def loads(d, name="m.colours.json"):
     return Colours.load(p)
 
 
+def mutated(**kv):
+    d_ = json.loads(json.dumps(doc))
+    d_["fragments"]["1"].update(kv)
+    return d_
+
+
 raises("malformed JSON is refused", lambda: loads("{not json"), "not valid JSON")
-assert '"blue": 0.0' in json.dumps(doc)
-raises("NaN in a share is refused", lambda: loads(json.dumps(doc).replace('"blue": 0.0', '"blue": NaN', 1)), "not a number")
+assert '"kit": 1.0' in json.dumps(doc)
+raises("NaN in a number is refused", lambda: loads(json.dumps(doc).replace('"kit": 1.0', '"kit": NaN', 1)), "not a number")
 raises("Infinity is refused", lambda: loads('{"x": Infinity}'), "not a number")
 raises("a bare list is refused", lambda: loads("[1, 2]"), "wrong keys")
-bad = json.loads(json.dumps(doc))
-bad["fragments"]["1"]["decision"] = "purple"
-raises("an unknown decision is refused", lambda: loads(bad), "unknown decision")
-bad = json.loads(json.dumps(doc))
-bad["fragments"]["1"]["decision"] = "blue"
-raises("a decision its own medians do not imply (red numbers, 'blue') is refused", lambda: loads(bad), "imply")
-bad = json.loads(json.dumps(doc))
-bad["fragments"]["1"]["red"] = 1.5
-raises("a share above 1 is refused", lambda: loads(bad), "share in [0, 1]")
-bad = json.loads(json.dumps(doc))
-bad["fragments"]["1"]["rows"] = -1
-raises("a negative row count is refused", lambda: loads(bad), "rows")
-bad = json.loads(json.dumps(doc))
-bad["fragments"]["1"]["rows"] = True
-raises("a boolean row count is refused", lambda: loads(bad), "rows")
+raises("an unknown decision is refused", lambda: loads(mutated(decision="purple")), "unknown decision")
+raises("a decision its own numbers do not imply (red numbers, 'blue') is refused", lambda: loads(mutated(decision="blue")), "imply")
+raises("an index above 1 is refused", lambda: loads(mutated(index=1.5)), "index")
+raises("an index below -1 is refused", lambda: loads(mutated(index=-1.5)), "index")
+raises("a kit share above 1 is refused", lambda: loads(mutated(kit=1.5)), "kit")
+raises("a negative kit share is refused", lambda: loads(mutated(kit=-0.1)), "kit")
+raises("a boolean index is refused", lambda: loads(mutated(index=True)), "index")
+raises("a negative row count is refused", lambda: loads(mutated(rows=-1)), "rows")
+raises("a boolean row count is refused", lambda: loads(mutated(rows=True)), "rows")
+raises("a fractional row count is refused", lambda: loads(mutated(rows=7.5)), "rows")
+raises("kit_rows above rows is refused", lambda: loads(mutated(kit_rows=99)), "exceeds")
+raises("an index without any kit row is refused (a file cannot invent evidence)",
+       lambda: loads(mutated(kit_rows=0, decision="unsure", index=-1.0)), "without kit rows")
 bad = json.loads(json.dumps(doc))
 bad["fragments"]["1"]["extra"] = 1
 raises("an extra key in a fragment is refused", lambda: loads(bad), "wrong keys")
+bad = json.loads(json.dumps(doc))
+bad["fragments"]["1"]["red"] = bad["fragments"]["1"].pop("kit")
+raises("a version-1 key (red / blue medians) in place of the kit share is refused", lambda: loads(bad), "wrong keys")
 bad = json.loads(json.dumps(doc))
 bad["fragments"]["x1"] = bad["fragments"].pop("1")
 raises("a track id that is not a whole number is refused", lambda: loads(bad), "not a whole number")
@@ -382,8 +497,8 @@ bad = json.loads(json.dumps(doc))
 bad["video_fp"] = "ABC"
 raises("a malformed fingerprint is refused", lambda: loads(bad), "video_fp")
 bad = json.loads(json.dumps(doc))
-bad["format"] = "other"
-raises("an unknown format is refused", lambda: loads(bad), "format")
+bad["format"] = "boxingvi-colours-1"
+raises("a version-1 colours file is refused as an unknown format", lambda: loads(bad), "format")
 bad = json.loads(json.dumps(doc))
 bad["surprise"] = 1
 raises("an extra top-level key is refused", lambda: loads(bad), "wrong keys")
@@ -391,8 +506,8 @@ _real_max = appearance.MAX_FILE_BYTES
 appearance.MAX_FILE_BYTES = 20
 raises("a file over the size cap is refused before it is parsed", lambda: Colours.load(col_path), "bytes")
 appearance.MAX_FILE_BYTES = _real_max
-raises("a colours file cannot be saved with a NaN share (allow_nan=False)",
-       lambda: Colours({1: FragmentColour("unsure", float("nan"), 0.0, 3)}, "a.mp4", 10).save(tmp / "nan.json"))
+raises("a colours file cannot be saved with a NaN index (allow_nan=False)",
+       lambda: Colours({1: FragmentColour("unsure", float("nan"), 0.0, 3, 0)}, "a.mp4", 10).save(tmp / "nan.json"))
 # binding to the table
 raises("colours for another source (file name) are refused", lambda: dataclasses.replace(col7, source="GH999999.mp4").check_table(tb7), "GH999999")
 raises("colours for another frame count are refused", lambda: dataclasses.replace(col7, n_frames=99).check_table(tb7), "99 frames")
@@ -414,7 +529,7 @@ print("the self-check: do co-present credited fragments get opposite colours?")
 def mk(colour_of, frags):
     """A table with the given (tid, first, last) fragments and a Colours with the given decisions."""
     tb = table_of([(t, a, b, 80 + 10 * t, 120) for t, a, b in frags], 400)
-    nums = {"red": (0.5, 0.0, 10), "blue": (0.0, 0.5, 10), "none": (0.0, 0.0, 10), "unsure": (0.0, 0.0, 1)}
+    nums = {"red": (-1.0, 0.5, 10, 10), "blue": (1.0, 0.5, 10, 10), "none": (0.0, 0.0, 10, 0), "unsure": (0.0, 0.0, 1, 0)}
     by = {t: FragmentColour(dd, *nums[dd]) for t, dd in colour_of.items()}
     return tb, Colours(by, tb.source, tb.n_frames, "")
 
@@ -467,9 +582,15 @@ from fractions import Fraction  # noqa: E402
 import olympic_colour  # noqa: E402
 from boxingvi import olympic, video  # noqa: E402
 
+check("the development videos are the pre-registered four (two inspected before the design, two drawn by Random(20261008)) and nothing else",
+      olympic_colour.DEV_VIDEOS == frozenset({"GH078416", "GH159681", "GH128416", "GH069681"}) and len(olympic_colour.DEV_VIDEOS) == 4)
+check("... a dev video is dev, any other is test; the gate is 0.9 over >= 100 decided test pairs, 20 per camera",
+      olympic_colour.split_of("GH078416") == "dev" and olympic_colour.split_of("GH000002") == "test" and olympic_colour.split_of("GH198416") == "test"
+      and olympic_colour.GATE == 0.9 and olympic_colour.GATE_MIN_PAIRS == 100 and olympic_colour.CAMERA_MIN_PAIRS == 20)
+
 NF = 200
 two = [(1, 0, NF - 1, 80, 120), (2, 0, NF - 1, 240, 120), (3, 0, NF - 1, 160, 200)]     # red, blue, white referee
-LOOK = {1: (RED, SKIN, RED), 2: (BLUE, SKIN, BLUE), 3: (WHITE, SKIN, SKIN)}
+LOOK = {1: (RED, SKIN, RED), 2: (NAVY, SKIN, BLUE), 3: (WHITE, SKIN, SKIN)}
 ds = tmp / "ds" / "task_kam2_gh000002"
 (ds / "data").mkdir(parents=True)
 with video.VideoWriter(ds / "data" / "GH000002.mp4", W, H, Fraction(50)) as vw:
@@ -495,57 +616,94 @@ trk.mkdir()
 tab2.save(trk / "GH000002.tracks.npz")
 root = tmp / "ds"
 chk_out = tmp / "res" / "check.json"
+with contextlib.redirect_stdout(io.StringIO()):
+    raises("the default split is dev: a test video is not read (and not printed) unless --split test or all is asked for",
+           lambda: olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--check-out", str(chk_out)]), "could be read")
+check("... and no colours file was written for it", not (trk / "GH000002.colours.json").exists())
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
-    rc = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--check-out", str(chk_out)])
+    rc = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--split", "test", "--min-pairs", "1", "--check-out", str(chk_out)])
 col2 = Colours.load(trk / "GH000002.colours.json")
 check("exit 0; the colours file is bound to the table (name, length, fingerprint, ids)",
       rc == 0 and col2.source == "GH000002.mp4" and col2.n_frames == NF and col2.video_fp == tab2.video_fp
       and set(col2.by_id) == {1, 2, 3}, buf.getvalue())
-check("REAL FACT: read from the clip's pixels, id 1 is red, id 2 is blue, the white-shirt referee is none",
+check("REAL FACT: read from the clip's pixels, id 1 is red, id 2 (navy vest) is blue, the white-shirt referee is none",
       [col2.decision(t) for t in (1, 2, 3)] == ["red", "blue", "none"], str(col2.by_id))
 chk = json.loads(chk_out.read_text(encoding="utf-8"))
-check("the self-check: the one co-present credited pair is red vs blue; opposite share 1.0; the gate passes",
-      chk["passes"] is True and chk["all"]["copresent_pairs"] == 1 and chk["all"]["opposite"] == 1
-      and chk["all"]["opposite_share"] == 1.0 and chk["all"]["credited_by_decision"] == {"red": 1, "blue": 1, "none": 0, "unsure": 0},
-      str(chk["all"]))
+check("the self-check on the test split: the one co-present credited pair is red vs blue; opposite share 1.0; the gate passes with --min-pairs 1",
+      chk["passes"] is True and chk["test"]["all"]["copresent_pairs"] == 1 and chk["test"]["all"]["opposite"] == 1
+      and chk["test"]["all"]["opposite_share"] == 1.0
+      and chk["test"]["all"]["credited_by_decision"] == {"red": 1, "blue": 1, "none": 0, "unsure": 0} and "dev" not in chk, str(chk["test"]["all"]))
+check("... the camera is read from the task (kam2) and has 1 decided pair: under 20, so colour is NOT ESTABLISHED for it",
+      chk["test"]["kam2"]["decided_pairs"] == 1 and chk["test"]["kam2"]["established"] is False
+      and "NOT ESTABLISHED" in buf.getvalue(), str(chk["test"]["kam2"]))
+with contextlib.redirect_stdout(io.StringIO()):
+    rc_few = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--split", "test", "--check-out", str(tmp / "res" / "few.json"),
+                                  "--check-only"])
+few = json.loads((tmp / "res" / "few.json").read_text(encoding="utf-8"))
+check("REAL FACT, the gate needs 100 decided pairs: the same perfect 1-of-1 pair FAILS with the default --min-pairs, exit code 2",
+      rc_few == 2 and few["passes"] is False and few["test"]["all"]["opposite_share"] == 1.0 and few["test"]["all"]["decided_pairs"] == 1)
+with contextlib.redirect_stdout(io.StringIO()):
+    rc_cam = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--split", "test", "--min-pairs", "1", "--min-camera-pairs", "1",
+                                  "--check-out", str(tmp / "res" / "cam.json"), "--check-only"])
+check("... and a camera with at least --min-camera-pairs decided pairs is established",
+      rc_cam == 0 and json.loads((tmp / "res" / "cam.json").read_text(encoding="utf-8"))["test"]["kam2"]["established"] is True)
 buf2 = io.StringIO()
 with contextlib.redirect_stdout(buf2):
-    rc2 = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--check-out", str(tmp / "res" / "check2.json"), "--check-only"])
+    rc2 = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--split", "all", "--min-pairs", "1",
+                               "--check-out", str(tmp / "res" / "check2.json"), "--check-only"])
 check("--check-only recomputes the same numbers from the colours file, without the video",
-      rc2 == 0 and json.loads((tmp / "res" / "check2.json").read_text(encoding="utf-8"))["all"] == chk["all"])
-Colours({1: FragmentColour("red", 0.5, 0.0, 10), 2: FragmentColour("red", 0.5, 0.0, 10), 3: col2.by_id[3]},
+      rc2 == 0 and json.loads((tmp / "res" / "check2.json").read_text(encoding="utf-8"))["test"]["all"] == chk["test"]["all"])
+# a dev video: the same clip declared development
+real_dev = olympic_colour.DEV_VIDEOS
+olympic_colour.DEV_VIDEOS = frozenset({"GH000002"})
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc_dev = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--check-out", str(tmp / "res" / "dev.json"), "--check-only"])
+        raises("with the clip declared a development video, --split test finds nothing to read",
+               lambda: olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--split", "test", "--check-only",
+                                            "--check-out", str(tmp / "res" / "dev2.json")]), "could be read")
+finally:
+    olympic_colour.DEV_VIDEOS = real_dev
+dev = json.loads((tmp / "res" / "dev.json").read_text(encoding="utf-8"))
+check("a development video is reported under 'dev' only; the gate is NOT evaluated (passes null, exit 0), whatever the dev numbers",
+      rc_dev == 0 and dev["passes"] is None and "test" not in dev and dev["dev"]["all"]["opposite_share"] == 1.0
+      and dev["videos"]["task_kam2_gh000002"]["split"] == "dev", str(dev.get("dev")))
+Colours({1: FragmentColour("red", -1.0, 0.5, 10, 10), 2: FragmentColour("red", -1.0, 0.5, 10, 10), 3: col2.by_id[3]},
         col2.source, col2.n_frames, col2.video_fp).save(trk / "GH000002.colours.json")
 with contextlib.redirect_stdout(io.StringIO()):
-    rc_bad = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--check-out", str(tmp / "res" / "bad.json"), "--check-only"])
+    rc_bad = olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--split", "test", "--min-pairs", "1",
+                                  "--check-out", str(tmp / "res" / "bad.json"), "--check-only"])
 bad = json.loads((tmp / "res" / "bad.json").read_text(encoding="utf-8"))
 check("REAL FACT, the gate can FAIL: two co-present boxers both called red give opposite share 0.0, passes false, exit code 2",
-      rc_bad == 2 and bad["passes"] is False and bad["all"]["opposite_share"] == 0.0 and bad["all"]["same_share"] == 1.0, str(bad["all"]))
+      rc_bad == 2 and bad["passes"] is False and bad["test"]["all"]["opposite_share"] == 0.0 and bad["test"]["all"]["same_share"] == 1.0,
+      str(bad["test"]["all"]))
 col2.save(trk / "GH000002.colours.json")
 ren = tmp / "trk_renamed"
 ren.mkdir()
 dataclasses.replace(tab2, source="GH999999.mp4").save(ren / "GH000002.tracks.npz")
 with contextlib.redirect_stdout(io.StringIO()):
     raises("a renamed (unbound) table is refused, nothing is coloured",
-           lambda: olympic_colour.main(["--data", str(root), "--tracks", str(ren), "--check-out", str(tmp / "res" / "c3.json")]), "could be read")
+           lambda: olympic_colour.main(["--data", str(root), "--tracks", str(ren), "--split", "test", "--check-out", str(tmp / "res" / "c3.json")]),
+           "could be read")
 check("... and no colours file was written for it", not (ren / "GH000002.colours.json").exists())
 wrongfp = tmp / "trk_fp"
 wrongfp.mkdir()
 dataclasses.replace(tab2, video_fp="d" * 64).save(wrongfp / "GH000002.tracks.npz")
 with contextlib.redirect_stdout(io.StringIO()):
     raises("a table with another recording's fingerprint is refused too",
-           lambda: olympic_colour.main(["--data", str(root), "--tracks", str(wrongfp), "--check-out", str(tmp / "res" / "c4.json")]),
+           lambda: olympic_colour.main(["--data", str(root), "--tracks", str(wrongfp), "--split", "test", "--check-out", str(tmp / "res" / "c4.json")]),
            "could be read")
 for bad_id in ("../GH000002", "GH 2", "", "GH000002.mp4"):
     raises(f"--only {bad_id!r} is not a GoPro id: refused before anything is read or written",
-           lambda b=bad_id: olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--only", b,
+           lambda b=bad_id: olympic_colour.main(["--data", str(root), "--tracks", str(trk), "--split", "test", "--only", b,
                                                  "--check-out", str(tmp / "res" / "c5.json")]), "GoPro id")
 nocol = tmp / "trk_nocol"
 nocol.mkdir()
 tab2.save(nocol / "GH000002.tracks.npz")
 with contextlib.redirect_stdout(io.StringIO()):
     raises("--check-only with no colours file is refused, not treated as an empty pass",
-           lambda: olympic_colour.main(["--data", str(root), "--tracks", str(nocol), "--check-only",
+           lambda: olympic_colour.main(["--data", str(root), "--tracks", str(nocol), "--split", "test", "--check-only",
                                         "--check-out", str(tmp / "res" / "c6.json")]), "could be read")
 check("the colours path stays inside the tracks folder", olympic_colour.colours_path(trk, "GH000002").parent == trk.resolve())
 raises("colours_path refuses a path-like id", lambda: olympic_colour.colours_path(trk, "..\\x"), "GoPro id")
