@@ -257,14 +257,14 @@ def pose(cx, cy, ext=(0.0, 0.0)):
 
 
 def table_of(n_frames, frames, source="GH000001.mp4", tid=1, bursts=(), steps=(), cx=150.0):
-    """One person (track `tid`) in `frames`, still, with triangular wrist bursts [(frame, hand)] (out and back in 8
-    frames) and permanent wrist STEPS [(frame, hand, px)]: the wrist is `px` further out from that frame on, which
+    """One person (track `tid`) in `frames`, still, with triangular wrist bursts [(frame, hand[, amplitude px])] (out and back in 8
+    frames; the default amplitude is 120 px) and permanent wrist STEPS [(frame, hand, px)]: the wrist is `px` further out from that frame on, which
     the rule reads as one fast jump."""
     rows = []
     for f in frames:
         e = [0.0, 0.0]
-        for b, hand in bursts:
-            e[hand] = max(e[hand], 120.0 * max(0.0, 1 - abs(f - b) / 4))
+        for b, hand, *amp in bursts:
+            e[hand] = max(e[hand], (amp[0] if amp else 120.0) * max(0.0, 1 - abs(f - b) / 4))
         for sf, hand, px in steps:
             if f >= sf:
                 e[hand] = max(e[hand], float(px))
@@ -416,6 +416,39 @@ check("without skips the jump at 200 (a much bigger peak) suppresses the real pu
 check("with the skip the zeroed signal no longer suppresses it: the real punch at 212 is found (and the jump is not)",
       len(rS1["bursts"]) == 2 and near(rS1["bursts"][1].frame, 212, 6) and not near(rS1["bursts"][1].frame, 200, 4) and rS1["exposure"][1][rS1["bursts"][1].frame],
       str(frames_of(rS1)))
+
+# B1 (review): an ineligible peak just outside the zeroed zone must not suppress a real, eligible one. The skip at 200 zeroes 197..203 and
+# removes 196..204; the return lobe of a strong punch hidden under the mask is a flat top at 204-205 whose reported peak is 204 (ineligible),
+# stronger than the real, weaker punch at 212 (8 frames later, inside the 20-frame minimum gap).
+tE = table_of(NS, range(NS), bursts=[(60, 1), (202, 1), (212, 0, 60)])
+evE = [label(tE, 1, 58, 62, 1)]
+rE = run(tE, evE, skips=np.array([200]))
+rE0 = run(tE, evE)
+check("setup: without skips the strong punch (burst at 204) suppresses the weaker one at 212 through the 20-frame minimum gap: bursts 62 and 204 only",
+      len(rE0["bursts"]) == 2 and near(rE0["bursts"][1].frame, 204, 2) and not any(208 <= b.frame <= 218 for b in rE0["bursts"]), str(frames_of(rE0)))
+check("the real punch at 212 IS a burst when the stronger edge peak at 204 is ineligible: found near 212, in the exposure, not suppressed by a peak that is then discarded",
+      any(near(b.frame, 212, 3) for b in rE["bursts"]) and not any(196 <= b.frame <= 204 for b in rE["bursts"])
+      and all(rE["exposure"][1][b.frame] for b in rE["bursts"]), str(frames_of(rE)))
+raises("detect refuses an eligibility array of the wrong shape or type",
+       lambda: punchfind.detect(completeness._track_of(tE, np.arange(len(tE.frame)), "t"), np.zeros((NS, 2)), 3.6, 0.4, np.ones((NS, 1), bool)), "eligible")
+trE = completeness._track_of(tE, np.arange(len(tE.frame)), "t")
+sgE = punchfind.wrist_signal(trE, "relative")
+check("detect with every frame eligible equals detect without the argument, on the scene's signal",
+      all(np.array_equal(x, y) for x, y in zip(punchfind.detect(trE, sgE, 3.62, 0.4), punchfind.detect(trE, sgE, 3.62, 0.4, np.ones(sgE.shape, bool)))))
+rng_ = np.random.default_rng(7)
+same_ = True
+for _ in range(200):          # random smooth-ish signals with ties and plateaus: the two code paths agree peak for peak
+    z_ = np.round(np.abs(np.convolve(rng_.normal(size=300), np.ones(3) / 3, mode="same")) * 4) / 2
+    sg_ = np.stack([z_, np.roll(z_, 5)], axis=1)
+    tr_ = completeness._track_of(table_of(300, range(300)), np.arange(300), "t")
+    a_, b_ = punchfind.detect(tr_, sg_, 2.0, 0.4), punchfind.detect(tr_, sg_, 2.0, 0.4, np.ones(sg_.shape, bool))
+    same_ &= np.array_equal(a_[0], b_[0]) and np.array_equal(a_[1], b_[1])
+check("... and on 200 random signals with plateaus and ties (the new path is the old suppression, not a look-alike)", same_)
+el_ = np.ones(sgE.shape, bool)
+el_[204] = False
+fr_, hd_ = punchfind.detect(trE, sgE, 3.62, 0.4, el_)
+check("an ineligible frame is no candidate but still a neighbour: marking only 204 ineligible removes the burst there and nothing else",
+      204 not in fr_.tolist() and 205 not in fr_.tolist() and set(punchfind.detect(trE, sgE, 3.62, 0.4)[0].tolist()) - {204} <= set(fr_.tolist()))
 
 # the mask follows smooth_s: the same scene, a wider smoothing window, a wider mask
 segs_J = [np.arange(len(tJ.frame))]

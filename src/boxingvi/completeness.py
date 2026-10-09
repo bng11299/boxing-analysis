@@ -348,11 +348,10 @@ def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: 
             have = have & ~gone
         out["valid"] += have.sum(axis=0)
         mask[track.frame_ids[have.any(axis=1)]] = True
-        frames, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
+        frames, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"],
+                                         None if gone is None else ~gone)
         row = {int(f): i for i, f in enumerate(track.frame_ids)}
         for f, h in zip(frames, hands):
-            if gone is not None and gone[row[int(f)], int(h)]:
-                continue
             out["raw"].append((int(f), int(h), float(sig[row[int(f)], int(h)])))
     for f, _h, _p in out["raw"]:
         if not mask[f]:

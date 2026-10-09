@@ -213,20 +213,34 @@ def signal_frames(track: Track, min_conf: float = MIN_CONF, bridge_s: float = BR
 
 
 def detect(track: Track, signal: np.ndarray, threshold: float,
-           min_gap_s: float) -> "tuple[np.ndarray, np.ndarray]":
+           min_gap_s: float, eligible: "np.ndarray | None" = None) -> "tuple[np.ndarray, np.ndarray]":
     """Peaks of the faster hand's speed above `threshold`, at least `min_gap_s`
-    apart. Returns (video frame ids, hand: 0 left / 1 right)."""
+    apart. Returns (video frame ids, hand: 0 left / 1 right).
+
+    `eligible` ((F, 2) bool, default None = every frame): a frame whose hand is not eligible can be a
+    neighbour in the peak test (its signal value is compared as it is) but is never a CANDIDATE, and is
+    excluded BEFORE the minimum-gap suppression, so it cannot suppress a real peak near it and then be
+    discarded itself. None is the original computation, untouched."""
     from scipy.signal import find_peaks
 
     if signal.shape != (len(track.frame_ids), 2):
         raise ValueError(f"signal shape {signal.shape} does not match the track")
     if not (np.isfinite(threshold) and min_gap_s >= 0):
         raise ValueError("threshold must be finite and min_gap_s non-negative")
+    if eligible is not None and (eligible.shape != signal.shape or eligible.dtype != bool):
+        raise ValueError("eligible must be a bool array shaped like the signal")
     dist = max(1, int(round(min_gap_s * track.fps)))
     best = signal.max(axis=1)
     frames, hands = [], []
     for lo, hi in track.segments():
-        peaks, _ = find_peaks(best[lo:hi], height=threshold, distance=dist)
+        if eligible is None:
+            peaks, _ = find_peaks(best[lo:hi], height=threshold, distance=dist)
+        else:
+            cand, _ = find_peaks(best[lo:hi], height=threshold)             # local maxima on the true values
+            cand = cand[eligible[lo + cand, signal[lo + cand].argmax(axis=1)]]   # only eligible ones compete
+            spikes = np.zeros(hi - lo)                                      # the same suppression, on the survivors
+            spikes[cand] = best[lo + cand]
+            peaks, _ = find_peaks(spikes, height=threshold, distance=dist)
         frames.append(track.frame_ids[lo + peaks])
         hands.append(signal[lo + peaks].argmax(axis=1))
     return np.concatenate(frames), np.concatenate(hands)
