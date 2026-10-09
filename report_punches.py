@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from boxingvi import report  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
 
-DEFAULT_REFERENCE = Path("results/stgcnpp.json")
+DEFAULT_REFERENCE = Path("results/sweep-2026-09-22/seed0.json")   # the run train_classifier.py reproduces
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
 DEFAULT_OUT = Path("results/reports")
 
