@@ -60,14 +60,15 @@ W, H, FPS, N = 640, 360, 50.0, 1000
 TORSO = 40.0     # shoulder-mid to hip-mid, pixels: one body length in this scene
 
 
-def pose(cx, cy, ext=(0.0, 0.0)):
-    """A person centred at (cx, cy): torso 40 px, wrists 24 px out to each side."""
+def pose(cx, cy, ext=(0.0, 0.0), k=1.0):
+    """A person centred at (cx, cy): torso 40 px, wrists 24 px out to each side. `k` scales the
+    whole body (a person farther from the camera: k = 0.45 is a torso of 18 px)."""
     xy = np.tile([cx, cy], (N_JOINTS, 1)).astype(float)
-    xy[:, 0] += np.linspace(-6, 6, N_JOINTS)
-    xy[5], xy[6] = (cx - 12, cy - 20), (cx + 12, cy - 20)
-    xy[11], xy[12] = (cx - 8, cy + 20), (cx + 8, cy + 20)
-    xy[9], xy[10] = (cx - 24 - ext[0], cy - 4), (cx + 24 + ext[1], cy - 4)
-    return xy, np.array([cx - 28, cy - 52, cx + 28, cy + 56], float)
+    xy[:, 0] += np.linspace(-6, 6, N_JOINTS) * k
+    xy[5], xy[6] = (cx - 12 * k, cy - 20 * k), (cx + 12 * k, cy - 20 * k)
+    xy[11], xy[12] = (cx - 8 * k, cy + 20 * k), (cx + 8 * k, cy + 20 * k)
+    xy[9], xy[10] = (cx - 24 * k - ext[0], cy - 4 * k), (cx + 24 * k + ext[1], cy - 4 * k)
+    return xy, np.array([cx - 28 * k, cy - 52 * k, cx + 28 * k, cy + 56 * k], float)
 
 
 class Scene:
@@ -76,8 +77,8 @@ class Scene:
     def __init__(self, n=N):
         self.n, self.people = n, {}
 
-    def add(self, name, path, frags, bursts=()):
-        self.people[name] = {"path": path, "frags": frags, "bursts": list(bursts)}
+    def add(self, name, path, frags, bursts=(), k=1.0):
+        self.people[name] = {"path": path, "frags": frags, "bursts": list(bursts), "k": k}
         return self
 
     def ext(self, name, f):
@@ -96,7 +97,7 @@ class Scene:
             for tid, f0, f1 in p["frags"]:
                 for f in range(f0, f1 + 1):
                     cx, cy = p["path"](f)
-                    xy, box = pose(cx, cy, self.ext(name, f))
+                    xy, box = pose(cx, cy, self.ext(name, f), p["k"])
                     rows.append((f, tid, box, xy))
         rows.sort(key=lambda r: (r[0], r[1]))
         k = len(rows)
@@ -1424,6 +1425,172 @@ check("a video whose held-out half has a ring but NO credited punch: share None 
 
 raises("a missing rule file is refused", lambda: olympic_completeness.main(args[:6] + ["--rule", str(tmp / "nope.json")] + args[8:]),
        "no tuned rule")
+
+print("identity continuity: body size is continuous across an ordinary link (S1a)")
+RATIO = LinkParams().max_scale_ratio
+check("the body-size limit is 1.6x, and it is a LinkParams field", RATIO == 1.6 and linking.MAX_SCALE_RATIO == 1.6)
+link_pairs = lambda fs, prm=LinkParams(): {(l.a, l.b) for l in linking.candidate_links(fs, FP, prm)}  # noqa: E731
+check("growing: 40 -> 63.6 px (x1.59) is linked, 40 -> 64.4 px (x1.61) is not",
+      link_pairs([fr(1, 0, 99, 100, scale=40.0), fr(2, 110, 300, 105, scale=63.6)]) == {(1, 2)}
+      and link_pairs([fr(1, 0, 99, 100, scale=40.0), fr(2, 110, 300, 105, scale=64.4)]) == set())
+check("shrinking: 64 -> 40.25 px (x1/1.59) is linked, 64 -> 39.75 px (x1/1.61) is not (the limit is symmetric)",
+      link_pairs([fr(1, 0, 99, 100, scale=64.0), fr(2, 110, 300, 105, scale=40.25)]) == {(1, 2)}
+      and link_pairs([fr(1, 0, 99, 100, scale=64.0), fr(2, 110, 300, 105, scale=39.75)]) == set())
+check("exactly x1.6 either way is linked (the limit is inclusive)",
+      link_pairs([fr(1, 0, 99, 100, scale=40.0), fr(2, 110, 300, 105, scale=64.0)]) == {(1, 2)}
+      and link_pairs([fr(1, 0, 99, 100, scale=64.0), fr(2, 110, 300, 105, scale=40.0)]) == {(1, 2)})
+check("the limit is the parameter, not a literal: 1.2 admits x1.19 and refuses x1.21",
+      link_pairs([fr(1, 0, 99, 100, scale=40.0), fr(2, 110, 300, 105, scale=47.6)], LinkParams(max_scale_ratio=1.2)) == {(1, 2)}
+      and link_pairs([fr(1, 0, 99, 100, scale=40.0), fr(2, 110, 300, 105, scale=48.4)], LinkParams(max_scale_ratio=1.2)) == set())
+st_sc = {}
+linking.candidate_links([fr(1, 0, 99, 100, scale=40.0), fr(2, 110, 300, 105, scale=64.4), fr(3, 110, 300, 105, scale=63.6)],
+                        FP, stats=st_sc)
+check("the refusals are counted: 1 -> 2 (x1.61) is the only link the scale rule alone refused (1 -> 3 passes)",
+      st_sc == {"scale_rejected": 1}, str(st_sc))
+st_far = {}
+linking.candidate_links([fr(1, 0, 99, 100, scale=40.0), fr(2, 124, 300, 1000, scale=90.0)], FP, stats=st_far)
+check("... and a link the SPEED rule already refuses is not counted as a scale refusal", st_far == {"scale_rejected": 0}, str(st_far))
+check("re-acquisition links are NOT held to the limit: a 6 s gap with x2 (and x3) body size is still a candidate",
+      link_pairs([fr(1, 0, 99, 100, scale=40.0), fr(2, 400, 600, 900, scale=80.0)], RE) == {(1, 2)}
+      and link_pairs([fr(1, 0, 99, 100, scale=120.0), fr(2, 400, 600, 900, scale=40.0)], RE) == {(1, 2)})
+check("... while the same x2 over an ORDINARY gap is refused with re-acquisition on too",
+      link_pairs([fr(1, 0, 99, 100, scale=40.0), fr(2, 110, 300, 105, scale=80.0)], RE) == set())
+cost_far = linking.candidate_links([fr(1, 0, 99, 100, scale=40.0), fr(2, 400, 600, 900, scale=40.0)], FP, RE)[0].cost
+cost_big = linking.candidate_links([fr(1, 0, 99, 100, scale=40.0), fr(2, 400, 600, 900, scale=80.0)], FP, RE)[0].cost
+check("... and a re-acquisition link keeps its price: x2 body size costs exactly the soft 2 x ln 2 more",
+      abs((cost_big - cost_far) - 2.0 * np.log(2.0)) < 1e-9, str(cost_big - cost_far))
+
+print("identity continuity: a still person is not a connector (S1b)")
+check("the stillness constants are 0.5 s and 0.15 body lengths", LinkParams().still_min_s == 0.5 and LinkParams().still_bl == 0.15)
+base_f = Fragment(9, 0, 99, 100, (100, 100), (100, 100), 40.0, True, ring_share=1.0, punches=0, spread_bl=0.0)
+check("spread 0.149 is static and spread 0.151 is not (strictly below 0.15)",
+      linking.is_static(dataclasses.replace(base_f, spread_bl=0.149), FP)
+      and not linking.is_static(dataclasses.replace(base_f, spread_bl=0.151), FP)
+      and not linking.is_static(dataclasses.replace(base_f, spread_bl=0.15), FP))
+check("a fragment observed for 24 rows (0.48 s) is never static, however still; 25 rows (0.5 s) can be",
+      not linking.is_static(dataclasses.replace(base_f, n_rows=24, last=23), FP)
+      and linking.is_static(dataclasses.replace(base_f, n_rows=25, last=24), FP))
+check("a still fragment WITH a credited punch is never static and stays eligible",
+      not linking.is_static(dataclasses.replace(base_f, punches=1), FP) and linking.eligible(dataclasses.replace(base_f, punches=1), FP)
+      and linking.is_static(base_f, FP) and not linking.eligible(base_f, FP))
+check("an unmeasured spread (the default, inf) is never still: hand-built fragments are unaffected",
+      Fragment(1, 0, 99, 100, (0, 0), (0, 0), 40.0, True, 1.0, 0).spread_bl == float("inf")
+      and linking.eligible(Fragment(1, 0, 99, 100, (0, 0), (0, 0), 40.0, True, 1.0, 0), FP))
+check("the stillness limits are the parameters: 0.3 s / 0.3 BL admits a 15-row fragment of spread 0.25, the defaults do not",
+      linking.is_static(dataclasses.replace(base_f, n_rows=15, last=14, spread_bl=0.25), FP, LinkParams(still_min_s=0.3, still_bl=0.3))
+      and not linking.is_static(dataclasses.replace(base_f, n_rows=15, last=14, spread_bl=0.25), FP))
+# spread_bl as MEASURED from a table: a motionless person is 0.0; a walker covering 100 px in 100 frames is the p90 of |f - 49.5|
+walk = Scene(300).add("w", lambda f: (100.0 + f, 200.0), [(1, 0, 99)]).add("s", lambda f: (300.0, 200.0), [(2, 0, 99)])
+fw, _ = linking.summarise_fragments(walk.table())
+sp = {f.tid: f.spread_bl for f in fw}
+check("spread_bl measured: a motionless box is 0.0 body lengths; a walker covering 100 px is 44.55 px / 40 = 1.114",
+      sp[2] == 0.0 and abs(sp[1] - 44.55 / 40.0) < 0.01, str(sp))
+# one flickering box among 50 does not make a statue move (90th percentile, not the maximum)
+flick = Scene(300).add("s", lambda f: (300.0 + (60.0 if f == 25 else 0.0), 200.0), [(1, 0, 49)])
+check("one outlying box in 50 leaves the spread at 0.0 (robust to a flicker): the statue is still static",
+      linking.summarise_fragments(flick.table())[0][0].spread_bl == 0.0)
+
+# --- scenes: one boxer with a 3 s hole and a figure inside the ring during the hole -----------------
+HOLE_A = [(1, 0, 299), (2, 450, 799)]          # a 151-frame (3.02 s) hole, beyond MAX_GAP_S = 2 s
+
+
+def stone_scene(figure_path, figure_k, figure_frags=((31, 305, 445),), connector=False):
+    s_ = Scene(800).add("A", sway(230, 200, 200), HOLE_A)
+    if connector:
+        s_.add("conn", sway(230, 200, 200), [(31, 330, 420)])
+    else:
+        s_.add("fig", figure_path, list(figure_frags), k=figure_k)
+    return s_
+
+
+def run_stone(s_, params=LinkParams()):
+    t_ = s_.table()
+    ev_ = s_.punches(("A",), 6)
+    at_ = olympic.attribute(ev_, t_)
+    return t_, at_, linking.link_video(t_, at_, params)
+
+
+print("identity continuity: the stepping-stone scene (a still, small, punch-free figure inside the ring during a 3 s hole)")
+t_st, a_st, lk_st = run_stone(stone_scene(lambda f: (245.0, 205.0), 0.45))
+fst = {f.tid: f for f in lk_st.fragments}
+check("setup: the figure is 18 px of body (0.45x), motionless (spread 0.0), punch-free, inside the ring; the boxer parts 40 px",
+      abs(fst[31].scale - 18.0) < 1e-6 and fst[31].spread_bl == 0.0 and fst[31].punches == 0 and fst[31].ring_share == 1.0
+      and fst[1].punches >= 3 and fst[2].punches >= 3 and abs(fst[1].scale - 40.0) < 1e-6, str(fst[31]))
+check("the figure is flagged static and kept out; the boxer fragments are not static",
+      fst[31].static and not fst[1].static and not fst[2].static and lk_st.static_excluded == 1)
+check("the boxer parts are NOT joined across the 3 s hole: a second chain begins, exactly ((1,), (2,)); the figure is in neither",
+      lk_st.identities == ((1,), (2,)) and 31 not in lk_st.ids(0) | lk_st.ids(1), str(lk_st.identities))
+t_sr, a_sr, lk_sr = run_stone(stone_scene(lambda f: (245.0, 205.0), 0.45), LinkParams(reacquire_s=60.0))
+check("with re-acquisition the two boxer parts ARE joined, by a re-acquisition link: exactly ((1, 2), ()); the figure is still not in it",
+      lk_sr.identities == ((1, 2), ()) and 31 not in lk_sr.ids(0), str(lk_sr.identities))
+st_sum = linking.summarise(lk_st, a_st)
+check("summarise reports the stillness exclusion (1 flagged, 1 kept out) and no scale refusal here (the figure is not a candidate)",
+      st_sum["static_fragments"] == 1 and st_sum["static_excluded"] == 1 and st_sum["links_rejected_scale"] == 0, str(st_sum))
+
+print("... S1a on its own: a MOVING small figure (not static) is refused by the body-size rule")
+mover = lambda f: (230.0 + 30.0 * np.sin(f / 11.0), 205.0)  # noqa: E731
+t_ms, a_ms, lk_ms = run_stone(stone_scene(mover, 0.45))
+fms = {f.tid: f for f in lk_ms.fragments}
+check("setup: the small figure moves (spread >= 0.15) so the stillness rule does not touch it",
+      fms[31].spread_bl > 0.15 and not fms[31].static and lk_ms.static_excluded == 0, str(fms[31].spread_bl))
+check("it is not a stepping stone: exactly ((1,), (2,)), the figure in neither identity",
+      lk_ms.identities == ((1,), (2,)), str(lk_ms.identities))
+sum_ms = linking.summarise(lk_ms, a_ms)
+check("two links were refused by the scale rule alone: 1 -> 31 and 31 -> 2", sum_ms["links_rejected_scale"] == 2, str(sum_ms))
+t_mr, a_mr, lk_mr = run_stone(stone_scene(mover, 0.45), LinkParams(reacquire_s=60.0))
+check("with re-acquisition: the boxer parts are joined directly ((1, 2), ()) and the moving small figure is not included",
+      lk_mr.identities == ((1, 2), ()), str(lk_mr.identities))
+lk_ms_loose = run_stone(stone_scene(mover, 0.45), LinkParams(max_scale_ratio=3.0))[2]
+check("... and with the limit opened to x3 the same figure IS a stepping stone: ((1, 31, 2), ()) - the rule is what blocked it",
+      lk_ms_loose.identities == ((1, 31, 2), ()), str(lk_ms_loose.identities))
+
+print("... S1b on its own: a still FULL-SIZE figure (same body size, so the size rule is silent) is not a connector either")
+t_fs, a_fs, lk_fs = run_stone(stone_scene(lambda f: (245.0, 205.0), 1.0))
+check("exactly ((1,), (2,)); the still figure is flagged static and kept out; no scale refusal",
+      lk_fs.identities == ((1,), (2,)) and lk_fs.static_excluded == 1 and linking.summarise(lk_fs, a_fs)["links_rejected_scale"] == 0,
+      str(lk_fs.identities))
+lk_fs_off = run_stone(stone_scene(lambda f: (245.0, 205.0), 1.0), LinkParams(still_bl=0.0))[2]
+check("... with the stillness limit at 0 the same figure IS a stepping stone: ((1, 31, 2), ()) - the rule is what blocked it",
+      lk_fs_off.identities == ((1, 31, 2), ()), str(lk_fs_off.identities))
+
+print("... what must survive: a MOVING punch-free connector of the boxer own size still bridges the hole")
+t_cn, a_cn, lk_cn = run_stone(stone_scene(None, 1.0, connector=True))
+f_cn = {f.tid: f for f in lk_cn.fragments}
+check("the boxer, a punch-free connector of the same body size moving along the boxer own path, and the second part: one chain ((1, 31, 2), ())",
+      lk_cn.identities == ((1, 31, 2), ()) and f_cn[31].punches == 0 and not f_cn[31].static, str(lk_cn.identities))
+# ... and the same connector, standing perfectly still for its 1.8 s, is no connector
+still_conn = Scene(800).add("A", sway(230, 200, 200), HOLE_A).add("conn", lambda f: (230.0, 200.0), [(31, 330, 420)])
+t_c2 = still_conn.table()
+a_c2 = olympic.attribute(still_conn.punches(("A",), 6), t_c2)
+lk_c2 = linking.link_video(t_c2, a_c2)
+check("(a punch-free fragment that does not move for 1.8 s is static) -> ((1,), (2,)) again",
+      lk_c2.identities == ((1,), (2,)), str(lk_c2.identities))
+# a short still fragment (0.4 s = 20 rows) cannot be judged, so it can still connect
+short_conn = Scene(800).add("A", sway(230, 200, 200), HOLE_A).add("conn", lambda f: (230.0, 200.0), [(31, 360, 379)])
+t_c3 = short_conn.table()
+lk_c3 = linking.link_video(t_c3, olympic.attribute(short_conn.punches(("A",), 6), t_c3))
+fc3 = {f.tid: f for f in lk_c3.fragments}
+check("a still fragment observed for only 0.4 s cannot be judged: not static, so it can still bridge the 3 s hole",
+      not fc3[31].static and fc3[31].spread_bl == 0.0 and lk_c3.identities == ((1, 31, 2), ()), str((lk_c3.identities, fc3[31])))
+
+print("identity continuity: the new parameters are validated")
+for nm, bad in [("max_scale_ratio", float("nan")), ("max_scale_ratio", 1.0), ("max_scale_ratio", 0.5),
+                ("max_scale_ratio", float("inf")), ("max_scale_ratio", True), ("still_min_s", float("nan")),
+                ("still_min_s", 0.0), ("still_min_s", -0.5), ("still_min_s", float("inf")), ("still_bl", float("nan")),
+                ("still_bl", -0.1), ("still_bl", float("inf"))]:
+    raises(f"{nm}={bad!r} is refused", lambda nm=nm, bad=bad: LinkParams(**{nm: bad}), nm)
+check("... and the boundary values are accepted: ratio just above 1, still_bl 0 (rule off)",
+      LinkParams(max_scale_ratio=1.0001).max_scale_ratio == 1.0001 and LinkParams(still_bl=0.0).still_bl == 0.0)
+
+print("identity continuity: olympic_link.py reports the two rules")
+vrow = lu["videos"]["task_kam2_gh000001"]
+check("the per-video row carries whole-number static / scale-refusal counts, and the pool is their sum",
+      all(isinstance(vrow[k_], int) and vrow[k_] >= 0 for k_ in ("static_fragments", "static_excluded", "links_rejected_scale"))
+      and lu["all"]["static_excluded"] == sum(r_["static_excluded"] for r_ in lu["videos"].values())
+      and lu["all"]["links_rejected_scale"] == sum(r_["links_rejected_scale"] for r_ in lu["videos"].values())
+      and lu["all"]["static_fragments"] == sum(r_["static_fragments"] for r_ in lu["videos"].values())
+      and lu["all"]["median_static_excluded"] == vrow["static_excluded"], str((vrow, lu["all"])))
+check("... and the console says it", "static kept out" in bufu.getvalue() and "body-size rule" in bufu.getvalue(), bufu.getvalue())
 
 print("summarise: no credited punch is no measurement (None), never 0%")
 from types import SimpleNamespace  # noqa: E402
