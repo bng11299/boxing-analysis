@@ -3,12 +3,18 @@
     python train_classifier.py --data data --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth
 
 This is the reported model, not a new one: ST-GCN++ fine-tuned from the pinned
-NTU-120 checkpoint, seed 0, 30 epochs, t_out 50, on the video-disjoint training
-side (V2/V5/V9 held out), through the SAME function run_baseline.py scores
-(`run_stgcnpp`). It refuses to write a manifest unless the held-out accuracy and
-macro F1 it just measured equal the reported run's (results/stgcnpp.json, 0.8145
-/ 0.7207 on seed 0), because a saved model that does not reproduce the reported
-number is a different model under the same name.
+NTU-120 checkpoint, seed 0, t_out 50, on the video-disjoint training side
+(V2/V5/V9 held out), through the SAME function run_baseline.py scores
+(`run_stgcnpp`), for the number of epochs the reference run RECORDS (20 for the
+seed-0 sweep run, results/sweep-2026-09-22/seed0.json). It refuses to write a
+manifest unless the held-out accuracy and macro F1 it just measured equal the
+reference's (0.8145 / 0.7207), because a saved model that does not reproduce the
+reported number is a different model under the same name.
+
+Why the reference must record its epochs: results/stgcnpp.json (09-16) has
+`epochs: 30` for the other arms and no `stgcnpp_epochs`, while its log shows
+ST-GCN++ ran 20. Reading the missing field as "same as epochs" trained 30 epochs
+and scored 0.7951 / 0.7141 (2026-10-09); this script refused to save it.
 
 The manifest also carries the window geometry (classify.training_geometry),
 measured on the training clips only, with the wrist-speed variant the punch
@@ -35,23 +41,27 @@ from run_baseline import run_stgcnpp  # noqa: E402
 
 SPEC = "ntu120_xsub_hrnet_j"
 DEFAULT_OUT = Path("weights/classifier/stgcnpp-boxingvi-seed0.pt")
-DEFAULT_REFERENCE = Path("results/stgcnpp.json")
+DEFAULT_REFERENCE = Path("results/sweep-2026-09-22/seed0.json")
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
 TOL = 1e-9
 
 
-def reference_metrics(path: Path, seed: int, epochs: int, t_out: int) -> dict:
-    """The reported run this one must reproduce, checked to be the same recipe."""
+def reference_metrics(path: Path, seed: int, t_out: int) -> dict:
+    """The reported run this one must reproduce, checked to be the same recipe.
+    Returns its metrics and the ST-GCN++ epochs it recorded."""
     d = json.loads(path.read_text(encoding="utf-8"))
-    if (d.get("seed") != seed or d.get("epochs") != epochs or d.get("stgcnpp_epochs") not in (None, epochs)
-            or d.get("balanced") or d.get("include_v6")):
-        raise ValueError(f"{path} is not a seed-{seed}, {epochs}-epoch, unbalanced, V6-excluded run")
+    if d.get("seed") != seed or d.get("balanced") or d.get("include_v6"):
+        raise ValueError(f"{path} is not a seed-{seed}, unbalanced, V6-excluded run")
+    epochs = d.get("stgcnpp_epochs")
+    if isinstance(epochs, bool) or not isinstance(epochs, int) or not 1 <= epochs <= 1000:
+        raise ValueError(f"{path} does not record its ST-GCN++ epochs (stgcnpp_epochs={epochs!r}); "
+                         "a reference that does not say how it was trained cannot be reproduced")
     r = [r for r in d["results"] if r.get("model") == "st-gcn++ pretrained"]
     if len(r) != 1:
         raise ValueError(f"{path} has no single 'st-gcn++ pretrained' result")
     if r[0].get("t_out") != t_out or (r[0].get("pretrained_from") or {}).get("sha256") != PRETRAINED[SPEC]["sha256"]:
         raise ValueError(f"{path}: the reported run used another t_out or another pretrained checkpoint")
-    return {"accuracy": r[0]["accuracy"], "macro_f1": r[0]["macro_f1"]}
+    return {"accuracy": r[0]["accuracy"], "macro_f1": r[0]["macro_f1"], "epochs": epochs}
 
 
 def main(argv=None) -> int:
@@ -67,7 +77,7 @@ def main(argv=None) -> int:
                     help="print the window geometry and stop (no training)")
     a = ap.parse_args(argv)
 
-    seed, epochs, t_out = 0, 30, 50
+    seed, t_out = 0, 50
     variant = json.loads(a.rule.read_text(encoding="utf-8"))["chosen"]["variant"]
     clips = load_corpus(a.data)
     train, val = split_by_video(clips)
@@ -77,7 +87,9 @@ def main(argv=None) -> int:
     if a.geometry_only:
         return 0
 
-    ref = reference_metrics(a.reference, seed, epochs, t_out)
+    ref = reference_metrics(a.reference, seed, t_out)
+    epochs = ref["epochs"]
+    print(f"reproducing {a.reference.as_posix()}: seed {seed}, {epochs} epochs, t_out {t_out}")
     xtr, ytr = to_arrays(train)
     xva, yva = to_arrays(val)
     a.out.parent.mkdir(parents=True, exist_ok=True)

@@ -410,6 +410,29 @@ raises("punches: an unknown hand is refused", punches_with(hdr + f"600,{600 / fp
 raises("punches: a short row is refused", punches_with(hdr + "600,10.009\n"))
 raises("punches: an unknown interpolation flag is refused", punches_with(hdr + f"600,{600 / fps:.3f},left,1.0,maybe\n"))
 
+print("train_classifier reproduces only a reference that records how it was trained")
+import train_classifier  # noqa: E402
+from boxingvi.stgcnpp import PRETRAINED  # noqa: E402
+
+good_run = {"model": "st-gcn++ pretrained", "accuracy": 0.8, "macro_f1": 0.7, "t_out": 50,
+            "pretrained_from": {"sha256": PRETRAINED[train_classifier.SPEC]["sha256"]}}
+
+
+def reference(**top):
+    p = tmp / "ref.json"
+    p.write_text(json.dumps({"seed": 0, "balanced": False, "include_v6": False, "epochs": 30,
+                             "results": [good_run], **top}), encoding="utf-8")
+    return p
+
+
+check("the epochs come from the reference's stgcnpp_epochs, not its epochs",
+      train_classifier.reference_metrics(reference(stgcnpp_epochs=20), 0, 50)["epochs"] == 20)
+raises("a reference without stgcnpp_epochs is refused (the 09-16 file: 30 for the other arms, 20 for ST-GCN++)",
+       lambda: train_classifier.reference_metrics(reference(), 0, 50))
+raises("another seed is refused", lambda: train_classifier.reference_metrics(reference(stgcnpp_epochs=20, seed=1), 0, 50))
+raises("another pretrained checkpoint is refused", lambda: train_classifier.reference_metrics(
+    reference(stgcnpp_epochs=20, results=[{**good_run, "pretrained_from": {"sha256": "0" * 64}}]), 0, 50))
+
 print("run_baseline saves the model it scored")
 from run_baseline import run_stgcnpp  # noqa: E402
 
