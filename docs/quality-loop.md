@@ -1192,7 +1192,7 @@ refusals leave no output behind.
 pooled (one every 1.9 s), per video 22.1 (GH089681) to 50.4 (GH128416) per minute, median 32.8; the smallest per-video median change is
 1.04 grey levels. Wall time: 5,560 s summed over videos (1.5 h of CPU-bound decoding at ~10-20 ms a frame, measured with up to four of
 these running at once beside another job on the same machine; GH069681 alone, 13,800 frames, took 147 s). Two videos were measured twice
-by two of the parallel processes (a race on the output name, harmless: atomic replace, same content).
+by two of the parallel processes (a race on the output name; Iteration 3 corrects the claim that this was harmless: both writers happened to produce the same content and neither failed, but the shared temporary name was a bug, now fixed).
 
 | Quantity (`--credited`) | min 1, b912027 | min 1, `--skips` | min 2, b912027 | min 2, `--skips` |
 |---|---|---|---|---|
@@ -1413,3 +1413,116 @@ check. (4) A false skip (a real, sudden body movement that the image-change rule
 segment; the rule's 3x ratio is one observation's, so the number of real punches lost to false skips is unmeasured. (5) Peaks
 suppressed by the 0.4 s minimum gap in the no-skip run reappear (as for GH199681 9937 above), so some "dropped" rows are
 reshuffles, not skip artefacts. (6) The Iteration-1 residual risks 2-7 stand.
+
+
+### Iteration 3 -- Astra 6 review of `feat/frame-skips` (2026-10-09; verdict FIX FIRST: 3 blocking, 3 smaller)
+
+| # | Finding | Fix | Evidence |
+|---|---|---|---|
+| B1 blocking | `detect()` applied the 0.4 s minimum gap BEFORE the eligibility filter: an ineligible peak just outside the zeroed zone (a flank at 204 for a skip at 200) could suppress a real, eligible one within 20 frames and then be discarded itself, losing a burst while its exposure stayed (understating the rate). The burst-in-exposure assertion cannot see a missing burst | `punchfind.detect(..., eligible=None)`: ineligible frames keep their true signal as neighbours in the peak test but are not candidates; only the eligible local maxima compete in the minimum-gap suppression (the same scipy suppression, run on their heights). `_scan_segments` passes `~gone` and no longer filters afterwards. `eligible=None` is the original line, untouched | Regression: skip at 200, a strong punch hidden under the mask whose return lobe peaks at the ineligible 204, a weaker real punch at 212: without skips bursts at 62 and 204 only (212 suppressed), with skips 62 and 215 (the weak punch's burst), in the exposure. The all-eligible path equals the plain call on the scene and on 200 random signals with plateaus and ties; marking only 204 ineligible removes the burst there and nothing else |
+| B2 blocking | A framechange file bound to the right video but measured with pixel step 8 passed (only ratio and window were compared) and the report said step 4 | `load_skips` requires ratio, half window AND pixel step to equal this code's, naming all three in the refusal | step 8 and half window 5 refused (exit 2, nothing written), beside the existing ratio 2.0 |
+| B3 blocking | A skipcheck sample row naming frame 999999 of a processed 1,500-frame video was reported as an ordinary "false" | `skipcheck_rows` takes each processed video's length and requires `0 <= frame < length`, and that the video was processed; the run stops before any output | frames 400, 999999 and 10^12 of a 400-frame video refused; 0 and 399 accepted; the CLI with a row at 999999 stops with no output file |
+| N1 | `Skips.save` used one shared `<name>.part`: concurrent writers could truncate each other's temporary file or fail at the rename; the "harmless" claim in Iteration 1 was unjustified | a `NamedTemporaryFile` of its own in the destination directory, then `os.replace`, retried a few times on the `PermissionError` Windows raises when two writers replace one destination in the same instant | eight threads saving one path 15 times each: no failure, the file is one writer's complete content, nothing left behind. The shared name fails this test (a PermissionError). Correction: in the Iteration-1 run two videos were measured by two processes at once and neither failed, but that was luck, not a property |
+| N2 | The distance-bin computation behind the gate table was not in the repo | `completeness.distance_bins` / `bin_rates` / `pool_bins`; `--skips` and `--skips-measure` write `skip_bins` per video and pooled into the json and print the per-bin line with the gate verdict | exact bin assignment and exposure counts on a planted video, nearest of two skips, the gate at exactly +-25% and each way of failing; both CLI modes end to end. `--skips-measure` reproduces the "no skips" columns of every earlier table to the frame (checked: same counts as the script that made them) |
+| N3 | The pooling test used identical rows and could not tell pooling from averaging per-video shares | two UNEQUAL videos | pooled 5 of 33 (15.2%) and base rate 30 of 1,650 (1.8%); the mean of the per-video shares would be 38.3% and 4.0% |
+
+**`skips=None` is bit-for-bit unchanged: how it was verified.** (1) `detect` with `eligible=None` is the original `find_peaks(..., height,
+distance)` line; the new branch is only taken when an eligibility array is passed, and `_scan_segments` passes one only when skips
+exist. (2) Every pre-existing check passes unchanged (counts below). (3) On the real data, `olympic_completeness.py --credited` and
+`--credited --min-punches 2` WITHOUT skips were re-run to scratch paths and compared with the existing
+`olympic_completeness_credited.json` / `_min2.json`: byte-identical except the one line that records the output file name; the min-1
+sample csv is byte-identical to the existing one. (4) `--skips-measure` (bursts and exposure from the unmasked path) reproduces the
+earlier "no skips" bin counts exactly.
+
+**Real data after the fixes (`--credited`, mask run).** B1 gives back bursts the old order had lost, so more bursts, a slightly
+higher rate and a mildly higher near-skip rate than Iteration 2 reported:
+| Quantity | min 1, Iteration 2 | min 1, Iteration 3 | min 2, Iteration 2 | min 2, Iteration 3 |
+|---|---|---|---|---|
+| bursts | 8,969 | 9,157 | 5,589 | 5,700 |
+| unexplained | 6,366 | 6,502 | 3,803 | 3,881 |
+| explained | 2,603 | 2,655 | 1,786 | 1,819 |
+| exposure minutes | 147.37 | 147.37 | 88.07 | 88.07 |
+| **unexplained per exposure minute** | **43.20** | **44.12** | **43.18** | **44.07** |
+| (no skips, b912027) | 45.35 | 45.35 | 45.21 | 45.21 |
+| bursts per exposure minute | 60.86 | 62.14 | 63.46 | 64.72 |
+| `possible_duplicates` | 123 | 127 | 52 | 54 |
+
+The unexplained rate now falls 2.7% (min 1) and 2.5% (min 2) from the no-skip rate. The exposure is unchanged (B1 changes which peaks
+survive, not which frames count).
+
+**The bin tables, re-run from the repo**
+
+Unexplained bursts per 1,000 exposure frames by distance to the nearest skip, `--credited` min 1 (count / exposure frames; x = ratio to the >25 rate)
+
+| Distance (frames) | no skips (`--skips-measure`) | mask, Iteration 2 | mask, Iteration 3 (B1 fixed) |
+|---|---|---|---|
+| 0-2 | 48.3 (1113/23,032) x3.36 | empty (masked) | empty (masked) |
+| 3-5 | 12.9 (358/27,783) x0.90 | 16.4 (149/9,091) x1.14 | 16.6 (151/9,091) x1.16 |
+| 6-10 | 11.4 (519/45,600) x0.79 | 14.9 (674/45,372) x1.04 | 16.2 (736/45,372) x1.13 |
+| 11-25 | 12.2 (1352/110,943) x0.85 | 14.2 (1578/110,927) x0.99 | 14.9 (1657/110,927) x1.04 |
+| >25 | 14.4 (3976/276,726) x1.00 | 14.3 (3965/276,726) x1.00 | 14.3 (3958/276,726) x1.00 |
+
+Explained bursts per 1,000 exposure frames by distance to the nearest skip, `--credited` min 1 (count / exposure frames; x = ratio to the >25 rate)
+
+| Distance (frames) | no skips (`--skips-measure`) | mask, Iteration 2 | mask, Iteration 3 (B1 fixed) |
+|---|---|---|---|
+| 0-2 | 9.1 (209/23,032) x1.51 | empty (masked) | empty (masked) |
+| 3-5 | 4.0 (112/27,783) x0.67 | 4.5 (41/9,091) x0.76 | 4.5 (41/9,091) x0.76 |
+| 6-10 | 4.4 (199/45,600) x0.73 | 6.0 (273/45,372) x1.01 | 6.7 (306/45,372) x1.13 |
+| 11-25 | 5.2 (578/110,943) x0.87 | 5.8 (638/110,927) x0.96 | 5.9 (657/110,927) x0.99 |
+| >25 | 6.0 (1661/276,726) x1.00 | 6.0 (1651/276,726) x1.00 | 6.0 (1651/276,726) x1.00 |
+
+Unexplained bursts per 1,000 exposure frames by distance to the nearest skip, `--credited` min 2 (count / exposure frames; x = ratio to the >25 rate)
+
+| Distance (frames) | no skips (`--skips-measure`) | mask, Iteration 2 | mask, Iteration 3 (B1 fixed) |
+|---|---|---|---|
+| 0-2 | 47.4 (624/13,163) x3.32 | empty (masked) | empty (masked) |
+| 3-5 | 13.7 (216/15,815) x0.96 | 16.7 (86/5,163) x1.17 | 16.9 (87/5,163) x1.19 |
+| 6-10 | 11.2 (291/25,936) x0.79 | 14.8 (382/25,816) x1.04 | 16.3 (422/25,816) x1.15 |
+| 11-25 | 12.4 (790/63,683) x0.87 | 14.5 (923/63,679) x1.02 | 15.2 (966/63,679) x1.07 |
+| >25 | 14.3 (2421/169,557) x1.00 | 14.2 (2412/169,557) x1.00 | 14.2 (2406/169,557) x1.00 |
+
+Explained bursts per 1,000 exposure frames by distance to the nearest skip, `--credited` min 2 (count / exposure frames; x = ratio to the >25 rate)
+
+| Distance (frames) | no skips (`--skips-measure`) | mask, Iteration 2 | mask, Iteration 3 (B1 fixed) |
+|---|---|---|---|
+| 0-2 | 10.4 (137/13,163) x1.49 | empty (masked) | empty (masked) |
+| 3-5 | 4.5 (71/15,815) x0.64 | 4.6 (24/5,163) x0.67 | 4.6 (24/5,163) x0.67 |
+| 6-10 | 4.9 (127/25,936) x0.70 | 6.9 (177/25,816) x0.99 | 7.5 (194/25,816) x1.08 |
+| 11-25 | 5.8 (367/63,683) x0.83 | 6.4 (408/63,679) x0.92 | 6.7 (425/63,679) x0.96 |
+| >25 | 7.0 (1183/169,557) x1.00 | 6.9 (1177/169,557) x1.00 | 6.9 (1176/169,557) x1.00 |
+
+
+**The gate, re-run from the repo (`skip_bins` in the json; the gate chose the design, so a PASS is a check on it, not independent
+evidence).** Unexplained, ratio to the >25 rate in 3-5 / 6-10 / 11-25: min 1 **1.16 / 1.13 / 1.04 PASS** (Iteration 2: 1.14 / 1.04 /
+0.99), min 2 **1.19 / 1.15 / 1.07 PASS** (1.17 / 1.04 / 1.02); 0-2 empty. All within +-25%, but the 6-10 bin moved up by 9-11 points: part
+of what Iteration 2 reported as agreement with the far field was the B1 loss. The explained bursts at 6-10 are now 1.13x (min 1) and
+1.08x (min 2) as well. The 3-5 bin holds one offset (5 frames) and about 150 (min 1) and 87 (min 2) bursts.
+
+**Brendan's four GH069681 rows (min 2).** Unchanged: 1287 / 64 gone, 7018 / 1203 gone, 1965 / 253 still an unexplained burst, 13293 /
+2268 still an unexplained burst. **Skipcheck:** 29 true, 11 false, row for row the same as in Iteration 2 (the ten false rows inside
+the removed frames at 0-4 frames, and GH199681 9937 which is the minimum-gap reshuffle explained there).
+
+**Tests.** `test_frame_skips.py` 222 (189 before); `test_completeness_credited.py` 95, `test_linking.py` 266, `test_pipeline.py` 260,
+`test_ingest.py` 124, `test_tracks.py` 79, `test_labels.py` 50, `test_hands.py` 38, `test_env.py` 36, `test_olympic.py` 33: all
+unchanged and passing.
+
+**Mutation check (scratch copy; `test_frame_skips.py` must fail)**
+| # | Mutation | Result |
+|---|---|---|
+| B1 | filter after suppression restored (ineligible peaks suppress, then are discarded) | caught, 1 (the 212 regression) |
+| B1b | `detect` does not pre-filter its candidates | caught: the in-code exposure assertion raises (a burst outside the exposure) |
+| B2 | the decimation step (and the other constants) not compared | caught, 6 |
+| B2b | only ratio and half window compared | caught, 6 (the step 8 file passes) |
+| B3 | sample frame not checked against the video length | caught, 4 |
+| B3b | a sample row of an unprocessed video accepted | caught, 2 |
+| N1 | shared `.part` name restored | caught, 1 (a PermissionError among the eight writers) |
+| N2a | bin edges exclusive | caught, 5 |
+| N2b | distance to the previous skip only | caught, 5 |
+| N2c | gate ignores the 0-2 bin | caught, 1 |
+| N3 | pooled shares replaced by the mean of per-video shares | caught, 2 |
+
+**Residual risks added.** (1) The distance-bin gate and the design were fixed on the same data (declared before); a held-out video
+set would be the independent test. (2) `Skips.save`'s retry covers the Windows rename race, not two writers with different content
+deciding which one wins: the last replace wins, and the file is always one writer's complete content. (3) A plateau that straddles
+the edge of the removed range is reported at its midpoint; if that frame is ineligible the plateau yields no burst.
