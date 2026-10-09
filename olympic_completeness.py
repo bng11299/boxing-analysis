@@ -116,7 +116,7 @@ class SkipsRefused(ValueError):
 
 def load_skips(a, task, table) -> "skipmod.Skips | None":
     """The verified Skips of one video when --skips / --skips-measure is on, else None. Refuses (SkipsRefused)
-    a missing, malformed or mismatched file, or one made with other constants than this code's."""
+    a missing, malformed or mismatched file, or one measured with another ratio, window or pixel step than this code's."""
     if not (a.skips or a.skips_measure):
         return None
     f = a.tracks / f"{task.video.stem}.framechange.npz"
@@ -125,9 +125,9 @@ def load_skips(a, task, table) -> "skipmod.Skips | None":
         if sk.video_fp != video.fingerprint(task.video):
             raise ValueError("the frame changes were measured on a different file than this video "
                              "(content fingerprints differ)")
-        if (sk.ratio, sk.half_window) != (skipmod.SKIP_RATIO, skipmod.HALF_WINDOW):
-            raise ValueError(f"made with ratio {sk.ratio} and half window {sk.half_window}, this code uses "
-                             f"{skipmod.SKIP_RATIO} and {skipmod.HALF_WINDOW}")
+        if (sk.ratio, sk.half_window) != (skipmod.SKIP_RATIO, skipmod.HALF_WINDOW) or sk.step != skipmod.STEP:
+            raise ValueError(f"made with ratio {sk.ratio}, half window {sk.half_window} and pixel step {sk.step}, this code uses "
+                             f"{skipmod.SKIP_RATIO}, {skipmod.HALF_WINDOW} and {skipmod.STEP} (every one of them changes which frames are skips)")
     except (ValueError, OSError) as e:
         raise SkipsRefused(f"{task.video.stem}: {f.name}: {e}") from e
     return sk
@@ -193,15 +193,19 @@ def read_sample(path: Path) -> "list[dict]":
     return rows
 
 
-def skipcheck_rows(rows_in: "list[dict]", bursts_by_video: dict, within: int = completeness.NEAR_SKIP) -> list:
+def skipcheck_rows(rows_in: "list[dict]", bursts_by_video: dict, n_frames_by_video: dict,
+                   within: int = completeness.NEAR_SKIP) -> list:
     """For each row of an earlier sample (video, frame, track_id, hand): is a burst of that track, that hand, within
-    `within` frames still UNEXPLAINED in this run? A row whose video is not in the run is an error, not a False."""
+    `within` frames still UNEXPLAINED in this run? A row whose video was not processed in this run, or whose frame is not
+    a frame of that video (0 <= frame < its length), is an error, never a quiet False."""
     out = []
     for r in rows_in:
         v = r["video"]
-        if v not in bursts_by_video:
+        if v not in bursts_by_video or v not in n_frames_by_video:
             raise ValueError(f"the sample row for {v} frame {r['frame']}: that video is not in this run")
         frame = int(r["frame"])
+        if not 0 <= frame < n_frames_by_video[v]:
+            raise ValueError(f"the sample row for {v} names frame {frame}, but that video has frames 0..{n_frames_by_video[v] - 1}")
         still = any(not b.explained and str(b.track_id) == str(r["track_id"]) and b.hand == r["hand"]
                     and abs(b.frame - frame) <= within for b in bursts_by_video[v])
         out.append([v, r["frame"], r["track_id"], r["hand"], "true" if still else "false"])
@@ -329,7 +333,7 @@ def totals_credited(ok: "list[dict]") -> dict:
 
 
 def _main_credited(a, rule, only) -> int:
-    videos, unexplained, failed, all_bursts = {}, {}, [], {}
+    videos, unexplained, failed, all_bursts, lengths = {}, {}, [], {}, {}
     for t in olympic.find_tasks(a.data):
         vid = t.video.stem
         if (only is not None and vid not in only) or not (a.tracks / f"{vid}.tracks.npz").is_file():
@@ -348,6 +352,7 @@ def _main_credited(a, rule, only) -> int:
             continue
         unexplained[vid] = [b for b in res["bursts"] if not b.explained]
         all_bursts[vid] = res["bursts"]
+        lengths[vid] = table.n_frames
         row = video_row_credited(res, len(events), table.n_frames / table.fps / 60)
         row["video_bound"] = bool(table.video_fp)
         if sk is not None:
@@ -389,7 +394,7 @@ def _main_credited(a, rule, only) -> int:
                     "design": "simple random sample without replacement over all unexplained bursts",
                     "seed": a.seed, "file": str(a.sample_out)}} | ({"skips": skip_json} if skip_json else {}),
         indent=1, allow_nan=False)
-    check_rows = skipcheck_rows(read_sample(a.skipcheck), all_bursts) if a.skipcheck else None
+    check_rows = skipcheck_rows(read_sample(a.skipcheck), all_bursts, lengths) if a.skipcheck else None
     sample_rows = [[b.video, b.frame, f"{b.time_s:.2f}", completeness.mss(b.time_s), b.track_id, f"{b.box[0]:.1f}",
                     f"{b.box[1]:.1f}", f"{b.box[2]:.1f}", b.hand, f"{prob:.6f}", ""] for b in sample]
     a.out.parent.mkdir(parents=True, exist_ok=True)

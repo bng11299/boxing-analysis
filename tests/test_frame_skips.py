@@ -524,17 +524,24 @@ check("with nothing in exposure every share is None (written as null), not a cra
       nobase["base_rate"] is None and nobase["unexplained_near_skip_share"] is None and nobase["unexplained_excess_over_base"] is None)
 
 print("skipcheck_rows: a sampled burst is 'still unexplained' only for the same video, track, hand, within 2 frames, and not explained")
+nfx = {"V": 400, "W": 400}
 bx = {"V": [completeness.Burst("V", 100, 2.0, "1", "left", 5.0, "none", track_id=1),
             completeness.Burst("V", 300, 6.0, "1", "right", 5.0, "own", track_id=1)], "W": []}
 row = lambda frame, tid="1", hand="left", v="V": {"video": v, "frame": str(frame), "track_id": tid, "hand": hand}    # noqa: E731
 got = [r[4] for r in olympic_completeness.skipcheck_rows(
-    [row(100), row(102), row(98), row(103), row(97), row(100, hand="right"), row(100, tid="2"), row(300, hand="right"), row(100, v="W")], bx)]
+    [row(100), row(102), row(98), row(103), row(97), row(100, hand="right"), row(100, tid="2"), row(300, hand="right"), row(100, v="W")], bx, nfx)]
 check("same track and hand: 100, 102 and 98 are still unexplained (true); 103 and 97 are 3 frames off (false)",
       got[:5] == ["true", "true", "true", "false", "false"], str(got))
 check("the other hand, the other track, a burst that is now EXPLAINED, and a video with no burst there are all false",
       got[5:] == ["false", "false", "false", "false"], str(got))
-raises("a sample row of a video that is not in the run is an error, not a quiet false", lambda: olympic_completeness.skipcheck_rows([row(100, v="Z")], bx), "not in this run")
-check("skipcheck_rows keeps video, frame, track_id and hand as given", olympic_completeness.skipcheck_rows([row(100)], bx)[0][:4] == ["V", "100", "1", "left"])
+raises("a sample row of a video that is not in the run is an error, not a quiet false", lambda: olympic_completeness.skipcheck_rows([row(100, v="Z")], bx, nfx), "not in this run")
+check("skipcheck_rows keeps video, frame, track_id and hand as given", olympic_completeness.skipcheck_rows([row(100)], bx, nfx)[0][:4] == ["V", "100", "1", "left"])
+raises("a video that has bursts but no recorded length is an error too (video and length travel together)",
+       lambda: olympic_completeness.skipcheck_rows([row(100)], bx, {}), "not in this run")
+for bad_f in (400, 999999, 10 ** 12):
+    raises(f"a sample row naming frame {bad_f} of a 400-frame video is an error, not a quiet false",
+           lambda f_=bad_f: olympic_completeness.skipcheck_rows([row(f_)], bx, nfx), "frames 0..399")
+check("the first and last frame of the video are valid rows", [r[4] for r in olympic_completeness.skipcheck_rows([row(0), row(399)], bx, nfx)] == ["false", "false"])
 
 # ---------------------------------------------------------------------------------------------------------------------
 print("the CLIs end to end: olympic_framechange.py and olympic_completeness.py --skips / --skips-measure / --skipcheck")
@@ -694,6 +701,8 @@ fcf.write_bytes(before)
 refuse("a framechange file of another video name", lambda: skips.Skips(real.change, "GH000002.mp4", real.video_fp).save(fcf), "pose table for")
 refuse("a framechange file of another length (1499 frames)", lambda: skips.Skips(real.change[:-1], "GH000001.mp4", real.video_fp).save(fcf), "cover 1499")
 refuse("a framechange file measured on another file (fingerprint differs from the video)", lambda: skips.Skips(real.change, "GH000001.mp4", "c" * 64).save(fcf), "fingerprints differ")
+refuse("a framechange file measured with another pixel step (8: positive, bound to the video, but other skips)", lambda: skips.Skips(real.change, "GH000001.mp4", real.video_fp, step=8).save(fcf), "pixel step 8")
+refuse("a framechange file made with another half window", lambda: skips.Skips(real.change, "GH000001.mp4", real.video_fp, half_window=5).save(fcf), "half window 5")
 refuse("a framechange file made with another ratio", lambda: skips.Skips(real.change, "GH000001.mp4", real.video_fp, ratio=2.0).save(fcf), "ratio")
 refuse("a garbage framechange file", lambda: fcf.write_bytes(b"not an npz"), "framechange")
 refuse("a framechange file with a missing field", lambda: np.savez(fcf, change=real.change, n_frames=NC, step=4, ratio=3.0,
@@ -727,6 +736,17 @@ try:
 except ValueError as e:
     ok_raise = "malformed row" in str(e)
 check("a malformed skipcheck input stops the run BEFORE any output is written", ok_raise and not (res / "y.json").exists() and not (res / "y_check.csv").exists())
+beyond = tmp / "beyond.csv"
+beyond.write_text("video,frame,track_id,hand" + chr(10) + "GH000001,999999,1,left" + chr(10), encoding="utf-8")
+try:
+    cli(olympic_completeness, ["--data", str(ds), "--tracks", str(trk), "--rule", str(rule_f), "--credited", "--skips",
+                               "--out", str(res / "z.json"), "--sample-out", str(res / "z.csv"), "--skipcheck", str(beyond),
+                               "--skipcheck-out", str(res / "z_check.csv")])
+    ok_beyond = False
+except ValueError as e:
+    ok_beyond = "frames 0..1499" in str(e)
+check("a sample row for a processed 1,500-frame video naming frame 999999 stops the run BEFORE any output is written",
+      ok_beyond and not (res / "z.json").exists() and not (res / "z_check.csv").exists())
 check("the default names for --skips are their own files (never the ones of a run without skips)",
       {olympic_completeness.DEFAULT_OUT_CREDITED_SKIPS.name, olympic_completeness.DEFAULT_SAMPLE_CREDITED_SKIPS.name,
        olympic_completeness.DEFAULT_OUT_SKIPS.name, olympic_completeness.DEFAULT_OUT_CREDITED_SKIPS_MEASURE.name}
