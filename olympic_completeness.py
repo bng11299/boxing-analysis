@@ -62,11 +62,13 @@ inside the test.
 CAMERA FRAME DROPS (src/boxingvi/skips.py): the GoPro files drop captured frames while the timestamps stay
 regular, and the wrist-speed rule reads the on-screen jump as a fast punch. --skips reads each video's
 `<tracks>/<id>.framechange.npz` (refusing the whole run when one is missing, malformed, or not for this
-video: file name, frame count, content fingerprint), cuts every segment between f-1 and f for each skip f
-so no smoothing, interpolation, bridging or differencing spans one, and reports per video and pooled
+video: file name, frame count, content fingerprint), MASKS every frame within reach of a skip (the wrist
+signal there is set to 0 and the frame leaves the exposure; completeness.skip_mask_half derives the reach from
+the rule's own smoothing window and the frame rate: 3 frames each side at 50 fps; segments, body scale and
+smoothing are untouched), and reports per video and pooled
 `skips` and, for the unexplained and the explained bursts, how many lie within 2 frames of a skip beside
 the BASE RATE (the share of exposure frames within 2 frames of a skip). `--skips-measure` loads the same
-files and reports the same numbers WITHOUT cutting (the "before" of a before/after). Outputs go to new
+files and reports the same numbers WITHOUT masking (the "before" of a before/after). Outputs go to new
 default names (`..._skips.json`, `..._skips_sample.csv`; `..._skipsmeasure...` for --skips-measure); the
 files of a run without skips are never touched. The rule and its constant come from one observation and one
 development video, not from tuning (skips.py). `--skipcheck SAMPLE.csv --skipcheck-out OUT.csv` (--credited)
@@ -164,14 +166,15 @@ def _skip_report(a, ok: "list[dict]", tot: dict) -> "tuple[dict | None, str]":
     (the json block that states the mode and the rule, the line for the print). Without: (None, "")."""
     if not (a.skips or a.skips_measure):
         return None, ""
-    mode = "cut" if a.skips else "measure only: segments NOT cut"
+    mode = "mask" if a.skips else "measure only: nothing masked"
     tot["skips"] = pool_skip_stats([v["skips"] for v in ok])
-    block = {"mode": "cut" if a.skips else "measure", "ratio": skipmod.SKIP_RATIO, "half_window": skipmod.HALF_WINDOW,
+    block = {"mode": "mask" if a.skips else "measure", "ratio": skipmod.SKIP_RATIO, "half_window": skipmod.HALF_WINDOW,
              "step": skipmod.STEP, "near_frames": completeness.NEAR_SKIP,
              "rule": "frame f is a skip when its frame change exceeds ratio x the median over [f-10, f+10] without f",
              "declaration": "rule and ratio come from one observation and one development video (GH069681), not from tuning to any score",
-             "cut": "each segment is cut between f-1 and f for every skip f inside it; nothing is smoothed, differenced "
-                    "or bridged across a skip" if a.skips else "segments were NOT cut: the same bursts as a run without skips"}
+             "mask": "the frames within smooth_window // 2 + 1 of a skip (3 at 50 fps), widened over a bridged hole, get signal 0 "
+                     "and leave the exposure; segments, body scale and smoothing are untouched" if a.skips
+                     else "nothing was masked: the same bursts as a run without skips"}
     return block, skip_line(tot["skips"], mode)
 
 
@@ -427,17 +430,17 @@ def main(argv=None) -> int:
     ap.add_argument("--min-punches", type=int, default=None, metavar="N",
                     help="with --credited: the fewest credited punches a fragment needs (default 1)")
     ap.add_argument("--skips", action="store_true",
-                    help="cut every segment at the camera's dropped frames (olympic_framechange.py's files in --tracks) and report "
+                    help="mask the frames within reach of the camera's dropped frames (olympic_framechange.py's files in --tracks) and report "
                          "bursts near skips against the base rate; outputs go to new default names")
     ap.add_argument("--skips-measure", action="store_true",
-                    help="load the same files and report the same near-skip numbers WITHOUT cutting (the 'before' of a before/after)")
+                    help="load the same files and report the same near-skip numbers WITHOUT masking (the 'before' of a before/after)")
     ap.add_argument("--skipcheck", type=Path, default=None, metavar="SAMPLE.csv",
                     help="with --credited and --skips/--skips-measure: READ an earlier sample csv; --skipcheck-out gets its "
                          "video, frame, track_id, hand columns plus still_unexplained_with_skips")
     ap.add_argument("--skipcheck-out", type=Path, default=None)
     a = ap.parse_args(argv)
     if a.skips and a.skips_measure:
-        ap.error("--skips cuts, --skips-measure only measures: pick one")
+        ap.error("--skips masks, --skips-measure only measures: pick one")
     if (a.skipcheck is None) != (a.skipcheck_out is None):
         ap.error("--skipcheck and --skipcheck-out go together")
     if a.skipcheck is not None:

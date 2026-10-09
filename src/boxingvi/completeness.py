@@ -248,38 +248,78 @@ def check_skips(skips, n_frames: int) -> "np.ndarray | None":
     return a
 
 
-def cut_at_skips(table: PoseTable, segs: "list[np.ndarray]", skips: "np.ndarray | None") -> "list[np.ndarray]":
-    """Each segment cut between two consecutive rows wherever a skip lies in (frame before, frame after]:
-    a skip f at a row boundary cuts between f-1 and f, and a skip on a frame the segment is missing
-    (a hole the bridge would interpolate across) cuts there too. Nothing is then smoothed, differenced or
-    bridged across a skip, because the picture jumped there and a position change across it is not motion.
-    `skips=None` or no skip inside a segment returns the segment unchanged."""
-    if skips is None or len(skips) == 0:
-        return segs
-    out = []
-    for seg in segs:
-        fr = table.frame[seg]
-        seen = np.searchsorted(skips, fr, side="right")       # skips at or before each row
-        cut = np.flatnonzero(np.diff(seen) > 0) + 1
-        out.extend(seg[a:b] for a, b in zip(np.r_[0, cut], np.r_[cut, len(seg)]))
-    return out
+def skip_mask_half(fps: float, smooth_s: float = punchfind.SMOOTH_S) -> int:
+    """How many frames on each side of a skip f the wrist-speed signal can be contaminated by the one-frame
+    jump between f-1 and f, derived from the rule itself.
+
+    `wrist_signal` smooths the position with a centred moving average of `w` = `punchfind.smooth_window`
+    frames (half-width h = w // 2: 2 at 50 fps and 0.1 s), then takes `np.gradient`, which at frame j reads
+    the smoothed values at j-1 and j+1. A step between f-1 and f enters the smoothed value at i exactly
+    when i-h <= f-1 and i+h >= f, that is i in [f-h, f+h-1]; the gradient at j is contaminated when j-1 or
+    j+1 is in that range, that is j in [f-h-1, f+h]. The mask is the symmetric h + 1 either side:
+    [f-(h+1), f+(h+1)], a superset of the contaminated range by one frame on the right. At 50 fps this is
+    3, but it is computed, so it follows both `smooth_s` and the frame rate."""
+    return punchfind.smooth_window(fps, smooth_s) // 2 + 1
+
+
+def skip_mask(track: Track, orig_frames: np.ndarray, skips: np.ndarray, half: int, bridge: int) -> np.ndarray:
+    """(F, 2) bool over a BRIDGED track's frames: True where the wrist speed of that hand cannot be trusted
+    because a camera skip is within reach, so the signal there is set to 0 and the frame leaves the exposure.
+
+    For each skip f: the frames f-half .. f+half (see `skip_mask_half`). Two things make a jump reach further than
+    that, and both are covered: (1) f lies in a hole of the table that `punchfind.bridge` interpolated across
+    (`orig_frames` are the rows before bridging, p the last before f and q the first from f on): the jump becomes
+    a ramp over the whole hole, so the mask runs from p+1-half to q-1+half; (2) the zone meets a hole in ONE
+    hand's trustworthy frames (at most `bridge` frames, with trustworthy frames on both sides) that
+    `wrist_signal` interpolates across: the zone grows to cover that hole plus `half` beyond it, for that
+    hand only. Growth repeats until nothing more is reached."""
+    n = len(track.frame_ids)
+    m = np.zeros((n, 2), dtype=bool)
+    if skips is None or len(skips) == 0 or n == 0:
+        return m
+    fr = track.frame_ids
+    off = int(fr[0])
+    valid = punchfind.hand_valid(track)
+    holes = []                                           # per hand: [(first, last)] frame ids of interpolated holes
+    for h in range(2):
+        _, filled = punchfind._fill_holes(valid[:, h], bridge)
+        d = np.diff(np.r_[0, filled.astype(int), 0])
+        holes.append([(int(fr[a]), int(fr[b - 1])) for a, b in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1))])
+    for f in skips.tolist():
+        if f < fr[0] - half or f > fr[-1] + half:
+            continue
+        lo, hi = f - half, f + half
+        j = int(np.searchsorted(orig_frames, f))
+        if 0 < j < len(orig_frames):
+            lo, hi = min(lo, int(orig_frames[j - 1]) + 1 - half), max(hi, int(orig_frames[j]) - 1 + half)
+        for h in range(2):
+            a, b = lo, hi
+            while True:
+                a0, b0 = a, b
+                for ra, rb in holes[h]:
+                    if ra <= b and rb >= a:
+                        a, b = min(a, ra - half), max(b, rb + half)
+                if (a, b) == (a0, b0):
+                    break
+            m[max(a - off, 0):max(min(b - off, n - 1) + 1, 0), h] = True
+    return m
 
 
 def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: str, bridge: int,
-                   min_rows: int, skips: "np.ndarray | None" = None) -> dict:
+                   min_rows: int, skips: "np.ndarray | None" = None, smooth_s: float = punchfind.SMOOTH_S) -> dict:
     """The rule on each segment (bridge, wrist_signal, detect) and the EXPOSURE it ran on, for one
     person: the single implementation behind `find_bursts` (a linked boxer) and
     `find_bursts_credited` (a credited fragment). Returns {"mask", "raw" [(frame, hand index, peak
     speed)], "segments", "short_segments", "bodyless_segments", "valid" (frames with a valid
     signal: left, right)}. Every burst is asserted to lie in the mask (RuntimeError otherwise).
 
-    `skips` (sorted frame ids where the camera dropped a frame, `skips.find_skips`; None = ignore them) cut
-    every segment between f-1 and f for each skip f inside it (`cut_at_skips`), BEFORE anything else: the
-    pieces are bridged, smoothed and differenced separately, a piece shorter than `min_rows` is counted as
-    a short segment, and `segments` counts the pieces. With None the result is exactly what it was without
-    the argument."""
+    `skips` (sorted frame ids where the camera dropped a frame, `skips.find_skips`; None = ignore them) are
+    MASKED, not cut: the segments, the body scale and the smoothing are exactly what they are without skips.
+    After `wrist_signal`, every frame within `skip_mask_half` of a skip (`skip_mask`) gets signal 0 and is
+    removed from the exposure, per hand, so a masked frame cannot be a burst and is in neither the numerator
+    nor the denominator of any rate. With None the result is exactly what it was without the argument."""
     skips = check_skips(skips, table.n_frames)
-    segs = cut_at_skips(table, segs, skips)
+    half = skip_mask_half(table.fps, smooth_s)
     out = {"mask": np.zeros(table.n_frames, dtype=bool), "raw": [], "segments": 0, "short_segments": 0,
            "bodyless_segments": 0, "valid": np.zeros(2)}
     mask = out["mask"]
@@ -290,11 +330,15 @@ def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: 
             continue
         track = punchfind.bridge(_track_of(table, seg, f"{table.source}#{who}"), bridge)
         try:
-            sig = punchfind.wrist_signal(track, rule["variant"])
+            sig = punchfind.wrist_signal(track, rule["variant"], smooth_s)
         except ValueError:                           # no confident body anywhere in this segment
             out["bodyless_segments"] += 1
             continue
         have = punchfind.signal_frames(track)
+        if skips is not None and len(skips):
+            masked = skip_mask(track, table.frame[seg], skips, half, bridge)
+            sig[masked] = 0.0
+            have = have & ~masked
         out["valid"] += have.sum(axis=0)
         mask[track.frame_ids[have.any(axis=1)]] = True
         frames, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
@@ -351,8 +395,8 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
     under "exposure" as {"A": bool array, "B": bool array}.
 
     `attrs` is `olympic.attribute(events, table)`: one attribution per event, same order.
-    `skips`: frames where the camera dropped a frame; segments are cut at them (`_scan_segments`), so the
-    exposure shrinks by what the cut leaves too short. None = as before."""
+    `skips`: frames where the camera dropped a frame; the frames within reach of one are masked (`_scan_segments`),
+    so the exposure shrinks by them. None = as before."""
     if not tol_s >= 0:
         raise ValueError("tol_s must be non-negative")
     check_attrs_shape(events, attrs)
@@ -517,8 +561,8 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
     the number of such pairs. They are reported, never subtracted. `attrs` must be exactly
     `olympic.attribute(events, table)` for THIS table (verified: ValueError otherwise).
 
-    `skips`: frames where the camera dropped a frame (`skips.find_skips`); every segment is cut at them
-    (`_scan_segments`) so no signal spans one. None = as before.
+    `skips`: frames where the camera dropped a frame (`skips.find_skips`); the frames within reach of one are masked
+    (`_scan_segments`): no signal there, not in the exposure. None = as before.
 
     Returns {"bursts": [Burst] (track_id and box set), "fragments": {track id: info}, "labels": {...},
     "exposure": {track id: bool mask}, "min_punches": int, "bias": str}."""

@@ -121,7 +121,17 @@ def _smooth(x: np.ndarray, w: int) -> np.ndarray:
     return num / den.reshape((-1,) + (1,) * (x.ndim - 1))
 
 
-def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = 0.1,
+SMOOTH_S = 0.1       # wrist_signal's centred moving-average window, in seconds
+
+
+def smooth_window(fps: float, smooth_s: float = SMOOTH_S) -> int:
+    """The moving-average window of `wrist_signal` in frames: round(smooth_s x fps), at least 1, made odd so it is
+    centred. The ONE place it is computed (the signal and the skip mask both call it)."""
+    w = max(1, int(round(smooth_s * fps)))
+    return w + (w + 1) % 2
+
+
+def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = SMOOTH_S,
                  min_conf: float = MIN_CONF, bridge_s: float = BRIDGE_S) -> np.ndarray:
     """(F, 2) wrist speed per hand (left, right), in body lengths per second.
 
@@ -135,8 +145,7 @@ def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = 0.1,
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}; expected one of {VARIANTS}")
     scale = body_scale(track, min_conf)
-    w = max(1, int(round(smooth_s * track.fps)))
-    w += (w + 1) % 2  # odd, so the window is centred
+    w = smooth_window(track.fps, smooth_s)  # odd, so the window is centred
     max_gap = int(round(bridge_s * track.fps))
     out = np.zeros((len(track.frame_ids), 2))
     for h, (sh, wr) in enumerate(HANDS):
