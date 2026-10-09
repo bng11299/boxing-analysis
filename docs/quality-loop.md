@@ -1132,8 +1132,9 @@ cannot say.
 In GH159681 from about 90 s on, nearly all credited fragments have a red torso (credited red 56, blue 15 in the
 video), and 49 co-present credited pairs have the same colour with both fragments' median kit share >= 0.25. Looking
 at positions only: two boxer-sized boxes (height 400-600 px) 100-250 px apart, on screen together for up to 16 s,
-both with about 70% of the torso red and red gloves, and in about a third of those pairs one of the two with a partly
-blue head region (0.12-0.29 of the disc). So in this bout the torso (and the gloves) do not separate the boxers. No
+both with about 70% of the torso red and red gloves (e.g. ids 2315 and 2329 at 236-252 s); of the 49 pairs, in 11 one
+head region is decided blue and the other red, and in 30 more one head is undecided with a blue-leaning index (the
+blue share of those discs is 0.12-0.29). So in this bout the torso (and the gloves) do not separate the boxers. No
 pixel was viewed; this is counts. If the test videos behave like this, the opposite share is capped below 90% by the
 footage and not by the colour rule; the gate is reported as it comes out.
 
@@ -1164,3 +1165,48 @@ harness now edits code lines only and the corrected run is the one reported.)
 
 All nine suites pass at this commit: pipeline 260, ingest 124, env 36, labels 50, hands 38, olympic 33, tracks 79,
 linking 266, appearance 171.
+
+### TEST RESULT (run after the freezing commit 0ea8472; 25 test videos, nothing tuned afterwards)
+Extraction on the 25 test videos in four parallel shards (633-753 s each; about 12.5 min), then the pooled check from
+the colours files. **The gate FAILS.**
+| | decided co-present credited pairs | opposite | same | opposite share |
+|---|---|---|---|---|
+| **test, pooled (gate: >= 90% and >= 100 pairs)** | **582** (of 1,071 co-present) | **304** | 278 | **52.2% -> FAIL** |
+| kam2 (13 videos) | 196 | 82 | 114 | 41.8% (established: >= 20 pairs) |
+| kam4 (12 videos) | 386 | 222 | 164 | 57.5% (established) |
+| dev, for reference (not evidence) | 146 | 73 | 73 | 50.0% |
+The test result is the dev result (50%) to within the noise of ~600 pairs: the chance level, not a near miss. The
+count requirement (>= 100 pairs) is met, so the failure is the opposite share alone. Videos with at least 20 decided
+pairs range from 0% (GH178416: 60 pairs, no blue fragment among the credited ones; GH098416 is the same with 14 pairs)
+and 19% (GH079681, 42 pairs) to 81% (GH088416, 26 pairs); none reaches 90%.
+Credited fragments on test (1,053): red 494 / blue 318 / none 175 / unsure 66. The 278 same-colour pairs are 209 red-red
+and 69 blue-blue, and 191 of them (69%) have a median kit share >= 0.25 in BOTH fragments, i.e. both are confidently
+kit-coloured, not borderline. Credited `none` is 16.6% of credited fragments; for 107 of the 175 a decided red AND a
+decided blue fragment were also on screen with it for >= 25 frames (a third person, as on dev), the other 68 cannot be
+checked that way (blue is rarely decided on kam2).
+
+### Reading it
+The colour rule does what it was designed to do at the level of single fragments (dev: bimodal index, stable
+under every one-at-a-time change of the constants, `none` mostly a third person), and the two decision counts (red 494
+vs blue 318 credited) show the excess of red that dev showed. What it cannot do is separate the two boxers of a bout
+in the pairs that matter: 278 of the 582 decided pairs are two people with the same torso colour (red-red 209), and
+for 191 of those both are confidently kit-coloured. Two hypotheses, which the counts cannot tell apart (the footage was
+not viewed, by rule): both boxers of those bouts really wear the same vest colour, or some credited punches belong to
+a person of the same corner as the boxer (a second, a spectator at the ropes) rather than to the opponent. Either
+way the premise "two boxers on screen together have opposite torso colours" does not hold for this dataset well
+enough to constrain a linker, and a rule tuned on 4 videos cannot fix a premise.
+
+### Status and what was not done
+- The gate failed, so, as briefed: the frozen rule and this result are committed, NOTHING was tuned on test videos, and
+  the linking integration (`link(..., colours=)`, `olympic_link.py --colours`, the colour overlay, the
+  `--reacquire` runs, the GH078416 timelines, the before / after table, completeness, the mutation checks for the
+  linking) was NOT re-applied. `linking-integration-NOT-COMMITTED.patch` stays in the scratchpad.
+- Colour is "established" in the brief's sense for both cameras (>= 20 decided pairs each), but established means
+  measured, and what was measured is chance level, so no camera's colour is usable as a constraint.
+- Next option, Brendan's call: learned re-ID (BoT-SORT with appearance embeddings) on the GPU laptop. Cheaper
+  questions first, if wanted: (a) whether both boxers really share a vest colour in the same-colour bouts (look at ONE
+  such pair of frames by eye; this session's rules forbid viewing footage, so it needs you), since the whole premise
+  rests on that; (b) the head region alone gave 64% on dev (107 pairs), better than the torso but far from 90%, and
+  was not tried on test because the rule was frozen.
+- Files not committed (gitignored `results/`): `olympic_colour_check_v2.dev.json`, `olympic_colour_check_v2.test.json`,
+  and the 29 `<id>.colours.json` (v2 format, replacing v1's).
