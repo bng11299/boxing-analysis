@@ -56,6 +56,23 @@ the credited fragments, though the count may include duplicates. A credited frag
 wrongly credited; the fragments with exactly one credited punch are the least certain and are counted.
 Attribution is computed once per video (olympic_link.load_video) and verified against the pose table
 inside the test.
+
+  python olympic_completeness.py ... [--credited] --skips            (after olympic_framechange.py)
+
+CAMERA FRAME DROPS (src/boxingvi/skips.py): the GoPro files drop captured frames while the timestamps stay
+regular, and the wrist-speed rule reads the on-screen jump as a fast punch. --skips reads each video's
+`<tracks>/<id>.framechange.npz` (refusing the whole run when one is missing, malformed, or not for this
+video: file name, frame count, content fingerprint), cuts every segment between f-1 and f for each skip f
+so no smoothing, interpolation, bridging or differencing spans one, and reports per video and pooled
+`skips` and, for the unexplained and the explained bursts, how many lie within 2 frames of a skip beside
+the BASE RATE (the share of exposure frames within 2 frames of a skip). `--skips-measure` loads the same
+files and reports the same numbers WITHOUT cutting (the "before" of a before/after). Outputs go to new
+default names (`..._skips.json`, `..._skips_sample.csv`; `..._skipsmeasure...` for --skips-measure); the
+files of a run without skips are never touched. The rule and its constant come from one observation and one
+development video, not from tuning (skips.py). `--skipcheck SAMPLE.csv --skipcheck-out OUT.csv` (--credited)
+READS an earlier sample and writes a copy of its video, frame, track_id and hand columns with one more,
+`still_unexplained_with_skips`: is a burst of that track and hand, within 2 frames, still unexplained in
+this run? (the input file is never written).
 """
 
 from __future__ import annotations
@@ -70,15 +87,122 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import find_punches  # noqa: E402
 import olympic_link  # noqa: E402
-from boxingvi import completeness, linking, olympic  # noqa: E402
+from boxingvi import completeness, linking, olympic, video  # noqa: E402
+from boxingvi import skips as skipmod  # noqa: E402
 
 DEFAULT_OUT = Path("results/olympic_completeness.json")
 DEFAULT_SAMPLE = Path("results/olympic_completeness_sample.csv")
 SAMPLE_COLUMNS = ["video", "frame", "time_s", "boxer", "hand", "inclusion_prob", "user_label"]
 DEFAULT_OUT_CREDITED = Path("results/olympic_completeness_credited.json")
 DEFAULT_SAMPLE_CREDITED = Path("results/olympic_completeness_credited_sample.csv")
+DEFAULT_OUT_SKIPS = Path("results/olympic_completeness_skips.json")
+DEFAULT_SAMPLE_SKIPS = Path("results/olympic_completeness_skips_sample.csv")
+DEFAULT_OUT_CREDITED_SKIPS = Path("results/olympic_completeness_credited_skips.json")
+DEFAULT_SAMPLE_CREDITED_SKIPS = Path("results/olympic_completeness_credited_skips_sample.csv")
+DEFAULT_OUT_SKIPS_MEASURE = Path("results/olympic_completeness_skipsmeasure.json")
+DEFAULT_SAMPLE_SKIPS_MEASURE = Path("results/olympic_completeness_skipsmeasure_sample.csv")
+DEFAULT_OUT_CREDITED_SKIPS_MEASURE = Path("results/olympic_completeness_credited_skipsmeasure.json")
+DEFAULT_SAMPLE_CREDITED_SKIPS_MEASURE = Path("results/olympic_completeness_credited_skipsmeasure_sample.csv")
+SKIPCHECK_COLUMNS = ["video", "frame", "track_id", "hand", "still_unexplained_with_skips"]
 SAMPLE_COLUMNS_CREDITED = ["video", "frame", "time_s", "time_mss", "track_id", "box_cx", "box_cy", "box_h", "hand",
                            "inclusion_prob", "user_label"]
+
+
+class SkipsRefused(ValueError):
+    """--skips could not be honoured for a video: the whole run stops and nothing is written."""
+
+
+def load_skips(a, task, table) -> "skipmod.Skips | None":
+    """The verified Skips of one video when --skips / --skips-measure is on, else None. Refuses (SkipsRefused)
+    a missing, malformed or mismatched file, or one made with other constants than this code's."""
+    if not (a.skips or a.skips_measure):
+        return None
+    f = a.tracks / f"{task.video.stem}.framechange.npz"
+    try:
+        sk = skipmod.load_for(table, f)
+        if sk.video_fp != video.fingerprint(task.video):
+            raise ValueError("the frame changes were measured on a different file than this video "
+                             "(content fingerprints differ)")
+        if (sk.ratio, sk.half_window) != (skipmod.SKIP_RATIO, skipmod.HALF_WINDOW):
+            raise ValueError(f"made with ratio {sk.ratio} and half window {sk.half_window}, this code uses "
+                             f"{skipmod.SKIP_RATIO} and {skipmod.HALF_WINDOW}")
+    except (ValueError, OSError) as e:
+        raise SkipsRefused(f"{task.video.stem}: {f.name}: {e}") from e
+    return sk
+
+
+def skip_shares(t: dict) -> dict:
+    base = _ratio(t["exposure_near_skip"], t["exposure_frames"])
+    un, ex = _ratio(t["unexplained_near_skip"], t["unexplained"]), _ratio(t["explained_near_skip"], t["explained"])
+    return {"base_rate": base, "unexplained_near_skip_share": un, "explained_near_skip_share": ex,
+            "unexplained_excess_over_base": _ratio(un, base) if un is not None and base else None,
+            "explained_excess_over_base": _ratio(ex, base) if ex is not None and base else None}
+
+
+def with_shares(stats: dict) -> dict:
+    return stats | skip_shares(stats)
+
+
+def pool_skip_stats(rows: "list[dict]") -> dict:
+    """Pool the per-video near-skip counts (sum, then divide once) and add the shares and the ratio of
+    the unexplained share to the base rate."""
+    keys = ("skips", "exposure_frames", "exposure_near_skip", "unexplained", "unexplained_near_skip",
+            "explained", "explained_near_skip")
+    return with_shares({k: sum(r[k] for r in rows) for k in keys} | {"within_frames": rows[0]["within_frames"]})
+
+
+def skip_line(t: dict, mode: str) -> str:
+    return (f"SKIPS ({mode}; {t['skips']} skips): bursts within {t['within_frames']} frames of a skip: unexplained "
+            f"{t['unexplained_near_skip']}/{t['unexplained']} ({_pct(t['unexplained_near_skip_share'])}), explained "
+            f"{t['explained_near_skip']}/{t['explained']} ({_pct(t['explained_near_skip_share'])}), against a base rate of "
+            f"{_pct(t['base_rate'])} of exposure frames ({t['exposure_near_skip']}/{t['exposure_frames']}); unexplained "
+            f"excess over base {_num(t['unexplained_excess_over_base'], 2)}x, explained {_num(t['explained_excess_over_base'], 2)}x. ")
+
+
+def _skip_report(a, ok: "list[dict]", tot: dict) -> "tuple[dict | None, str]":
+    """With --skips / --skips-measure: pool the per-video near-skip counts into tot["skips"], and return
+    (the json block that states the mode and the rule, the line for the print). Without: (None, "")."""
+    if not (a.skips or a.skips_measure):
+        return None, ""
+    mode = "cut" if a.skips else "measure only: segments NOT cut"
+    tot["skips"] = pool_skip_stats([v["skips"] for v in ok])
+    block = {"mode": "cut" if a.skips else "measure", "ratio": skipmod.SKIP_RATIO, "half_window": skipmod.HALF_WINDOW,
+             "step": skipmod.STEP, "near_frames": completeness.NEAR_SKIP,
+             "rule": "frame f is a skip when its frame change exceeds ratio x the median over [f-10, f+10] without f",
+             "declaration": "rule and ratio come from one observation and one development video (GH069681), not from tuning to any score",
+             "cut": "each segment is cut between f-1 and f for every skip f inside it; nothing is smoothed, differenced "
+                    "or bridged across a skip" if a.skips else "segments were NOT cut: the same bursts as a run without skips"}
+    return block, skip_line(tot["skips"], mode)
+
+
+def read_sample(path: Path) -> "list[dict]":
+    """The rows of an earlier sample csv, READ ONLY, with the four columns skipcheck needs."""
+    with Path(path).open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError(f"{path}: no rows")
+    for need in ("video", "frame", "track_id", "hand"):
+        if need not in rows[0]:
+            raise ValueError(f"{path}: no {need!r} column (a --credited sample is expected)")
+    for r in rows:
+        if not str(r["frame"]).isdigit() or not str(r["track_id"]).isdigit() or r["hand"] not in completeness.HAND_NAMES:
+            raise ValueError(f"{path}: malformed row {r}")
+    return rows
+
+
+def skipcheck_rows(rows_in: "list[dict]", bursts_by_video: dict, within: int = completeness.NEAR_SKIP) -> list:
+    """For each row of an earlier sample (video, frame, track_id, hand): is a burst of that track, that hand, within
+    `within` frames still UNEXPLAINED in this run? A row whose video is not in the run is an error, not a False."""
+    out = []
+    for r in rows_in:
+        v = r["video"]
+        if v not in bursts_by_video:
+            raise ValueError(f"the sample row for {v} frame {r['frame']}: that video is not in this run")
+        frame = int(r["frame"])
+        still = any(not b.explained and str(b.track_id) == str(r["track_id"]) and b.hand == r["hand"]
+                    and abs(b.frame - frame) <= within for b in bursts_by_video[v])
+        out.append([v, r["frame"], r["track_id"], r["hand"], "true" if still else "false"])
+    return out
 
 
 def _ratio(num, den):
@@ -202,33 +326,41 @@ def totals_credited(ok: "list[dict]") -> dict:
 
 
 def _main_credited(a, rule, only) -> int:
-    videos, unexplained, failed = {}, {}, []
+    videos, unexplained, failed, all_bursts = {}, {}, [], {}
     for t in olympic.find_tasks(a.data):
         vid = t.video.stem
         if (only is not None and vid not in only) or not (a.tracks / f"{vid}.tracks.npz").is_file():
             continue
         try:
             table, _, events, attrs = olympic_link.load_video(t, a.tracks)
-            res = completeness.find_bursts_credited(table, events, attrs, rule, video=vid, min_punches=a.min_punches)
+            sk = load_skips(a, t, table)
+            res = completeness.find_bursts_credited(table, events, attrs, rule, video=vid, min_punches=a.min_punches,
+                                                    skips=sk.frames if a.skips else None)
+        except SkipsRefused:
+            raise
         except (ValueError, FileNotFoundError, RuntimeError) as e:
             videos[t.name] = {"error": str(e)}
             failed.append(t.name)
             print(f"{t.name}: FAILED, {e}")
             continue
         unexplained[vid] = [b for b in res["bursts"] if not b.explained]
+        all_bursts[vid] = res["bursts"]
         row = video_row_credited(res, len(events), table.n_frames / table.fps / 60)
         row["video_bound"] = bool(table.video_fp)
+        if sk is not None:
+            row["skips"] = with_shares(completeness.near_skip_stats(res["bursts"], res["exposure"], sk.frames, table.n_frames))
         videos[t.name] = row
         print(f"{t.name}: {row['fragments_n']} credited fragments, {row['bursts']} bursts, {row['unexplained']} unexplained "
-              f"in {row['exposure_min']:.1f} exposure min")
+              f"in {row['exposure_min']:.1f} exposure min" + ("" if sk is None else f", {row['skips']['skips']} skips"))
     ok = [v for v in videos.values() if "error" not in v]
     if not ok:
         raise ValueError(f"nothing to test in {a.tracks} against {a.data}")
     tot = totals_credited(ok)
+    skip_json, skip_text = _skip_report(a, ok, tot)
     sample, population = completeness.random_sample(unexplained, a.sample_size, a.seed)
     prob = len(sample) / population if population else None
     lab = tot["labels"]
-    summary = (f"CREDITED FRAGMENTS (min {a.min_punches} credited punch(es)): {tot['fragments_n']} fragments, "
+    summary = (skip_text + f"CREDITED FRAGMENTS (min {a.min_punches} credited punch(es)): {tot['fragments_n']} fragments, "
                f"{tot['fragments_one_punch']} with exactly one credited punch (least certain); {tot['bursts']} bursts in "
                f"{_num(tot['exposure_min'])} exposure minutes (summed over fragments), {tot['unexplained']} unexplained, "
                f"{tot['possible_duplicates']} of them with a possible twin in another fragment ({tot['possible_duplicate_pairs']} "
@@ -252,8 +384,9 @@ def _main_credited(a, rule, only) -> int:
          "videos": _round(videos), "all": _round(tot),
          "sample": {"n": len(sample), "population_unexplained": population, "inclusion_prob": prob,
                     "design": "simple random sample without replacement over all unexplained bursts",
-                    "seed": a.seed, "file": str(a.sample_out)}},
+                    "seed": a.seed, "file": str(a.sample_out)}} | ({"skips": skip_json} if skip_json else {}),
         indent=1, allow_nan=False)
+    check_rows = skipcheck_rows(read_sample(a.skipcheck), all_bursts) if a.skipcheck else None
     sample_rows = [[b.video, b.frame, f"{b.time_s:.2f}", completeness.mss(b.time_s), b.track_id, f"{b.box[0]:.1f}",
                     f"{b.box[1]:.1f}", f"{b.box[2]:.1f}", b.hand, f"{prob:.6f}", ""] for b in sample]
     a.out.parent.mkdir(parents=True, exist_ok=True)
@@ -263,6 +396,14 @@ def _main_credited(a, rule, only) -> int:
         w = csv.writer(f)
         w.writerow(SAMPLE_COLUMNS_CREDITED)
         w.writerows(sample_rows)
+    if check_rows is not None:
+        a.skipcheck_out.parent.mkdir(parents=True, exist_ok=True)
+        with a.skipcheck_out.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(SKIPCHECK_COLUMNS)
+            w.writerows(check_rows)
+        summary += (f" SKIPCHECK: {sum(r[4] == 'true' for r in check_rows)} of {len(check_rows)} sampled rows are still "
+                    f"unexplained bursts in this run -> {a.skipcheck_out}")
     print(summary)
     return 1 if failed else 0
 
@@ -285,7 +426,25 @@ def main(argv=None) -> int:
                     help="ADR-0012 Option 2: test only fragments (track ids) credited with a labelled punch; no linking")
     ap.add_argument("--min-punches", type=int, default=None, metavar="N",
                     help="with --credited: the fewest credited punches a fragment needs (default 1)")
+    ap.add_argument("--skips", action="store_true",
+                    help="cut every segment at the camera's dropped frames (olympic_framechange.py's files in --tracks) and report "
+                         "bursts near skips against the base rate; outputs go to new default names")
+    ap.add_argument("--skips-measure", action="store_true",
+                    help="load the same files and report the same near-skip numbers WITHOUT cutting (the 'before' of a before/after)")
+    ap.add_argument("--skipcheck", type=Path, default=None, metavar="SAMPLE.csv",
+                    help="with --credited and --skips/--skips-measure: READ an earlier sample csv; --skipcheck-out gets its "
+                         "video, frame, track_id, hand columns plus still_unexplained_with_skips")
+    ap.add_argument("--skipcheck-out", type=Path, default=None)
     a = ap.parse_args(argv)
+    if a.skips and a.skips_measure:
+        ap.error("--skips cuts, --skips-measure only measures: pick one")
+    if (a.skipcheck is None) != (a.skipcheck_out is None):
+        ap.error("--skipcheck and --skipcheck-out go together")
+    if a.skipcheck is not None:
+        if not (a.skips or a.skips_measure) or not a.credited:
+            ap.error("--skipcheck needs --credited and --skips (or --skips-measure)")
+        if a.skipcheck.resolve() == a.skipcheck_out.resolve():
+            ap.error("--skipcheck-out would overwrite the sample it reads")
     if a.credited and a.reacquire:
         ap.error("--reacquire is a linking option; --credited does no linking")
     if a.min_punches is not None and not a.credited:
@@ -293,14 +452,30 @@ def main(argv=None) -> int:
     if a.credited and (a.min_punches is not None and a.min_punches < 1):
         ap.error("--min-punches must be a whole number >= 1")
     a.min_punches = 1 if a.min_punches is None else a.min_punches
+    mode = 2 if a.skips_measure else 1 if a.skips else 0         # which family of default names
     if a.out is None:
-        a.out = DEFAULT_OUT_CREDITED if a.credited else DEFAULT_OUT
+        a.out = [[DEFAULT_OUT, DEFAULT_OUT_SKIPS, DEFAULT_OUT_SKIPS_MEASURE],
+                 [DEFAULT_OUT_CREDITED, DEFAULT_OUT_CREDITED_SKIPS, DEFAULT_OUT_CREDITED_SKIPS_MEASURE]][bool(a.credited)][mode]
     if a.sample_out is None:
-        a.sample_out = DEFAULT_SAMPLE_CREDITED if a.credited else DEFAULT_SAMPLE
+        a.sample_out = [[DEFAULT_SAMPLE, DEFAULT_SAMPLE_SKIPS, DEFAULT_SAMPLE_SKIPS_MEASURE],
+                        [DEFAULT_SAMPLE_CREDITED, DEFAULT_SAMPLE_CREDITED_SKIPS,
+                         DEFAULT_SAMPLE_CREDITED_SKIPS_MEASURE]][bool(a.credited)][mode]
     if a.out == a.sample_out:
         ap.error("--out and --sample-out are the same file")
+    if a.skipcheck is not None:
+        mine = {a.skipcheck_out.resolve(), a.out.resolve(), a.sample_out.resolve()}
+        if len(mine) < 3 or a.skipcheck.resolve() in mine:
+            ap.error("--skipcheck-out, --out and --sample-out must be three files, none of them the sample --skipcheck reads")
 
     rule = find_punches.load_rule(a.rule)
+    try:
+        return _run(a, rule)
+    except SkipsRefused as e:
+        print(f"--skips refused, nothing written: {e}", file=sys.stderr)
+        return 2
+
+
+def _run(a, rule) -> int:
     if a.credited:
         return _main_credited(a, rule, {olympic_link._check_video_id(v) for v in a.only} if a.only else None)
     params = linking.LinkParams(reacquire_s=linking.REACQUIRE_ON_S if a.reacquire else 0.0)
@@ -312,8 +487,11 @@ def main(argv=None) -> int:
             continue
         try:
             table, _, events, attrs = olympic_link.load_video(t, a.tracks)
+            sk = load_skips(a, t, table)
             lk = linking.link_video(table, attrs, params)
-            res = completeness.find_bursts(table, lk, events, attrs, rule, video=vid)
+            res = completeness.find_bursts(table, lk, events, attrs, rule, video=vid, skips=sk.frames if a.skips else None)
+        except SkipsRefused:
+            raise
         except (ValueError, FileNotFoundError, RuntimeError) as e:
             videos[t.name] = {"error": str(e)}
             failed.append(t.name)
@@ -322,6 +500,8 @@ def main(argv=None) -> int:
         unexplained[vid] = [b for b in res["bursts"] if not b.explained]
         row = video_row(res, len(events), table.n_frames / table.fps / 60)
         row["video_bound"] = bool(table.video_fp)
+        if sk is not None:
+            row["skips"] = with_shares(completeness.near_skip_stats(res["bursts"], res["exposure"], sk.frames, table.n_frames))
         videos[t.name] = row
         print(f"{t.name}: {row['bursts']} bursts, {row['unexplained']} unexplained | " + " | ".join(
             f"{n}: {i['unexplained']}/{i['bursts']} in {i['exposure_min']:.1f} exposure min" for n, i in row["boxers"].items()))
@@ -329,13 +509,14 @@ def main(argv=None) -> int:
     if not ok:
         raise ValueError(f"nothing to test in {a.tracks} against {a.data}")
     tot = totals(ok)
+    skip_json, skip_text = _skip_report(a, ok, tot)
     sample, population = completeness.random_sample(unexplained, a.sample_size, a.seed)
     prob = len(sample) / population if population else None
 
     # Everything is computed BEFORE any file is written or any line formatted: a rate that is absent
     # (no exposure at all in a run) is None, written as null and printed as n/a, never a crash.
     lab = tot["labels"]
-    summary = (f"ALL: {tot['bursts']} bursts in {_num(tot['exposure_boxer_min'])} exposure boxer-minutes "
+    summary = (skip_text + f"ALL: {tot['bursts']} bursts in {_num(tot['exposure_boxer_min'])} exposure boxer-minutes "
                f"(the frames the rule ran on; {_num(tot['identified_boxer_min'])} identified boxer-minutes, descriptive), "
                f"{tot['unexplained']} unexplained = {_num(tot['unexplained_per_exposure_min'])} per exposure minute; "
                f"{_num(tot['bursts_per_exposure_min'])} bursts and "
@@ -356,7 +537,7 @@ def main(argv=None) -> int:
          "videos": _round(videos), "all": _round(tot),
          "sample": {"n": len(sample), "population_unexplained": population, "inclusion_prob": prob,
                     "design": "simple random sample without replacement over all unexplained bursts",
-                    "seed": a.seed, "file": str(a.sample_out)}},
+                    "seed": a.seed, "file": str(a.sample_out)}} | ({"skips": skip_json} if skip_json else {}),
         indent=1, allow_nan=False)
     sample_rows = [[b.video, b.frame, f"{b.time_s:.2f}", b.boxer, b.hand, f"{prob:.6f}", ""] for b in sample]
     a.out.parent.mkdir(parents=True, exist_ok=True)
