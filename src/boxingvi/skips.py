@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
+import time
 import warnings
 import zipfile
 from dataclasses import dataclass
@@ -37,6 +39,7 @@ from .pose_yolo import _float_array, _scalar, _text
 SKIP_RATIO = 3.0
 HALF_WINDOW = 10
 STEP = 4                    # video.frame_change's pixel step when this file was written
+REPLACE_TRIES = 40           # os.replace onto a path another writer is replacing can be denied for a moment on Windows
 MAX_FRAMES = 20_000_000     # ~55 h at 100 fps; a file claiming more is refused
 _FP = re.compile(r"[0-9a-f]{64}")
 
@@ -129,15 +132,30 @@ class Skips:
                              "(content fingerprints differ)")
 
     def save(self, path) -> None:
-        """Write atomically (a half-written file is never read as a complete one)."""
+        """Write atomically: to a temporary file of its OWN (unique name, in the destination directory, so the final
+        rename stays on one volume), then `os.replace`. A half-written file is never read as a complete one, and two
+        writers of the same path never share or truncate a temporary file; the last replace wins and the file is always
+        one writer's complete content."""
         path = Path(path)
-        tmp = path.with_name(path.name + ".part")
-        try:
-            with tmp.open("wb") as f:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", suffix=".part", delete=False) as f:
+            tmp = Path(f.name)
+            try:
                 np.savez_compressed(f, change=self.change, n_frames=self.n_frames, step=self.step,
                                     ratio=self.ratio, half_window=self.half_window,
                                     source=self.source, video_fp=self.video_fp)
-            os.replace(tmp, path)
+            except BaseException:
+                f.close()
+                tmp.unlink(missing_ok=True)
+                raise
+        try:
+            for attempt in range(REPLACE_TRIES):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:      # Windows: another writer is replacing the same destination this very moment
+                    if attempt == REPLACE_TRIES - 1:
+                        raise
+                    time.sleep(0.005 * (attempt + 1))
         finally:
             tmp.unlink(missing_ok=True)
 

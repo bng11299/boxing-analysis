@@ -188,6 +188,36 @@ check("saving leaves no .part file behind and replaces an existing file in whole
       not list(tmp.glob("*.part")) and (sk.save(f_ok) or True) and skips.Skips.load(f_ok).frames.tolist() == [30] and not list(tmp.glob("*.part")))
 
 
+import threading  # noqa: E402
+
+f_race = tmp / "race.framechange.npz"
+errors_ = []
+levels_ = [1.0 + i for i in range(8)]
+
+
+def writer_(level):
+    try:
+        for _ in range(15):
+            skips.Skips(flat(N, level), "GH000001.mp4", FP).save(f_race)
+    except BaseException as e:    # noqa: BLE001  (collected, then asserted on below)
+        errors_.append(repr(e))
+
+
+ths_ = [threading.Thread(target=writer_, args=(lv,)) for lv in levels_]
+[t_.start() for t_ in ths_]
+[t_.join() for t_ in ths_]
+won_ = skips.Skips.load(f_race)
+check("eight writers saving the same path 15 times each, at once: no writer fails, the file is one writer's COMPLETE content, no temporary file is left",
+      not errors_ and won_.n_frames == N and float(won_.change[1]) in levels_ and (won_.change[1:] == won_.change[1]).all()
+      and not list(tmp.glob("race*.part")), f"{errors_[:2]} {won_.change[1]}")
+check("each writer's temporary file is its own: the name carries a random part (two saves never share one)",
+      len({p_.name for p_ in [Path(tempfile.NamedTemporaryFile(dir=tmp, prefix="x.", suffix=".part", delete=False).name) for _ in range(3)]}) == 3)
+for p_ in tmp.glob("x.*.part"):
+    p_.unlink()
+raises("a failed save (unwritable directory) leaves neither a file nor a temporary one",
+       lambda: skips.Skips(chg, "GH000001.mp4", FP).save(tmp / "no_such_dir" / "a.npz"), "", OSError)
+
+
 def tab(n_frames=N, source="GH000001.mp4", fp=""):
     """A minimal pose table with one row, for the binding checks."""
     return PoseTable(np.array([0], np.int64), np.array([1], np.int64), np.zeros((1, 4), np.float32),
@@ -519,6 +549,18 @@ sh = olympic_completeness.pool_skip_stats([st, st])
 check("pooling sums the counts and divides once: 4 of 6 unexplained, 20 of 300 exposure frames, 4/6 over 20/300 = 10x",
       sh["unexplained"] == 6 and sh["unexplained_near_skip"] == 4 and sh["exposure_near_skip"] == 20 and sh["exposure_frames"] == 300
       and abs(sh["base_rate"] - 20 / 300) < 1e-12 and abs(sh["unexplained_excess_over_base"] - (4 / 6) / (20 / 300)) < 1e-9, str(sh))
+vA = {"skips": 5, "within_frames": 2, "exposure_frames": 150, "exposure_near_skip": 10, "unexplained": 3, "unexplained_near_skip": 2,
+      "explained": 6, "explained_near_skip": 3}
+vB = {"skips": 50, "within_frames": 2, "exposure_frames": 1500, "exposure_near_skip": 20, "unexplained": 30, "unexplained_near_skip": 3,
+      "explained": 60, "explained_near_skip": 6}
+pl2 = olympic_completeness.pool_skip_stats([vA, vB])
+check("pooling UNEQUAL videos adds the raw counts and divides once: unexplained near a skip 5 of 33 (15.2%), base rate 30 of 1,650 (1.8%), excess 8.33x",
+      pl2["unexplained"] == 33 and pl2["unexplained_near_skip"] == 5 and pl2["exposure_frames"] == 1650 and pl2["exposure_near_skip"] == 30
+      and abs(pl2["unexplained_near_skip_share"] - 5 / 33) < 1e-12 and abs(pl2["base_rate"] - 30 / 1650) < 1e-12
+      and abs(pl2["unexplained_excess_over_base"] - (5 / 33) / (30 / 1650)) < 1e-9, str(pl2))
+check("... which is NOT the mean of the per-video shares (38.3% and 4.0% here) nor the mean of the counts",
+      abs(pl2["unexplained_near_skip_share"] - (2 / 3 + 3 / 30) / 2) > 0.2 and abs(pl2["base_rate"] - (10 / 150 + 20 / 1500) / 2) > 0.02
+      and pl2["skips"] == 55 and pl2["explained"] == 66, str(pl2))
 nobase = olympic_completeness.pool_skip_stats([completeness.near_skip_stats([], {1: np.zeros(200, bool)}, [], 200)])
 check("with nothing in exposure every share is None (written as null), not a crash",
       nobase["base_rate"] is None and nobase["unexplained_near_skip_share"] is None and nobase["unexplained_excess_over_base"] is None)
