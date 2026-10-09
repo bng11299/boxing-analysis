@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 import olympic_completeness  # noqa: E402
 from boxingvi import completeness, olympic, punchfind  # noqa: E402
 from boxingvi.data import N_JOINTS  # noqa: E402
+from boxingvi.linking import Linking  # noqa: E402
 from boxingvi.pose_yolo import PoseTable  # noqa: E402
 
 PASS = FAIL = 0
@@ -355,12 +356,19 @@ check("the whole-video density stays a separate number: 11 labels over 2 x the v
       abs(ja["labels_per_video_boxer_min"] - 11 / (2 * N2 / FPS / 60)) < 0.01)
 check("the json states the mode, the min_punches and the bias; no linking",
       js["mode"] == "credited_fragments" and js["linking"] is None and js["min_punches"] == 1
-      and "UNDERCOUNT" in js["bias"] and "weak evidence" in js["bias"] and "decisive" in js["bias"], js["bias"])
+      and "coverage can only lose" in js["bias"] and "DUPLICATE" in js["bias"]
+      and "neither a bout-level upper nor a lower bound" in js["bias"] and "weak evidence" in js["bias"]
+      and "UNDERCOUNT" not in js["bias"], js["bias"])
 check("the CLI print carries the bias and the one-punch count",
-      "UNDERCOUNT" in out1 and "weak evidence" in out1 and "exactly one credited punch" in out1, out1)
+      "coverage can only lose" in out1 and "DUPLICATE" in out1 and "weak evidence" in out1
+      and "UNDERCOUNT" not in out1 and "exactly one credited punch" in out1 and "possible twin" in out1, out1)
 check("the per-video row lists the fragment with its track id and its rates",
       js["videos"]["task_kam2_gh000001"]["fragments"][0]["track_id"] == 1
       and js["videos"]["task_kam2_gh000001"]["fragments"][0]["unexplained_per_exposure_min"] > 0)
+check("possible_duplicates is in the json (pooled, per video, per fragment) and is 0 for the one planted person",
+      ja["possible_duplicates"] == 0 and ja["possible_duplicate_pairs"] == 0
+      and js["videos"]["task_kam2_gh000001"]["possible_duplicates"] == 0
+      and js["videos"]["task_kam2_gh000001"]["fragments"][0]["possible_duplicates"] == 0)
 check("the output does not call the count a bound or a recall", "upper bound" not in json.dumps(js) and "recall" not in json.dumps(js))
 rows = list(csv.reader(cc.read_text(encoding="utf-8").splitlines()))
 check("the sample csv has the columns that find the person: track id, box centre and height, time_s and m:ss.s",
@@ -465,6 +473,123 @@ check("one label credited to nobody: exit 0, no fragment, exact zero counts, the
 check("... and the sample is the header only, with a null inclusion probability",
       cc0.read_text(encoding="utf-8").strip().split(",")[0] == "video" and len(cc0.read_text(encoding="utf-8").strip().splitlines()) == 1
       and json.loads(cj0.read_text(encoding="utf-8"))["sample"]["inclusion_prob"] is None)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+print("attributions are bound to the table that produced them (review B1)")
+# the SAME ids, the people swapped: id 1 stands where id 2 stood. Every id credited in attrs exists in the other table.
+Pa, Qa = person(1, still(150, 150), [(0, 399)], [(100, 1)]), person(2, still(500, 150), [(0, 399)], [(200, 0)])
+Pb, Qb = person(1, still(500, 150), [(0, 399)], [(100, 0)]), person(2, still(150, 150), [(0, 399)], [(200, 1)])
+tab_a, tab_b = build([Pa, Qa], 400), build([Pb, Qb], 400)
+ev_ab = [label(tab_a, 1, 20, 22, 0), label(tab_a, 1, 40, 42, 0), label(tab_a, 1, 60, 62, 0),
+         label(tab_a, 2, 30, 32, 1), label(tab_a, 2, 50, 52, 1), label(tab_a, 2, 70, 72, 1)]    # still wrists, clear of the bursts
+at_a = olympic.attribute(ev_ab, tab_a)
+at_b = olympic.attribute(ev_ab, tab_b)
+check("setup: the same events credit different ids in the two tables (1,1,1,2,2,2 against 2,2,2,1,1,1), the id sets are equal",
+      [a.track_id for a in at_a] == [1, 1, 1, 2, 2, 2] and [a.track_id for a in at_b] == [2, 2, 2, 1, 1, 1]
+      and set(np.unique(tab_a.track_id)) == set(np.unique(tab_b.track_id)), str(([a.track_id for a in at_a], [a.track_id for a in at_b])))
+
+
+def manual(tab, chains):
+    mem = np.full((tab.n_frames, 2), -1, np.int64)
+    for k, ch in enumerate(chains):
+        for t in ch:
+            mem[tab.frame[tab.track_id == t], k] = t
+    return Linking((tuple(chains[0]), tuple(chains[1])), mem, tab.n_frames, tab.fps, tab.source, None)
+
+
+lk_b = manual(tab_b, [(1,), (2,)])
+raises("find_bursts_credited refuses attributions made from another table (same ids, people swapped)",
+       lambda: completeness.find_bursts_credited(tab_b, ev_ab, at_a, RULE), "another table")
+raises("find_bursts refuses them too",
+       lambda: completeness.find_bursts(tab_b, lk_b, ev_ab, at_a, RULE), "another table")
+check("... and accepts the attributions the table itself gives (both functions)",
+      len(completeness.find_bursts_credited(tab_b, ev_ab, at_b, RULE)["fragments"]) == 2
+      and "bursts" in completeness.find_bursts(tab_b, lk_b, ev_ab, at_b, RULE))
+raises("an attribution edited after the fact (credit removed) is refused",
+       lambda: completeness.find_bursts_credited(tab_a, ev_ab, [dataclasses.replace(at_a[0], track_id=None)] + at_a[1:], RULE),
+       "not what this pose table gives")
+raises("... or its ambiguity flag flipped",
+       lambda: completeness.find_bursts_credited(tab_a, ev_ab, [dataclasses.replace(at_a[0], ambiguous=True)] + at_a[1:], RULE),
+       "not what this pose table gives")
+raises("... or the wrist changed",
+       lambda: completeness.find_bursts(tab_a, manual(tab_a, [(1,), (2,)]), ev_ab,
+                                        [at_a[0], dataclasses.replace(at_a[1], wrist="right")] + at_a[2:], RULE),
+       "not what this pose table gives")
+
+print("possible duplicates: the same punch seen by two overlapping ids (review N1)")
+
+
+def twins(dx=4.0, db=0, label_twin=False):
+    """id 1 (frames 0-250) and id 2 (100-399, shifted dx px, burst db frames later) follow one person; both burst at ~150.
+    Credited labels sit where only one id exists, so the bursts in the overlap are unexplained."""
+    a = person(1, still(150, 150), [(0, 250)], [(150, 1)])
+    b = person(2, still(150 + dx, 150), [(100, 399)], [(150 + db, 1)])
+    t = build([a, b], 400)
+    ev = [label(t, 1, 20, 22, 0), label(t, 2, 330, 332, 0)] + ([label(t, 2, 148, 152, 1)] if label_twin else [])
+    return run(t, ev)[1]
+
+
+r_tw = twins()
+b_tw = sorted(r_tw["bursts"], key=lambda b: b.track_id)
+check("setup: both ids report the burst near 150, both unexplained",
+      [b.track_id for b in b_tw] == [1, 2] and all(near(b.frame, 150) and b.match == "none" for b in b_tw), str(b_tw))
+check("two ids on one person (boxes 4 px apart, IoU 0.87): both bursts are possible duplicates, as ONE pair, in each fragment",
+      r_tw["possible_duplicates"] == 2 and r_tw["possible_duplicate_pairs"] == 1 and all(b.possible_duplicate for b in b_tw)
+      and r_tw["fragments"][1]["possible_duplicates"] == 1 and r_tw["fragments"][2]["possible_duplicates"] == 1)
+t_sep = build([person(1, still(150, 150), [(0, 399)], [(150, 1)]), person(2, still(500, 150), [(0, 399)], [(150, 1)])], 400)
+r_sep = run(t_sep, [label(t_sep, 1, 20, 22, 0), label(t_sep, 2, 30, 32, 0)])[1]
+check("two SEPARATE people bursting at the same moment (boxes 350 px apart, IoU 0): both unexplained, none a possible duplicate",
+      len(r_sep["bursts"]) == 2 and all(b.match == "none" for b in r_sep["bursts"]) and r_sep["possible_duplicates"] == 0
+      and r_sep["possible_duplicate_pairs"] == 0 and not any(b.possible_duplicate for b in r_sep["bursts"]))
+check("the IoU threshold bites on both sides: a 20 px shift (IoU 0.47) is a possible duplicate, a 35 px shift (IoU 0.23) is not",
+      twins(dx=20.0)["possible_duplicates"] == 2 and twins(dx=35.0)["possible_duplicates"] == 0)
+check("the time window is the matching tolerance (5 frames): a twin 5 frames later counts, 6 frames later does not",
+      twins(db=5)["possible_duplicates"] == 2 and twins(db=6)["possible_duplicates"] == 0)
+r_ex = twins(label_twin=True)
+check("a twin that is EXPLAINED does not count (one id's burst takes the unattributed label, the other has no unexplained twin)",
+      sorted(b.match for b in r_ex["bursts"]) == ["none", "unattributed"] and r_ex["possible_duplicates"] == 0, str(r_ex["bursts"]))
+check("the counter reads boxes, not ids: the ids of a twin pair are different fragments, never one fragment against itself",
+      all(b.track_id in (1, 2) for b in r_tw["bursts"]) and r_tw["fragments"][1]["bursts"] == 1)
+
+print("rates pool counts over minutes; overlapping fragments keep both exposures (review N2)")
+
+
+def fake_res(n_unexplained, expo_min, own_in_exposure):
+    fr = {"track_id": 1, "first_frame": 0, "last_frame": 1, "rows": 2, "credited_punches": own_in_exposure,
+          "exposure_frames": int(round(expo_min * 60 * FPS)), "exposure_min": expo_min, "signal_min_left": 0.0,
+          "signal_min_right": 0.0, "segments": 1, "short_segments": 0, "bodyless_segments": 0, "bursts": n_unexplained,
+          "unexplained": n_unexplained, "bursts_by_hand": {"left": 0, "right": n_unexplained},
+          "unexplained_by_hand": {"left": 0, "right": n_unexplained}, "own_labels_in_exposure": own_in_exposure,
+          "own_labels_outside_exposure": 0, "labels_matched_own": 0, "possible_duplicates": 0}
+    bs = [completeness.Burst("V", i, i / FPS, "1", "right", 5.0, "none", None, 1, (0.0, 0.0, 1.0)) for i in range(n_unexplained)]
+    labs = {"total": own_in_exposure, "owned": own_in_exposure, "owned_in_exposure": own_in_exposure,
+            "owned_outside_exposure": 0, "credited_to_excluded": 0, "unattributed": 0, "unattributed_in_exposure": 0,
+            "matched_own": 0, "matched_unattributed": 0}
+    return {"bursts": bs, "fragments": {1: fr}, "labels": labs, "possible_duplicate_pairs": 0}
+
+
+v1 = olympic_completeness.video_row_credited(fake_res(2, 1.0, 3), 3, 1.0)
+v2 = olympic_completeness.video_row_credited(fake_res(18, 3.0, 3), 3, 3.0)
+tp = olympic_completeness.totals_credited([v1, v2])
+check("setup: per video the unexplained rates are 2.0 and 6.0 per minute (their mean is 4.0)",
+      abs(v1["fragments"][0]["unexplained_per_exposure_min"] - 2.0) < 1e-9
+      and abs(v2["fragments"][0]["unexplained_per_exposure_min"] - 6.0) < 1e-9)
+check("POOLED: 20 unexplained over 4.0 minutes is 5.0 per minute, not the mean of the two rates (4.0)",
+      abs(tp["unexplained_per_exposure_min"] - 5.0) < 1e-9 and abs(tp["bursts_per_exposure_min"] - 5.0) < 1e-9
+      and tp["unexplained"] == 20 and abs(tp["exposure_min"] - 4.0) < 1e-9, str(tp))
+check("... and the own-label rate pools the same way: 6 labels over 4.0 minutes is 1.5 per minute (the mean of 3.0 and 1.0 is 2.0)",
+      abs(tp["own_labels_in_exposure_per_exposure_min"] - 1.5) < 1e-9)
+row_b = olympic_completeness.video_row_credited(resB, 3, 400 / FPS / 60)
+tot_b = olympic_completeness.totals_credited([row_b])
+check("two fragments on screen for the same 400 frames keep BOTH exposures: 800 frames summed, not 400 (the union)",
+      resB["fragments"][1]["exposure_frames"] == 400 and resB["fragments"][2]["exposure_frames"] == 400
+      and row_b["exposure_frames"] == 800 and abs(row_b["exposure_min"] - 800 / FPS / 60) < 1e-12
+      and tot_b["exposure_frames"] == 800 and abs(tot_b["exposure_min"] - 800 / FPS / 60) < 1e-12
+      and int((resB["exposure"][1] | resB["exposure"][2]).sum()) == 400, str(row_b["exposure_min"]))
+check("... and the rates divide by the summed exposure: 1 unexplained burst over 800 frames",
+      abs(tot_b["unexplained_per_exposure_min"] - 1 / (800 / FPS / 60)) < 1e-9
+      and abs(tot_b["bursts_per_exposure_min"] - 2 / (800 / FPS / 60)) < 1e-9, str(tot_b))
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
