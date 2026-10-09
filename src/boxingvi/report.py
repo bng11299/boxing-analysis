@@ -2,28 +2,39 @@
 classified punches (classify_punches.py) and the measured reliability of each stage.
 
 The summary is fixed sentence templates filled with computed numbers, so it
-cannot invent one. Every number goes into the text through `_Writer.num`, which
+cannot invent one. Every number goes into the text through `_Writer`, which
 records it; tests check that the text holds exactly those numbers and no other.
+Rounding never flips a claim: a share that is not exactly 0 or 100 is never
+printed as 0% or 100%, a rate under 10 keeps a decimal, and a change in punch
+rate is described from the numbers as printed, and only when it is bigger than
+chance would produce.
 
-Reliability comes from measurements, never from prose:
-* punch type: the held-out confusion matrix of the reported classifier run
-  (results/stgcnpp.json). The report refuses to use it unless the classifier's
-  manifest records the same per-class F1, i.e. it is the model that classified
-  these punches.
-* punch finding: the tuned rule's held-out score on V6 (results/punch_finder_v6.json).
-* your own footage: the clip's classify_score.json, when you have labelled it.
-Until the last exists, the summary says plainly that nothing was measured on
-your footage.
+Reliability comes from measurements, linked by hashes rather than trusted:
+  classified CSV --(sidecar: csv sha256, classifier sha256)--> classifier manifest
+  --(per-class F1, recomputed from the matrix)--> the reported run's held-out
+  confusion matrix (results/stgcnpp.json).
+* punch type: that confusion matrix.
+* the hand: the share of held-out punches whose predicted TYPE is thrown by the
+  same hand as the true one. That measures the classifier's hand. The finder's
+  hand (which wrist moved) has never been measured on its own; the report shows
+  how often the two disagree and says which number belongs to which reading.
+* punch finding: the tuned rule's held-out score on V6, recall AND count ratio.
+  V6 labels only hooks and uppercuts, so its precision understates the truth and
+  its count ratio overstates the over-count; how far counts are off on your
+  footage is unknown, and the summary says so.
+* your own footage: the clip's classify_score.json, when you labelled it, and
+  only if it scored the same classifier.
 
-Which punch types to "trust least" is a fixed rule, not a judgement per report:
-a type the classifier named correctly under LOW_RECALL of the time on held-out
-benchmark footage. Count bias is reported when the predicted count was more than
-COUNT_BIAS off the true count. Both thresholds are stated in the report.
+Fixed rules, stated in the report: a punch type the classifier names correctly
+under LOW_RECALL of the time is "named least reliably"; a count more than
+COUNT_BIAS off on the benchmark is reported as running high or low; a change in
+punch rate counts only beyond two standard errors of a Poisson count.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import re
@@ -32,7 +43,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .data import CLASSES
+from .classify import class_side, read_manifest
+from .data import CLASSES, HELD_OUT_VIDEOS
 
 CLASSIFIED_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_interpolated_frame",
                      "lead_rear", "punch_type", "confidence", "type_hand", "hands_agree",
@@ -40,14 +52,20 @@ CLASSIFIED_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_
 UNCLASSIFIED = "unclassified"
 LOW_RECALL = 0.70
 COUNT_BIAS = 0.20
-STEADY = 0.05          # a change in punch rate within this is "held steady"
+CHANCE_SE = 2.0
 MAX_ROWS = 100_000
+MAX_ROUNDS = 100
 MAX_JSON_BYTES = 4 * 1024 * 1024
 PLURAL = {"jab": "jabs", "cross": "crosses", "lead_hook": "lead hooks", "lead_uppercut": "lead uppercuts",
           "rear_hook": "rear hooks", "rear_uppercut": "rear uppercuts"}
+# The only notes classify_punches.py writes.
+_NOTES = (re.compile(r""), re.compile(r"pose in only [0-9]+ of the window's [0-9]+ frames"),
+          re.compile(r"no frame in the window shows both hips"),
+          re.compile(r"joints fall far outside the frame after scaling"))
 _DIGITS = re.compile(r"[0-9]+")
+_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 _NUMBER = re.compile(r"[0-9]+(?:[.:][0-9]+)?")
-# A cell starting with one of these is a formula to a spreadsheet program.
 _FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
 
 assert set(PLURAL) == set(CLASSES)
@@ -76,11 +94,17 @@ def _prob(x, what: str) -> float:
     return float(x)
 
 
+def _count(x, what: str) -> int:
+    if isinstance(x, bool) or not isinstance(x, int) or x < 0:
+        raise ValueError(f"{what} must be a whole number >= 0, got {x!r}")
+    return x
+
+
 def read_classified(path: Path, duration_s: float) -> "list[dict]":
     """classify_punches.py's CSV, checked field by field: it sits on disk between
     the two tools, and everything in it ends up in front of the user."""
     path = Path(path)
-    rows = []
+    rows, leads = [], set()
     with path.open(newline="", encoding="utf-8") as f:
         r = csv.reader(f)
         if next(r, None) != CLASSIFIED_HEADER:
@@ -94,37 +118,55 @@ def read_classified(path: Path, duration_s: float) -> "list[dict]":
             where = f"{path.name} line {i}"
             if not _DIGITS.fullmatch(d["frame"]) or not _DIGITS.fullmatch(d["window_frames_observed"]):
                 raise ValueError(f"{where}: frame numbers must be whole numbers")
-            try:
-                t = float(d["time_s"])
-            except ValueError:
-                raise ValueError(f"{where}: time {d['time_s']!r} is not a number") from None
-            if not (math.isfinite(t) and 0 <= t <= duration_s):
-                raise ValueError(f"{where}: time {d['time_s']} is not inside this {duration_s:.1f} s clip")
+            if not _DECIMAL.fullmatch(d["time_s"]) or not float(d["time_s"]) <= duration_s:
+                raise ValueError(f"{where}: time {d['time_s']!r} is not inside this {duration_s:.1f} s clip")
             if d["hand"] not in ("left", "right") or d["lead_rear"] not in ("lead", "rear"):
                 raise ValueError(f"{where}: hand {d['hand']!r} / {d['lead_rear']!r}")
+            leads.add(d["hand"] if d["lead_rear"] == "lead" else ("right" if d["hand"] == "left" else "left"))
             if d["peak_on_interpolated_frame"] not in ("yes", "no"):
                 raise ValueError(f"{where}: interpolated flag {d['peak_on_interpolated_frame']!r}")
+            if not any(p.fullmatch(d["note"]) for p in _NOTES):
+                raise ValueError(f"{where}: note is not one classify_punches.py writes")
             if d["punch_type"] == UNCLASSIFIED:
-                if d["confidence"] or d["type_hand"] or d["hands_agree"]:
-                    raise ValueError(f"{where}: an unclassified punch carries a type reading")
+                if d["confidence"] or d["type_hand"] or d["hands_agree"] or not d["note"]:
+                    raise ValueError(f"{where}: an unclassified punch carries a reading or lacks its reason")
                 conf = None
             elif d["punch_type"] in CLASSES:
-                try:
-                    conf = _prob(float(d["confidence"]), f"{where}: confidence")
-                except ValueError as e:
-                    raise ValueError(f"{where}: confidence {d['confidence']!r}: {e}") from None
-                side = "lead" if d["punch_type"] in ("jab", "lead_hook", "lead_uppercut") else "rear"
+                if d["note"]:
+                    raise ValueError(f"{where}: a classified punch carries an unclassified reason")
+                if not _DECIMAL.fullmatch(d["confidence"]):
+                    raise ValueError(f"{where}: confidence {d['confidence']!r} is not a number")
+                conf = _prob(float(d["confidence"]), f"{where}: confidence")
+                side = class_side(d["punch_type"])
                 if d["type_hand"] != side or d["hands_agree"] != ("yes" if side == d["lead_rear"] else "no"):
                     raise ValueError(f"{where}: type hand and agreement do not follow from the type")
             else:
                 raise ValueError(f"{where}: unknown punch type {d['punch_type']!r}")
-            if d["note"] and (d["note"].startswith(_FORMULA_LEAD) or len(d["note"]) > 200):
-                raise ValueError(f"{where}: note is not one this pipeline writes")
-            rows.append({"frame": int(d["frame"]), "time_s": t, "hand": d["hand"], "lead_rear": d["lead_rear"],
-                         "punch_type": d["punch_type"], "confidence": conf,
-                         "hands_agree": d["hands_agree"] or None, "note": d["note"],
-                         "interpolated": d["peak_on_interpolated_frame"] == "yes"})
+            rows.append({"frame": int(d["frame"]), "time_s": float(d["time_s"]), "hand": d["hand"],
+                         "lead_rear": d["lead_rear"], "punch_type": d["punch_type"], "confidence": conf,
+                         "type_hand": d["type_hand"] or None, "hands_agree": d["hands_agree"] or None,
+                         "note": d["note"], "interpolated": d["peak_on_interpolated_frame"] == "yes"})
+    if len(leads) > 1:
+        raise ValueError(f"{path.name}: rows disagree about which hand leads (two stances in one file)")
     return sorted(rows, key=lambda x: x["frame"])
+
+
+def verify_provenance(csv_path: Path, sidecar: Path, manifest: Path, clip: str) -> dict:
+    """The CSV is the one classify_punches.py wrote, by the classifier this manifest
+    describes. Returns the validated manifest."""
+    side = _read_json(sidecar)
+    if side.get("clip") != clip:
+        raise ValueError(f"{Path(sidecar).name} describes clip {side.get('clip')!r}, not {clip}")
+    if not isinstance(side.get("csv_sha256"), str) or not _HEX64.fullmatch(side["csv_sha256"]):
+        raise ValueError(f"{Path(sidecar).name}: no csv sha256")
+    if hashlib.sha256(Path(csv_path).read_bytes()).hexdigest() != side["csv_sha256"]:
+        raise ValueError(f"{Path(csv_path).name} has changed since classify_punches.py wrote it")
+    man = read_manifest(manifest)   # classify's own schema checks
+    if side.get("classifier_sha256") != man["sha256"]:
+        raise ValueError("these punches were named by another classifier than this manifest describes; "
+                         "its reliability does not apply")
+    man["_sidecar"] = side
+    return man
 
 
 def parse_rounds(text: "str | None", duration_s: float) -> "list[tuple[float, float]]":
@@ -134,8 +176,11 @@ def parse_rounds(text: "str | None", duration_s: float) -> "list[tuple[float, fl
         raise ValueError("clip duration must be positive")
     if text is None:
         return [(0.0, duration_s)]
+    parts = text.split(",")
+    if len(parts) > MAX_ROUNDS:
+        raise ValueError(f"at most {MAX_ROUNDS} rounds")
     out = []
-    for part in text.split(","):
+    for part in parts:
         m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)\s*", part)
         if not m:
             raise ValueError(f"round {part!r} is not start-end in seconds")
@@ -145,8 +190,6 @@ def parse_rounds(text: "str | None", duration_s: float) -> "list[tuple[float, fl
         if out and a < out[-1][1]:
             raise ValueError(f"round {part.strip()} starts before the previous one ends")
         out.append((a, min(b, duration_s)))
-    if not out or len(out) > 100:
-        raise ValueError("between 1 and 100 rounds")
     return out
 
 
@@ -164,56 +207,71 @@ class TypeReliability:
         return self.predicted / self.true
 
 
-def benchmark_reliability(reference: Path, manifest: Path) -> dict:
-    """Per-type reliability from the reported run's held-out confusion matrix, but
-    only if the classifier's manifest says it IS that run (same per-class F1)."""
-    ref, man = _read_json(reference), _read_json(manifest)
+def benchmark_reliability(reference: Path, manifest: dict) -> dict:
+    """Per-type reliability from the reported run's held-out confusion matrix. Used
+    only if the matrix reproduces its own per-class F1 and those equal the F1 the
+    classifier's manifest records."""
+    ref = _read_json(reference)
     runs = [r for r in ref.get("results", []) if isinstance(r, dict) and r.get("model") == "st-gcn++ pretrained"]
     if len(runs) != 1:
         raise ValueError(f"{Path(reference).name}: no single 'st-gcn++ pretrained' result")
     r = runs[0]
-    held = man.get("held_out") or {}
+    raw = r.get("confusion")
+    if not (isinstance(raw, list) and len(raw) == len(CLASSES)
+            and all(isinstance(row, list) and len(row) == len(CLASSES) for row in raw)):
+        raise ValueError(f"{Path(reference).name}: confusion is not {len(CLASSES)}x{len(CLASSES)}")
+    c = np.array([[_count(v, "confusion cell") for v in row] for row in raw], dtype=np.int64)
+    if (c.sum(axis=1) == 0).any():
+        raise ValueError(f"{Path(reference).name}: a punch type has no held-out examples")
+    held = manifest.get("held_out") if isinstance(manifest.get("held_out"), dict) else {}
     want, got = r.get("per_class_f1"), held.get("per_class_f1")
-    if not (isinstance(want, dict) and isinstance(got, dict) and set(want) == set(CLASSES) == set(got)
-            and all(abs(want[c] - got[c]) < 1e-9 for c in CLASSES)):
-        raise ValueError("the classifier's manifest does not match the reported run: its per-type "
-                         "reliability is unmeasured, so the report will not borrow another model's")
-    c = np.asarray(r.get("confusion"), dtype=np.int64)
-    if c.shape != (len(CLASSES), len(CLASSES)) or (c < 0).any() or (c.sum(axis=1) == 0).any():
-        raise ValueError(f"{Path(reference).name}: confusion matrix is not {len(CLASSES)}x{len(CLASSES)} counts")
     table = []
     for i, cls in enumerate(CLASSES):
-        true, pred = int(c[i].sum()), int(c[:, i].sum())
-        table.append(TypeReliability(cls, true, pred, float(c[i, i] / true),
-                                     float(c[i, i] / pred) if pred else None, float(want[cls])))
-    side = np.array([0 if k in ("jab", "lead_hook", "lead_uppercut") else 1 for k in CLASSES])
+        true, pred, tp = int(c[i].sum()), int(c[:, i].sum()), int(c[i, i])
+        f1 = 2 * tp / (true + pred)
+        for name, d in (("reference", want), ("manifest", got)):
+            v = d.get(cls) if isinstance(d, dict) else None
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or abs(v - f1) > 1e-9:
+                raise ValueError(f"the {name}'s {cls} F1 ({v!r}) is not the confusion matrix's ({f1:.4f}): "
+                                 "this matrix does not describe this classifier")
+        table.append(TypeReliability(cls, true, pred, tp / true, tp / pred if pred else None, f1))
+    side = np.array([class_side(k) == "lead" for k in CLASSES])
     same = side[:, None] == side[None, :]
+    videos = ref.get("val_videos")
+    if not (isinstance(videos, list) and videos and all(isinstance(v, str) and _DIGITS.sub("", v) == "V"
+                                                         for v in videos)):
+        videos = list(HELD_OUT_VIDEOS)
     return {"types": table, "side_accuracy": float(c[same].sum() / c.sum()),
-            "accuracy": float(np.trace(c) / c.sum()), "n": int(c.sum())}
+            "accuracy": float(np.trace(c) / c.sum()), "n": int(c.sum()), "videos": videos}
 
 
 def finder_reliability(rule: Path) -> dict:
     d = _read_json(rule)
-    t = d.get("test") or (d.get("chosen") or {}).get("test")
+    t = (d.get("chosen") or {}).get("test") if isinstance(d.get("chosen"), dict) else None
     if not isinstance(t, dict):
         raise ValueError(f"{Path(rule).name}: no held-out test score for the punch finder")
-    return {"recall": _prob(t.get("recall"), "finder recall"),
-            "precision": _prob(t.get("precision"), "finder precision"),
-            "n_labelled": int(t.get("n_labelled", 0))}
+    ratio = t.get("count_ratio")
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 <= ratio < 100:
+        raise ValueError(f"{Path(rule).name}: count ratio {ratio!r}")
+    video = d.get("video") if isinstance(d.get("video"), str) and _DIGITS.sub("", d["video"]) == "V" else None
+    return {"recall": _prob(t.get("recall"), "finder recall"), "count_ratio": float(ratio), "video": video}
 
 
-def own_reliability(score: Path, clip: str) -> "dict | None":
+def own_reliability(score: Path, clip: str, classifier_sha256: str) -> dict:
     d = _read_json(score)
     if d.get("clip") != clip:
         raise ValueError(f"{Path(score).name} scores clip {d.get('clip')!r}, not {clip}")
-    m = d.get("matched_detections") or {}
-    if not m.get("n"):
-        return None
-    n = m["n"]
-    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
-        raise ValueError("matched punch count must be a positive integer")
-    return {"n": n, "accuracy": _prob(m.get("accuracy"), "own accuracy"),
-            "side_accuracy": _prob(m.get("side_accuracy"), "own hand accuracy")}
+    if d.get("classifier_sha256") != classifier_sha256:
+        raise ValueError(f"{Path(score).name} scored another classifier; re-run classify_punches.py --labels")
+    m = d.get("matched_detections")
+    if not isinstance(m, dict):
+        raise ValueError(f"{Path(score).name}: no matched-detection score")
+    n = _count(m.get("n"), "matched punch count")
+    out = {"n": n, "unclassifiable": _count(d.get("matched_unclassifiable", 0), "unclassifiable count")}
+    if n:
+        out["accuracy"] = _prob(m.get("accuracy"), "own accuracy")
+        out["floor"] = _prob(m.get("majority_floor_accuracy"), "own majority floor")
+    return out
 
 
 # ------------------------------------------------------------------- facts ---
@@ -227,14 +285,15 @@ def round_of(t: float, rounds) -> "int | None":
 
 def compute_facts(rows, rounds, duration_s: float) -> dict:
     """Every number the report states, computed once."""
+    which = [round_of(r["time_s"], rounds) for r in rows]
     per = []
     for k, (a, b) in enumerate(rounds):
-        rr = [r for r in rows if round_of(r["time_s"], rounds) == k]
-        per.append({"round": k + 1, "start_s": a, "end_s": b, "n": len(rr),
+        rr = [r for r, w in zip(rows, which) if w == k]
+        per.append({"round": k + 1, "start_s": a, "end_s": b, "n": len(rr), "minutes": (b - a) / 60,
                     "per_min": len(rr) / ((b - a) / 60),
                     "types": {c: sum(r["punch_type"] == c for r in rr) for c in CLASSES},
                     "unnamed": sum(r["punch_type"] == UNCLASSIFIED for r in rr)})
-    inside = [r for r in rows if round_of(r["time_s"], rounds) is not None]
+    inside = [r for r, w in zip(rows, which) if w is not None]
     named = [r for r in inside if r["punch_type"] != UNCLASSIFIED]
     minutes = sum(b - a for a, b in rounds) / 60
     return {"duration_s": duration_s, "rounds": per, "n_found": len(inside),
@@ -242,13 +301,26 @@ def compute_facts(rows, rounds, duration_s: float) -> dict:
             "n_unnamed": len(inside) - len(named), "per_min": len(inside) / minutes,
             "round_minutes": minutes,
             "types": {c: sum(r["punch_type"] == c for r in named) for c in CLASSES},
-            "lead_share": (sum(r["lead_rear"] == "lead" for r in inside) / len(inside)) if inside else None}
+            "n_type_lead": sum(r["type_hand"] == "lead" for r in named),
+            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named)}
+
+
+def shares(counts: "dict[str, int]") -> "dict[str, int]":
+    """Whole-percent shares that add up to 100 (largest remainder)."""
+    total = sum(counts.values())
+    if not total:
+        return {k: 0 for k in counts}
+    exact = {k: 100 * v / total for k, v in counts.items()}
+    out = {k: int(math.floor(x)) for k, x in exact.items()}
+    for k in sorted(exact, key=lambda k: (-(exact[k] - out[k]), k))[:100 - sum(out.values())]:
+        out[k] += 1
+    return out
 
 
 # ----------------------------------------------------------------- summary ---
 
 class _Writer:
-    """Collects sentences; every number enters through num(), which records it."""
+    """Collects sentences; every number enters through a method here, which records it."""
 
     def __init__(self):
         self.parts: "list[str]" = []
@@ -259,10 +331,25 @@ class _Writer:
         return s
 
     def pct(self, x: float) -> str:
+        """Never 0% or 100% unless exact."""
+        if 0 < x < 0.005:
+            return "under " + self.num("1") + "%"
+        if 0.995 <= x < 1:
+            return "over " + self.num("99") + "%"
         return self.num(f"{100 * x:.0f}") + "%"
+
+    def share(self, p: int, count: int, total: int) -> str:
+        if p == 0 and count:
+            return "under " + self.num("1") + "%"
+        if p == 100 and count < total:
+            return "over " + self.num("99") + "%"
+        return self.num(str(p)) + "%"
 
     def count(self, n: int) -> str:
         return self.num(str(int(n)))
+
+    def rate(self, x: float) -> str:
+        return self.num(f"{x:.1f}" if x < 10 else f"{x:.0f}")
 
     def mmss(self, s: float) -> str:
         s = int(round(s))
@@ -283,43 +370,50 @@ def _join(items: "list[str]") -> str:
 
 
 def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tuple[str, list[str]]":
-    """(text, the numbers it states in order). Fixed templates only."""
+    """(text, the numbers it states). Fixed templates only."""
     w = _Writer()
     rounds = facts["rounds"]
     nr = len(rounds)
     where = "one round" if nr == 1 else f"{w.count(nr)} rounds"
+    footage = w.mmss(facts["round_minutes"] * 60)
     if facts["n_found"] == 0:
-        w.say(f"In {where} ({w.mmss(facts['round_minutes'] * 60)} of footage) the tool found no punches.")
+        w.say(f"In {where} ({footage} of footage) the tool found no punches.")
     else:
-        rate = w.num(f"{facts['per_min']:.0f}")
-        w.say(f"In {where} ({w.mmss(facts['round_minutes'] * 60)} of footage) the tool found "
-              f"{w.count(facts['n_found'])} {_punches(facts['n_found'])}, {rate} a minute.")
+        w.say(f"In {where} ({footage} of footage) the tool found {w.count(facts['n_found'])} "
+              f"{_punches(facts['n_found'])}, {w.rate(facts['per_min'])} a minute.")
         if facts["n_named"]:
+            sh = shares(facts["types"])
             order = sorted((c for c in CLASSES if facts["types"][c]), key=lambda c: (-facts["types"][c], c))
-            shares = [f"{w.pct(facts['types'][c] / facts['n_named'])} {PLURAL[c]} ({w.count(facts['types'][c])})"
-                      for c in order]
-            w.say(f"Of the {w.count(facts['n_named'])} it could name, {_join(shares)}.")
+            parts = [f"{w.share(sh[c], facts['types'][c], facts['n_named'])} {PLURAL[c]} "
+                     f"({w.count(facts['types'][c])})" for c in order]
+            w.say(f"Of the {w.count(facts['n_named'])} it could name, {_join(parts)}.")
+            lead = facts["n_type_lead"] / facts["n_named"]
+            w.say(f"By punch type, {w.pct(lead)} were thrown with your lead hand.")
+            if facts["n_hands_disagree"]:
+                k = facts["n_hands_disagree"]
+                w.say(f"For {w.count(k)} {_punches(k)} the punch type and the wrist that moved point to "
+                      f"different hands; one of the two readings is wrong there.")
         if facts["n_unnamed"]:
-            w.say(f"{w.count(facts['n_unnamed'])} it could not name: too little of you was in view.")
-        w.say(f"{w.pct(facts['lead_share'])} came from your lead hand.")
-        if nr >= 2 and rounds[0]["per_min"] > 0:
-            first, last = rounds[0], rounds[-1]
-            change = last["per_min"] / first["per_min"] - 1
-            a, b = w.num(f"{first['per_min']:.0f}"), w.num(f"{last['per_min']:.0f}")
-            if abs(change) <= STEADY:
-                trend = "held steady"
+            w.say(f"{w.count(facts['n_unnamed'])} it could not name: the pose was too incomplete to read.")
+        first, last = rounds[0], rounds[-1]
+        if nr >= 2 and first["n"] and last["n"]:
+            a_s, b_s = w.rate(first["per_min"]), w.rate(last["per_min"])
+            a, b = float(a_s), float(b_s)
+            se = math.sqrt(first["n"] / first["minutes"] ** 2 + last["n"] / last["minutes"] ** 2)
+            span = f"from {a_s} a minute in round {w.count(1)} to {b_s} in round {w.count(last['round'])}"
+            if abs(last["per_min"] - first["per_min"]) <= CHANCE_SE * se or a == b:
+                w.say(f"Your punch rate went {span}: a difference chance alone could produce.")
             else:
-                trend = ("dropped by " if change < 0 else "rose by ") + w.pct(abs(change))
-            w.say(f"Your punch rate {trend}, from {a} a minute in round {w.count(1)} "
-                  f"to {b} in round {w.count(last['round'])}.")
+                trend = "dropped" if b < a else "rose"
+                w.say(f"Your punch rate {trend} by {w.pct(abs(b / a - 1))}, {span}.")
         if facts["n_outside_rounds"]:
             k = facts["n_outside_rounds"]
-            w.say(f"{w.count(k)} {_punches(k)} fell between rounds and {'is' if k == 1 else 'are'} not counted.")
+            w.say(f"{w.count(k)} {_punches(k)} fell outside the rounds and {'is' if k == 1 else 'are'} not counted.")
 
     low = [t for t in bench["types"] if t.recall < LOW_RECALL]
     if low:
-        w.say(f"Trust these counts least: {_join([PLURAL[t.cls] for t in low])}. On benchmark footage the tool "
-              f"named only {_join([f'{w.pct(t.recall)} of {PLURAL[t.cls]}' for t in low])} correctly.")
+        w.say(f"The tool names these least reliably: {_join([PLURAL[t.cls] for t in low])}. On held-out benchmark "
+              f"footage it named only {_join([f'{w.pct(t.recall)} of {PLURAL[t.cls]}' for t in low])} correctly.")
     high = [t for t in bench["types"] if t.count_ratio - 1 > COUNT_BIAS]
     under = [t for t in bench["types"] if 1 - t.count_ratio > COUNT_BIAS]
     bias = []
@@ -328,16 +422,25 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
     if under:
         bias.append("low for " + _join([f"{PLURAL[t.cls]} (by {w.pct(1 - t.count_ratio)})" for t in under]))
     if bias:
-        w.say(f"On the benchmark, counts ran {', and '.join(bias)}.")
-    w.say(f"Which hand threw a punch is the most reliable reading: right {w.pct(bench['side_accuracy'])} "
-          f"of the time on the benchmark.")
-    w.say(f"Finding punches is the least tested stage: on the one benchmark video with continuous labels it "
-          f"found {w.pct(finder['recall'])} of the labelled punches, and only hooks and uppercuts were labelled there.")
-    if own:
-        w.say(f"Against your own labels for this clip it named {w.pct(own['accuracy'])} of "
-              f"{w.count(own['n'])} matched punches correctly.")
-    else:
+        w.say(f"On the benchmark, type counts ran {', and '.join(bias)}.")
+    w.say(f"The hand a punch type implies was right {w.pct(bench['side_accuracy'])} of the time on the benchmark; "
+          f"which wrist moved has not been checked against labels.")
+    src = f"benchmark video {w.num(finder['video'])}" if finder["video"] else "the benchmark video"
+    ratio = w.num(f"{finder['count_ratio']:.1f}")
+    w.say(f"Finding punches is the least tested stage. On {src}, the only one with continuous labels, it found "
+          f"{w.pct(finder['recall'])} of the labelled punches but flagged {ratio} "
+          f"times as many punches as were labelled; part of that is real punches that were never labelled there, "
+          f"so how far the totals above are off is not known.")
+    if own is None:
         w.say("None of this has been measured on your own footage yet: label a clip to measure it.")
+    elif not own["n"]:
+        w.say("You labelled this clip, but no labelled punch with a nameable type matched a punch the tool found.")
+    else:
+        w.say(f"Against your own labels for this clip it named {w.pct(own['accuracy'])} of {w.count(own['n'])} "
+              f"matched {_punches(own['n'])} correctly; always guessing your commonest punch would score "
+              f"{w.pct(own['floor'])}.")
+        if own["unclassifiable"]:
+            w.say(f"{w.count(own['unclassifiable'])} more matched {_punches(own['unclassifiable'])} could not be named.")
     return " ".join(w.parts), w.numbers
 
 
@@ -360,13 +463,13 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
     wb = Workbook()
     ws = wb.active
     ws.title = "Punches"
-    ws.append(["round", "time (s)", "time (m:ss)", "hand", "lead/rear", "punch type", "confidence",
-               "type agrees with hand", "note"])
+    ws.append(["round", "time (s)", "time (m:ss)", "hand (wrist that moved)", "lead/rear", "punch type",
+               "confidence", "type agrees with wrist", "why not named"])
     for r in rows:
         k = round_of(r["time_s"], rounds)
         s = int(r["time_s"])
         ws.append([_cell(v) for v in (
-            k + 1 if k is not None else "between rounds", round(r["time_s"], 3), f"{s // 60}:{s % 60:02d}",
+            k + 1 if k is not None else "outside rounds", round(r["time_s"], 3), f"{s // 60}:{s % 60:02d}",
             r["hand"], r["lead_rear"], r["punch_type"].replace("_", " "),
             None if r["confidence"] is None else round(r["confidence"], 3),
             r["hands_agree"] or "", r["note"])])
@@ -374,22 +477,23 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
     ws.append(["round", "start (s)", "end (s)", "punches", "per minute"]
               + [PLURAL[c] for c in CLASSES] + ["not named"])
     for p in facts["rounds"]:
-        ws.append([p["round"], p["start_s"], round(p["end_s"], 3), p["n"], round(p["per_min"], 1)]
+        ws.append([p["round"], p["start_s"], round(p["end_s"], 3), p["n"], round(p["per_min"], 2)]
                   + [p["types"][c] for c in CLASSES] + [p["unnamed"]])
-    ws.append(["all", rounds[0][0], round(rounds[-1][1], 3), facts["n_found"], round(facts["per_min"], 1)]
+    ws.append(["all", rounds[0][0], round(rounds[-1][1], 3), facts["n_found"], round(facts["per_min"], 2)]
               + [facts["types"][c] for c in CLASSES] + [facts["n_unnamed"]])
     ws = wb.create_sheet("Reliability")
     ws.append(["punch type", "benchmark punches", "tool counted", "count off by", "named correctly (recall)",
-               "precision", "F1", "trust least"])
+               "precision", "F1", "named least reliably"])
     for t in bench["types"]:
         ws.append([PLURAL[t.cls], t.true, t.predicted, f"{100 * (t.count_ratio - 1):+.0f}%", round(t.recall, 3),
                    None if t.precision is None else round(t.precision, 3), round(t.f1, 3),
                    "yes" if t.recall < LOW_RECALL else ""])
     ws = wb.create_sheet("About")
     for line in (f"clip: {clip}", "", "summary:", text, "",
-                 f"'trust least' = named correctly under {100 * LOW_RECALL:.0f}% of the time on held-out benchmark "
-                 f"footage; counts flagged when more than {100 * COUNT_BIAS:.0f}% off.",
-                 "Benchmark = BoxingVI, videos V2/V5/V9 held out; skeletons from AlphaPose, not the YOLO11-pose "
-                 "used on your footage. Counts are estimates."):
+                 f"'named least reliably' = named correctly under {100 * LOW_RECALL:.0f}% of the time on held-out "
+                 f"benchmark footage; type counts reported when more than {100 * COUNT_BIAS:.0f}% off; a change in "
+                 f"punch rate reported only beyond {CHANCE_SE:.0f} standard errors of a Poisson count.",
+                 f"Benchmark = BoxingVI, held-out videos {'/'.join(bench['videos'])}; skeletons from AlphaPose, "
+                 "not the YOLO11-pose used on your footage. Counts are estimates."):
         ws.append([_cell(line)])
     wb.save(path)

@@ -7,7 +7,9 @@
   ... --score results/punches/IMG_4406.classify_score.json   # after labelling the clip
 
 Writes results/reports/<clip>.report.xlsx (sheets: Punches, Rounds, Reliability,
-About) and <clip>.summary.txt. The summary is fixed templates filled with the
+About) and <clip>.summary.txt. Refuses unless the CSV is unchanged since
+classify_punches.py wrote it and was named by the classifier --classifier describes
+(the <clip>.classified.json beside it records both hashes). The summary is fixed templates filled with the
 counts; its reliability warnings come from measured numbers (see boxingvi.report),
 and it says so when nothing has been measured on your own footage.
 """
@@ -45,12 +47,19 @@ def main(argv=None) -> int:
     clip = a.pose.name.split(".")[0]
     if a.classified.name.split(".")[0] != clip:
         raise ValueError(f"{a.classified.name} does not name the clip {clip}")
+    sidecar = a.classified.with_suffix(".json")
+    if not sidecar.is_file():
+        raise ValueError(f"no {sidecar.name} beside the CSV: re-run classify_punches.py, which writes it")
+    man = report.verify_provenance(a.classified, sidecar, a.classifier, clip)
+    if man["_sidecar"].get("pose_frames") != len(pose):
+        raise ValueError(f"{a.classified.name} was classified on a {man['_sidecar'].get('pose_frames')}-frame "
+                         f"pose; this one has {len(pose)}")
     duration = len(pose) / pose.fps
     rows = report.read_classified(a.classified, duration)
     rounds = report.parse_rounds(a.rounds, duration)
-    bench = report.benchmark_reliability(a.reference, a.classifier)
+    bench = report.benchmark_reliability(a.reference, man)
     finder = report.finder_reliability(a.rule)
-    own = report.own_reliability(a.score, clip) if a.score else None
+    own = report.own_reliability(a.score, clip, man["sha256"]) if a.score else None
 
     facts = report.compute_facts(rows, rounds, duration)
     text, _ = report.summary(facts, bench, finder, own)

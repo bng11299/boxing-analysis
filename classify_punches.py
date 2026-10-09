@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -178,7 +179,14 @@ def main(argv=None) -> int:
     if agree["n"]:
         print(f"  type and finder name the same hand on {agree['agree']:.1%} of {agree['n']} "
               f"(chance for these proportions {agree['chance']:.1%}); a consistency check, not accuracy")
-    print(f"  -> {out}")
+    # Provenance for whatever reads the CSV next (report_punches.py): which model named
+    # these punches, from which finder rule and stance, and the CSV's own hash.
+    rule = load_rule(a.rule)
+    (a.out_dir / f"{clip}.classified.json").write_text(json.dumps({
+        "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+        "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule,
+        "pose_frames": len(pose), "fps": pose.fps}, indent=1, allow_nan=False), encoding="utf-8")
+    print(f"  -> {out} (+ .json provenance)")
 
     if a.labels:
         spans = load_labels(a.labels, len(pose), pose.fps)

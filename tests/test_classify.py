@@ -335,6 +335,11 @@ check("orthodox: left-hand punches are lead, right-hand punches rear",
       [r["lead_rear"] for r in rows] == ["lead", "lead", "rear"])
 check("hands_agree says whether the type's hand is the finder's",
       all((r["hands_agree"] == "yes") == (r["type_hand"] == r["lead_rear"]) for r in rows))
+prov = json.loads((tmp / "o" / "IMG_7777.classified.json").read_text(encoding="utf-8"))
+check("a provenance sidecar names the classifier and hashes the CSV it sits beside",
+      prov["classifier_sha256"] == man["sha256"] and prov["clip"] == "IMG_7777" and prov["stance"] == "orthodox"
+      and prov["csv_sha256"] == __import__("hashlib").sha256((tmp / "o" / "IMG_7777.classified.csv").read_bytes()).hexdigest()
+      and prov["pose_frames"] == n)
 classify_punches.main(args + ["--stance", "southpaw"])
 rows_s = list(csv.DictReader((tmp / "o" / "IMG_7777.classified.csv").open(encoding="utf-8")))
 check("southpaw flips lead and rear, and nothing else",
