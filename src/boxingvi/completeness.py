@@ -231,13 +231,55 @@ def _match(bursts: "list[tuple]", labels: "list[int]", events, tol: int, taken: 
     return got
 
 
+def check_skips(skips, n_frames: int) -> "np.ndarray | None":
+    """`skips` (None, or the sorted frame ids `skips.find_skips` returns) as an int64 array, refused
+    unless it is a 1-D whole-number array, strictly increasing, with every id in 1..n_frames-1
+    (frame 0 has no previous frame and cannot be a skip)."""
+    if skips is None:
+        return None
+    a = np.asarray(skips)
+    if a.ndim != 1 or (a.size and a.dtype.kind not in "iu"):
+        raise ValueError("skips must be a 1-D array of whole frame numbers")
+    a = a.astype(np.int64)
+    if a.size and (a.min() < 1 or a.max() > n_frames - 1):
+        raise ValueError(f"skips must lie in 1..{n_frames - 1}")
+    if a.size > 1 and not (np.diff(a) > 0).all():
+        raise ValueError("skips must be sorted and distinct")
+    return a
+
+
+def cut_at_skips(table: PoseTable, segs: "list[np.ndarray]", skips: "np.ndarray | None") -> "list[np.ndarray]":
+    """Each segment cut between two consecutive rows wherever a skip lies in (frame before, frame after]:
+    a skip f at a row boundary cuts between f-1 and f, and a skip on a frame the segment is missing
+    (a hole the bridge would interpolate across) cuts there too. Nothing is then smoothed, differenced or
+    bridged across a skip, because the picture jumped there and a position change across it is not motion.
+    `skips=None` or no skip inside a segment returns the segment unchanged."""
+    if skips is None or len(skips) == 0:
+        return segs
+    out = []
+    for seg in segs:
+        fr = table.frame[seg]
+        seen = np.searchsorted(skips, fr, side="right")       # skips at or before each row
+        cut = np.flatnonzero(np.diff(seen) > 0) + 1
+        out.extend(seg[a:b] for a, b in zip(np.r_[0, cut], np.r_[cut, len(seg)]))
+    return out
+
+
 def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: str, bridge: int,
-                   min_rows: int) -> dict:
+                   min_rows: int, skips: "np.ndarray | None" = None) -> dict:
     """The rule on each segment (bridge, wrist_signal, detect) and the EXPOSURE it ran on, for one
     person: the single implementation behind `find_bursts` (a linked boxer) and
     `find_bursts_credited` (a credited fragment). Returns {"mask", "raw" [(frame, hand index, peak
     speed)], "segments", "short_segments", "bodyless_segments", "valid" (frames with a valid
-    signal: left, right)}. Every burst is asserted to lie in the mask (RuntimeError otherwise)."""
+    signal: left, right)}. Every burst is asserted to lie in the mask (RuntimeError otherwise).
+
+    `skips` (sorted frame ids where the camera dropped a frame, `skips.find_skips`; None = ignore them) cut
+    every segment between f-1 and f for each skip f inside it (`cut_at_skips`), BEFORE anything else: the
+    pieces are bridged, smoothed and differenced separately, a piece shorter than `min_rows` is counted as
+    a short segment, and `segments` counts the pieces. With None the result is exactly what it was without
+    the argument."""
+    skips = check_skips(skips, table.n_frames)
+    segs = cut_at_skips(table, segs, skips)
     out = {"mask": np.zeros(table.n_frames, dtype=bool), "raw": [], "segments": 0, "short_segments": 0,
            "bodyless_segments": 0, "valid": np.zeros(2)}
     mask = out["mask"]
@@ -290,7 +332,7 @@ def check_attrs_bound(table: PoseTable, events, attrs) -> None:
 
 
 def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, video: str = "",
-                tol_s: float = TOL_S) -> dict:
+                tol_s: float = TOL_S, skips: "np.ndarray | None" = None) -> dict:
     """Bursts per boxer, matched one-to-one to labels (see the module docstring), the EXPOSURE
     they were looked for in, and the labels each boxer owns.
 
@@ -308,7 +350,9 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
     exposure; an unattributed label when it intersects either boxer's. The masks are returned
     under "exposure" as {"A": bool array, "B": bool array}.
 
-    `attrs` is `olympic.attribute(events, table)`: one attribution per event, same order."""
+    `attrs` is `olympic.attribute(events, table)`: one attribution per event, same order.
+    `skips`: frames where the camera dropped a frame; segments are cut at them (`_scan_segments`), so the
+    exposure shrinks by what the cut leaves too short. None = as before."""
     if not tol_s >= 0:
         raise ValueError("tol_s must be non-negative")
     check_attrs_shape(events, attrs)
@@ -331,7 +375,7 @@ def find_bursts(table: PoseTable, linking: Linking, events, attrs, rule: dict, v
                 "labels_matched_own": 0, "note": ""}
         boxers["AB"[k]] = info
         scan = _scan_segments(table, boxer_segments(table, linking, k, max_gap=bridge), rule,
-                              f"boxer{'AB'[k]}", bridge, min_rows)
+                              f"boxer{'AB'[k]}", bridge, min_rows, skips)
         mask = scan["mask"]
         masks["AB"[k]] = mask
         raw[k] = scan["raw"]
@@ -449,7 +493,7 @@ def iou(a, b) -> float:
 
 
 def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str = "",
-                         tol_s: float = TOL_S, min_punches: int = 1) -> dict:
+                         tol_s: float = TOL_S, min_punches: int = 1, skips: "np.ndarray | None" = None) -> dict:
     """The completeness test on CREDITED FRAGMENTS, with no linking (module docstring: ADR-0012
     Option 2 and its bias). Population: every track id credited (`attrs` from `olympic.attribute`,
     one per event, same order) with at least `min_punches` labelled punches.
@@ -472,6 +516,9 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
     within the matching tolerance, boxes overlapping at IoU >= DUP_IOU), `possible_duplicate_pairs`
     the number of such pairs. They are reported, never subtracted. `attrs` must be exactly
     `olympic.attribute(events, table)` for THIS table (verified: ValueError otherwise).
+
+    `skips`: frames where the camera dropped a frame (`skips.find_skips`); every segment is cut at them
+    (`_scan_segments`) so no signal spans one. None = as before.
 
     Returns {"bursts": [Burst] (track_id and box set), "fragments": {track id: info}, "labels": {...},
     "exposure": {track id: bool mask}, "min_punches": int, "bias": str}."""
@@ -502,7 +549,7 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
         rows = np.flatnonzero(table.track_id == t)
         rows = rows[np.argsort(table.frame[rows], kind="stable")]
         rowsof.append(rows)
-        scan = _scan_segments(table, _split_rows(table, rows, bridge), rule, f"fragment{t}", bridge, min_rows)
+        scan = _scan_segments(table, _split_rows(table, rows, bridge), rule, f"fragment{t}", bridge, min_rows, skips)
         mask = scan["mask"]
         masks[t] = mask
         raw.append(scan["raw"])
@@ -582,6 +629,37 @@ def find_bursts_credited(table: PoseTable, events, attrs, rule: dict, video: str
     return {"bursts": bursts, "fragments": frags, "labels": labels, "exposure": masks,
             "possible_duplicates": len(twin), "possible_duplicate_pairs": pairs,
             "min_punches": int(min_punches), "bias": BIAS_CREDITED}
+
+
+NEAR_SKIP = 2     # a burst is "near a skip" when a skip lies within this many frames of it
+
+
+def near_skip_stats(bursts: "list[Burst]", exposure: "dict[object, np.ndarray]", skips, n_frames: int,
+                    within: int = NEAR_SKIP) -> dict:
+    """How the bursts sit relative to the camera's dropped frames, with the BASE RATE they must be read against.
+
+    A frame is NEAR a skip when a skip lies within `within` frames of it (either side). Returns counts
+    (add them across videos, divide once at the end): `skips`, `exposure_frames` and `exposure_near_skip`
+    (summed over the masks in `exposure`, one per person, as the burst rates' denominator is), and for the
+    unexplained and the explained bursts their number and how many are near a skip. If skips make no
+    difference to where bursts are, `unexplained_near_skip / unexplained` is about
+    `exposure_near_skip / exposure_frames`; a skip-made burst pushes the first above the second."""
+    if isinstance(within, bool) or not isinstance(within, (int, np.integer)) or within < 0:
+        raise ValueError("within must be a whole number >= 0")
+    sk = check_skips(skips, n_frames)
+    near = np.zeros(n_frames, dtype=bool)
+    for f in sk:
+        near[max(0, int(f) - within):int(f) + within + 1] = True
+    un = [b for b in bursts if not b.explained]
+    ex = [b for b in bursts if b.explained]
+    for b in bursts:
+        if not 0 <= b.frame < n_frames:
+            raise ValueError(f"a burst at frame {b.frame} is outside the {n_frames}-frame video")
+    return {"skips": int(len(sk)), "within_frames": int(within),
+            "exposure_frames": int(sum(int(m.sum()) for m in exposure.values())),
+            "exposure_near_skip": int(sum(int((m & near).sum()) for m in exposure.values())),
+            "unexplained": len(un), "unexplained_near_skip": sum(bool(near[b.frame]) for b in un),
+            "explained": len(ex), "explained_near_skip": sum(bool(near[b.frame]) for b in ex)}
 
 
 def mss(seconds: float) -> str:
