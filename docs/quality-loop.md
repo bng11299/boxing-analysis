@@ -540,3 +540,61 @@ The wrist-speed signal judged per hand, with short dropouts bridged, and `find_p
   two-boxer tracking in Phase 2. (b) A bridged id-gap next to a filled hand hole can chain to ~7
   synthetic frames in 8; such peaks are flagged in the CSV, not capped. (c) The rule's threshold
   is V6's (AlphaPose, 24 fps, hooks and uppercuts only): untuned for own footage until labels exist.
+
+## `feat/classify-detected` -- 2026-10-09
+
+The classify step: a window of continuous pose around each punch the finder found, mapped
+into BoxingVI's clip space, named by the saved ST-GCN++. Acceptance criteria: (1)
+`train_classifier.py` saves a checkpoint + manifest only if it reproduces the reported
+0.8145 / 0.7207 held-out; (2) `classify_punches.py` writes one row per finder punch, typed
+or `unclassified` with a reason, refusing a missing stance or another clip's CSV; (3) the
+loader refuses a hash mismatch, a path out of its folder, a non-state-dict and a
+code-carrying pickle whose code never runs; (4) `eval_classify_v6.py` measures the window's
+cost on V6 against the commonest-type floor, with paired intervals; (5) all suites green in
+a clean clone.
+
+Threat sketch. Assets: classifier integrity; correctness of per-punch outputs. Entry points:
+manifest JSON, checkpoint pickle, punches CSV, pose npz, labels JSON. Trust boundary: files
+on disk between tools. Top threats: a swapped checkpoint executing code via pickle; a stale
+CSV from another clip classified against the wrong pose.
+
+Design facts, measured on the training clips only (3,778 of the 3,781): a clip is 9 real
+frames (0.375 s) at 24 fps, its wrist-speed peak 3 frames in, torso 205 px of 1080, hips at
+(0.48, 0.53) of the frame. No classifier had ever been saved: `run_baseline.py` scored and
+discarded it, so `run_stgcnpp` gained `save_to`.
+
+### Iteration 1
+- **Test:** 87 checks; 7 guards reverted, 2 survived and got sharper tests: a `..` checkpoint
+  name (refused later by `is_file`, so the name guard was untested) and `weights_only=False`
+  (the malicious pickle was refused afterwards anyway); the pickle test now asserts its code
+  never ran (a marker file).
+- **Review: FIX FIRST.** B1: the training lead-in was `(argmax + 0.5) / fps`, but
+  `np.gradient` is centred, so the peak is AT the frame where `detect` reports it: every
+  window began half a training frame early, and at 24 fps `np.round`'s ties-to-even
+  duplicated or dropped frames by the peak's parity. B2: the sampling test computed its
+  expectation with the code's own formula, so it could not catch B1 (shape, not
+  substance). Also: CSV check cannot tell two clips of the same rate and length apart;
+  finder variant unchecked against the window; geometry unbounded from an unhashed manifest;
+  `write_manifest` extras could replace pins; unbounded reads; V6 reading A cut from the
+  bridged track; empty readings crash the eval; matched-but-unclassifiable dropped
+  uncounted; `isdigit` accepts '²'.
+- **Security:** pickle only under `weights_only=True` on hashed bytes; manifest field-by-field;
+  checkpoint name a bare file name; CSV re-validated. Findings folded into the review list.
+- **A training run already under way was stopped**: it would have written B1's geometry
+  into the manifest.
+
+### Iteration 2
+- **Fix:** lead-in is `argmax / fps`; nearest frame with ties upward. Expected frames now
+  worked by hand (60 fps: offsets -7 -5 -2 0 2 5 7 10 12), plus a round trip (corpus clips
+  cut from a continuous 24 fps track; `cut_window` at the finder's peak returns exactly
+  each clip's 9 frames) and a half-frame lead-in at both peak parities. Geometry capped at
+  25 frames; manifest extras cannot replace pins; reads bounded; CSV must be named for the
+  pose's clip; rule variant must equal the window's; ASCII digits; unclassifiable matches
+  counted; eval A from the unbridged track; reference must match `t_out` and the
+  pretrained hash. Declined: a per-window torso (it would shrink as the body turns into a
+  hook); stated as a limit in `classify.py` instead.
+- **Test:** 100 checks; B1 reverted fails 2, ties-to-even 1, every new guard >= 1. One
+  equivalent mutant: removing the manifest size check still refuses an oversized manifest,
+  because the bounded read truncates it to invalid JSON.
+- **Gate reproduce:** clean clone of `6fa5540`: classify 100, pipeline 260, hands 38,
+  labels 50, ingest 109 -- the working tree's numbers.
