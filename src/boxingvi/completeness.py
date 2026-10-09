@@ -315,9 +315,14 @@ def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: 
 
     `skips` (sorted frame ids where the camera dropped a frame, `skips.find_skips`; None = ignore them) are
     MASKED, not cut: the segments, the body scale and the smoothing are exactly what they are without skips.
-    After `wrist_signal`, every frame within `skip_mask_half` of a skip (`skip_mask`) gets signal 0 and is
-    removed from the exposure, per hand, so a masked frame cannot be a burst and is in neither the numerator
-    nor the denominator of any rate. With None the result is exactly what it was without the argument."""
+    After `wrist_signal`, every frame within `skip_mask_half` of a skip (`skip_mask`) gets signal 0. The
+    frames within ONE MORE of a skip leave the exposure (per hand) and cannot be a burst, so they are in
+    neither the numerator nor the denominator of any rate: the extra frame is the peak test's own reach.
+    `detect` calls frame j a peak by comparing it with j-1 and j+1; next to a zeroed frame the first
+    unmasked frame would be a "peak" for being higher than a zero, and a punch whose true peak is under
+    the mask would come back as a burst at the mask's edge (measured: it doubled the burst rate there).
+    That frame keeps its true signal, so the next one is compared with it, not with a zero. With None the
+    result is exactly what it was without the argument."""
     skips = check_skips(skips, table.n_frames)
     half = skip_mask_half(table.fps, smooth_s)
     out = {"mask": np.zeros(table.n_frames, dtype=bool), "raw": [], "segments": 0, "short_segments": 0,
@@ -335,15 +340,19 @@ def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: 
             out["bodyless_segments"] += 1
             continue
         have = punchfind.signal_frames(track)
+        gone = None
         if skips is not None and len(skips):
             masked = skip_mask(track, table.frame[seg], skips, half, bridge)
             sig[masked] = 0.0
-            have = have & ~masked
+            gone = skip_mask(track, table.frame[seg], skips, half + 1, bridge)   # + the peak test's own reach
+            have = have & ~gone
         out["valid"] += have.sum(axis=0)
         mask[track.frame_ids[have.any(axis=1)]] = True
         frames, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
         row = {int(f): i for i, f in enumerate(track.frame_ids)}
         for f, h in zip(frames, hands):
+            if gone is not None and gone[row[int(f)], int(h)]:
+                continue
             out["raw"].append((int(f), int(h), float(sig[row[int(f)], int(h)])))
     for f, _h, _p in out["raw"]:
         if not mask[f]:
