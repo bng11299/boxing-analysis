@@ -598,3 +598,51 @@ discarded it, so `run_stgcnpp` gained `save_to`.
   because the bounded read truncates it to invalid JSON.
 - **Gate reproduce:** clean clone of `6fa5540`: classify 100, pipeline 260, hands 38,
   labels 50, ingest 109 -- the working tree's numbers.
+
+## `feat/output-report` -- 2026-10-09
+
+The report a boxer reads: `<clip>.report.xlsx` (Punches, Rounds, Reliability, About) and
+`<clip>.summary.txt`, from the classified punches. Stacked on `feat/classify-detected`.
+Acceptance criteria: (1) the summary is fixed templates and holds exactly the numbers they
+inserted; (2) every reliability statement comes from a measured number, linked to the
+model that named the punches by hashes, and the summary says when nothing was measured on
+your footage; (3) rounding never flips a claim; (4) inputs are validated and the workbook
+holds no formulas; (5) all suites green in a clean clone.
+
+Threat sketch. Assets: the honesty of what the user reads. Entry points: classified CSV and
+its sidecar, manifest, reference run, finder rule, score JSON, `--rounds`. Trust boundary:
+files on disk between tools. Top threats: a number-backed but misleading sentence; a
+reliability table borrowed from a different model than the one that named the punches.
+
+Real-world fact checked before building: the reported run's held-out confusion matrix
+(results/stgcnpp.json) gives cross +28%, lead uppercut -41%, hand (type-implied) 98.3% --
+the figures the project plan states.
+
+### Iteration 1
+- **Test:** 65 checks; 8 guards reverted, all caught. The first run caught my own arithmetic
+  in a hand-built matrix (a row summing to 50, not 100): the code was right.
+- **Review: FIX FIRST.** B1: the finder's 74% recall was stated but not its V6 count ratio
+  (648 flagged for 406 labelled, 1.6x), so the totals read as an under-count. B2: "71% from
+  your lead hand" came from the finder's wrist while "right 98%" was the classifier's
+  type-implied hand -- a figure attached to a reading it never measured. B3: rounding flipped
+  claims ("1 punch, 0 a minute"; "0% rear hooks (1)"; "dropped by 8%, from 10 to 10").
+  B4: the per-class-F1 match linked two JSON files, never the CSV to the model, and could
+  not fail in practice. Also: hardcoded "V2/V5/V9"; "too little of you was in view" for
+  every unclassified reason; "between rounds" for punches before the first; floats like
+  `1_0` accepted; fractional confusion cells truncated; the provenance check ran on one
+  summary only.
+- **Security:** bounded JSON reads, NaN refused, formula guard at write time; folded in above.
+
+### Iteration 2
+- **Fix:** finder sentence states recall and the count ratio, and that the error on your
+  footage is unknown. Lead share by punch TYPE over named punches; type/wrist disagreements
+  counted; the 98% tied to the type-implied hand. Rates under 10 keep a decimal; 0%/100%
+  only when exact; shares by largest remainder; a rate change only beyond 2 SE of a Poisson
+  count, worded from the printed rates. `classify_punches.py` writes
+  `<clip>.classified.json` (CSV sha256, classifier sha256, stance, rule, pose frames); the
+  report checks CSV -> sidecar -> manifest (classify's own schema) -> per-class F1
+  recomputed from the matrix, and an own-footage score must name the same classifier.
+  Inputs: decimal regex, integer cells, known notes only, one stance per file.
+- **Test:** 110 checks; the provenance check runs on every summary variant and caught a
+  real slip on its first run ("benchmark video V6" put an unrecorded digit in the text).
+  9 new guards reverted, all caught.
