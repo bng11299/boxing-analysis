@@ -1107,8 +1107,11 @@ unexplained, exposure, labels, rates, and the two samples are byte-identical); o
 | videos with no possible duplicate | 6 of 29 | 16 of 29 |
 | most in one video | 22 (GH089681), 16 (GH109681, GH069681) | 10 (the same three videos) |
 
-So on this data duplicate ids inflate the unexplained count by at most one burst per pair, 89 of 7,318 (1.2%) at min 1 and 33 of 4,342
-(0.8%) at min 2 (a pair is two unexplained bursts for at most one physical punch); it does not explain 45 unexplained bursts per exposure minute. Whether those are punches is still for the sample to say.
+These are SCREENING counts, not a bound: 177 of 7,318 unexplained bursts (2.4%, 89 candidate pairs) at min 1 and 66 of 4,342
+(1.5%, 33 pairs) at min 2 are flagged as possible duplicates. Duplication outside the screen is unmeasured: one physical punch can give
+peaks more than 0.1 s apart on two ids, boxes overlapping at IoU below 0.3, or a twin that was matched to a label, and none of those is
+flagged. (Corrected after Astra 6's re-review: an earlier wording called 89 / 7,318 an upper bound on the inflation and concluded that
+duplication could not explain the rate; the counter cannot establish either.) Whether the unexplained bursts are punches is for the sample to say.
 **Tests (all suites):** `test_completeness_credited.py` 95 (was 75), `test_linking.py` 266, `test_tracks.py` 79, `test_olympic.py` 33,
 `test_hands.py` 38, `test_labels.py` 50, `test_ingest.py` 124, `test_env.py` 36, `test_pipeline.py` 260.
 **Residual risks added:** (1) `possible_duplicates` is a screen: boxes that overlap at IoU >= 0.3 and bursts within 0.1 s, not a proof of
