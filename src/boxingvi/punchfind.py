@@ -19,6 +19,8 @@ frames that are scored.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 
 from .data import Span, Track
@@ -367,10 +369,12 @@ def block_bootstrap(det_frames, spans, tol: int, window, block: int,
 # window cost 21 points of accuracy there (results/classify_v6.json, vault
 # ADR-0014). Tempo is read off the curve the finder already uses: the WIDTH of the
 # punching wrist's speed peak. The punch then runs a fixed number of widths before
-# and after the peak, and those two numbers are medians over the training clips
-# (classify.training_extent_ratios) -- nothing is fitted to the footage scored.
+# and after the peak. Those two numbers are medians over the training clips
+# (classify.training_extent_ratios). What V6 contributed: the level the width is
+# measured at (half height) and the choice of this rule were made looking at V6's
+# first half, so only its second half is a clean test.
 #
-# Tried first and dropped (2026-10-11, V6 tuning half): walking out from the peak
+# Tried first and dropped (2026-10-11, V6 first half): walking out from the peak
 # while speed holds above a fraction of it. Its typical error was a frame, but its
 # tails were not: 8 to 42 frames against labels of 11 to 23, merging combinations
 # or stopping at the dip at full extension (accuracy 0.538 vs 0.584 for the width).
@@ -378,16 +382,36 @@ def block_bootstrap(det_frames, spans, tol: int, window, block: int,
 WIDTH_FRAC = 0.5     # the peak's width is measured at this fraction of its height
 
 
-def peak_width(track: Track, signal: np.ndarray, peak_frame: int, hand: int,
-               frac: float = WIDTH_FRAC) -> "tuple[float, bool]":
+def _hand_run_at(track: Track, hand: int, i: int, min_conf: float, bridge_s: float) -> "tuple[int, int] | None":
+    """[lo, hi) rows of the run of frames around row i where `hand` has a speed at
+    all: consecutive frame ids AND that hand's own joints trustworthy (short holes
+    bridged), by the rule wrist_signal uses. None if row i is not in such a run."""
+    valid = hand_valid(track, min_conf)[:, hand]
+    lo, hi = next((a, b) for a, b in track.segments() if a <= i < b)
+    ok, _ = _fill_holes(valid[lo:hi], int(round(bridge_s * track.fps)))
+    for a, b in _runs(ok):
+        if a <= i - lo < b:
+            return lo + a, lo + b
+    return None
+
+
+def peak_width(track: Track, signal: np.ndarray, peak_frame: int, hand: int, frac: float = WIDTH_FRAC,
+               min_conf: float = MIN_CONF, bridge_s: float = BRIDGE_S) -> "tuple[float, bool]":
     """(seconds the punching hand's speed stays at or above `frac` of its value at
-    `peak_frame`, whether that was cut short by the edge of the pose).
+    `peak_frame`, whether that was cut short by the edge of the hand's signal).
 
     Each side walks out from the peak while the speed holds, and the crossing is
     interpolated between the last frame above and the first below, so the width is
     not quantised to whole frames (a jab's peak is two or three frames wide at 24
-    fps). A side that reaches a gap or the end of the pose still above the level is
-    CENSORED: its true width is unknown, half a frame is added, and the flag is set.
+    fps). The walk stays inside the run of frames where this hand HAS a speed: a
+    gap in the pose, or the wrist dropping below confidence, is where the signal
+    stops, not where the punch does. A side that reaches that edge still above the
+    level is CENSORED: its true width is unknown, half a frame is added, and the
+    flag is set.
+
+    Measured on the sampled, smoothed signal, so the same punch reads some 5 to 12%
+    wider at 24 fps than at 60: a known approximation, small beside the tempo
+    differences the width is there to follow.
     """
     if signal.shape != (len(track.frame_ids), 2):
         raise ValueError(f"signal shape {signal.shape} does not match the track")
@@ -398,11 +422,12 @@ def peak_width(track: Track, signal: np.ndarray, peak_frame: int, hand: int,
     i = int(np.searchsorted(track.frame_ids, peak_frame))
     if i >= len(track.frame_ids) or track.frame_ids[i] != peak_frame:
         raise ValueError(f"peak frame {peak_frame} is not a frame of this track")
-    lo, hi = next((a, b) for a, b in track.segments() if a <= i < b)
     s = signal[:, hand]
+    run = _hand_run_at(track, hand, i, min_conf, bridge_s)
     thr = frac * s[i]
-    if not thr > 0:
+    if run is None or not thr > 0:
         raise ValueError(f"hand {hand} has no speed at frame {peak_frame}: not its peak")
+    lo, hi = run
 
     def side(step: int) -> "tuple[float, bool]":
         j = i
@@ -414,21 +439,46 @@ def peak_width(track: Track, signal: np.ndarray, peak_frame: int, hand: int,
         return abs(j - i) + 0.5, True
 
     (left, cl), (right, cr) = side(-1), side(1)
-    return (left + right) / track.fps, cl or cr
+    return float((left + right) / track.fps), bool(cl or cr)
+
+
+class Extent(NamedTuple):
+    """A punch's inclusive video frames, and what is known to be wrong with them."""
+
+    start: int
+    end: int
+    censored: bool   # the speed peak ran into the edge of the hand's signal: the true extent may be longer
+    capped: bool     # it was longer than `max_s` and was shortened around the peak
 
 
 def extent(track: Track, signal: np.ndarray, peak_frame: int, hand: int, lead_widths: float,
-           tail_widths: float, frac: float = WIDTH_FRAC) -> "tuple[int, int]":
-    """(start, end) inclusive video frame ids of the punch whose wrist-speed peak
-    is at `peak_frame`: `lead_widths` peak-widths before it to `tail_widths` after.
-    Frames outside the pose are allowed here; the window cutter marks them empty."""
+           tail_widths: float, frac: float = WIDTH_FRAC, max_s: "float | None" = None) -> Extent:
+    """The punch whose wrist-speed peak is at `peak_frame`: `lead_widths` peak-widths
+    before it to `tail_widths` after. Frames outside the pose are allowed here; the
+    window cutter marks them empty.
+
+    An extent longer than `max_s` is shortened on BOTH sides in the same
+    proportion, so the peak stays where the classifier expects it. (Cutting only
+    the tail, or only the head, would hand the classifier a window that might not
+    contain the punch at all.)
+    """
     if not (np.isfinite(lead_widths) and np.isfinite(tail_widths) and lead_widths >= 0 and tail_widths >= 0
             and lead_widths + tail_widths > 0):
         raise ValueError("lead and tail must be non-negative widths, not both zero")
-    w, _ = peak_width(track, signal, peak_frame, hand, frac)
-    start = int(np.floor(peak_frame - lead_widths * w * track.fps + 0.5))
-    end = int(np.floor(peak_frame + tail_widths * w * track.fps + 0.5))
-    return start, max(end, start + 1)
+    if max_s is not None and not (np.isfinite(max_s) and max_s > 0):
+        raise ValueError("max_s must be positive")
+    w, censored = peak_width(track, signal, peak_frame, hand, frac)
+    lead, tail = lead_widths * w, tail_widths * w
+    capped = max_s is not None and lead + tail > max_s
+    if capped:
+        k = max_s / (lead + tail)
+        lead, tail = lead * k, tail * k
+    start = int(np.floor(peak_frame - lead * track.fps + 0.5))
+    end = int(np.floor(peak_frame + tail * track.fps + 0.5))
+    if capped:   # rounding both ends outward can add a frame; never exceed the cap
+        while (end - start) / track.fps > max_s and end > peak_frame:
+            end -= 1
+    return Extent(start, max(end, start + 1), bool(censored), bool(capped))   # plain bools: they are counted and written to JSON
 
 
 def span_iou(a: "tuple[int, int]", b: "tuple[int, int]") -> float:

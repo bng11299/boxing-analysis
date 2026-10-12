@@ -5,7 +5,8 @@
 The rule (punchfind.extent): a punch runs `lead_widths` peak-widths before its
 wrist-speed peak to `tail_widths` after, where the width is how long the punching
 wrist holds at least half its peak speed. The two ratios are medians over the
-TRAINING clips (classify.training_extent_ratios). Nothing is fitted to V6.
+TRAINING clips (classify.training_extent_ratios). V6 did not set them; it did
+decide the half-height level and the form of the rule (see below).
 
 V6 is then the test: overlap (IoU) between the extent and each labelled span,
 against the fixed window (the training clips' median length and peak position,
@@ -93,6 +94,9 @@ def main(argv=None) -> int:
     print(f"from {ratios['n_clips']} training clips with a whole speed peak ({ratios['n_censored']} cut by the "
           f"clip's edge, left out): a punch runs {ratios['lead_widths']:.2f} peak-widths before its peak "
           f"and {ratios['tail_widths']:.2f} after")
+    print(f"  the clips kept are a median {ratios['duration_s_median_kept']:.3f} s long, all measurable clips "
+          f"{ratios['duration_s_median_all']:.3f} s; left out by type: " + ", ".join(
+              f"{c} {v['censored']}/{v['of']}" for c, v in ratios["censored_by_class"].items()))
 
     track = load_v6_track(a.data / "Skeleton_data")
     track = punchfind.bridge(track, int(round(punchfind.BRIDGE_S * track.fps)))
@@ -100,17 +104,19 @@ def main(argv=None) -> int:
     sig = punchfind.wrist_signal(track, geom.variant)
     row = {int(f): i for i, f in enumerate(track.frame_ids)}
     peaks = [span_peak(track, sig, s.start, s.end) for s in spans]
-    hands = [int(np.argmax(sig[row[p]])) for p in peaks]
+    usable = [p in row and sig[row[p]].max() > 0 for p in peaks]   # a span over a gap in the pose has no peak
+    hands = [int(np.argmax(sig[row[p]])) if u else 0 for p, u in zip(peaks, usable)]
 
     def ext(p, h):
-        return punchfind.extent(track, sig, p, h, ratios["lead_widths"], ratios["tail_widths"], ratios["frac"])
+        e = classify.punch_extent(track, sig, p, h, ratios, geom)
+        return e.start, e.end
 
     out = {"rule": "extent = [peak - lead_widths * width, peak + tail_widths * width]; width = time the punching "
                    "wrist holds >= frac of its peak speed",
            **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(HELD_OUT_VIDEOS),
            "tested_on": "V6", "fps": track.fps, "v6": {}}
     for name, w in (("first_half", tuple(r["tune_window"])), ("second_half", tuple(r["test_window"]))):
-        idx = [j for j, s in enumerate(spans) if w[0] <= s.start and s.end <= w[1] and sig[row[peaks[j]]].max() > 0]
+        idx = [j for j, s in enumerate(spans) if w[0] <= s.start and s.end <= w[1] and usable[j]]
         sp = [spans[j] for j in idx]
         e, f = [ext(peaks[j], hands[j]) for j in idx], [fixed_span(peaks[j], track.fps, geom) for j in idx]
         out["v6"][name] = {"window": list(w), "extent": describe(e, sp), "fixed_window": describe(f, sp),
