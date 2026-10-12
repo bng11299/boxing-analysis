@@ -244,7 +244,7 @@ for want in ("In 2 rounds (2:00 of footage) the tool found 14 punches, 7.0 a min
              "Of the 13 it could name, 69% jabs (9), 23% crosses (3) and 8% lead hooks (1).",
              "By punch type, 77% were thrown with your lead hand.",
              "For 1 punch the punch type and the wrist that moved point to different hands",
-             "For 2 of the named punches the start and end are unsure: the wrist left view beside the peak, or "
+             "For 2 named punches the start and end are unsure: the wrist left view beside the peak, or "
              "the punch ran longer than the tool can read.",
              "1 it could not name: the pose was too incomplete to read.",
              "Your punch rate went from 10 a minute in round 1 to 4.0 in round 2: a difference chance alone could produce.",

@@ -408,7 +408,7 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
                       f"different hands; one of the two readings is wrong there.")
         if facts["n_named"] and facts["n_extent_unsure"]:
             k = facts["n_extent_unsure"]
-            w.say(f"For {w.count(k)} of the named {_punches(k)} the start and end are unsure: the wrist left view "
+            w.say(f"For {w.count(k)} named {_punches(k)} the start and end are unsure: the wrist left view "
                   f"beside the peak, or the punch ran longer than the tool can read.")
         if facts["n_unnamed"]:
             w.say(f"{w.count(facts['n_unnamed'])} it could not name: the pose was too incomplete to read.")
