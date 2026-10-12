@@ -33,6 +33,10 @@ Readings of the same held-out punches by the same classifier:
          buys, here on all six punch types (V6 had hooks and uppercuts only:
          results/classify_v6.json). The extent's overlap with each labelled span is
          reported too, by punch type: its first check on jabs and crosses.
+  Y_long a CONTROL: one fixed window per video, as long as that video's median
+         extent and split around the peak as the extent rule splits it. Y_ext -
+         Y_long is what following each punch's own tempo buys beyond a longer
+         window (on V6 it bought nothing: -0.022 [-0.054, +0.010])
 Reported on every clip YOLO saw, and separately on clips where YOLO followed the
 same person as AlphaPose; clips YOLO missed are counted. Paired bootstrap
 intervals on A - Y.
@@ -131,19 +135,33 @@ def main(argv=None) -> int:
         track = punchfind.bridge(pose.to_track(usable_only=False), int(round(punchfind.BRIDGE_S * pose.fps)))
         torso = punchfind.body_scale(track)
         sig = punchfind.wrist_signal(track, geom.variant)
+        row_of = {int(f): i for i, f in enumerate(track.frame_ids)}
+        cut, flags = [], {"censored": 0, "capped": 0}
         for c in clips:
             pk = span_peak(track, sig, c.start + o, c.end + o)
+            i = row_of.get(pk)
+            e = None
+            if i is not None and sig[i].max() > 0:
+                e = classify.punch_extent(track, sig, pk, int(np.argmax(sig[i])), ex, geom)
+                flags["censored"] += e.censored
+                flags["capped"] += e.capped
+            cut.append((pk, e))
+        lengths = [(e.end - e.start) / pose.fps for _, e in cut if e is not None]
+        med = float(np.median(lengths)) if lengths else None
+        share = ex["lead_widths"] / (ex["lead_widths"] + ex["tail_widths"])
+        info["extents"] = {**flags, "n": len(lengths), "median_length_s": med}
+        for c, (pk, e) in zip(clips, cut):
             win = classify.cut_window(track, pk, geom, torso)
-            i = int(np.searchsorted(track.frame_ids, pk))
-            ext_kp, iou = None, None
-            if i < len(track.frame_ids) and track.frame_ids[i] == pk and sig[i].max() > 0:
-                s_, e_ = punchfind.extent(track, sig, pk, int(np.argmax(sig[i])), ex["lead_widths"],
-                                          ex["tail_widths"], ex["frac"])
-                ext_kp = classify.cut_span(track, s_, e_, geom, torso).keypoints
-                iou = punchfind.span_iou((s_, e_), (c.start + o, c.end + o))
+            ext_kp, long_kp, iou = None, None, None
+            if e is not None:
+                ext_kp = classify.cut_span(track, e.start, e.end, geom, torso).keypoints
+                iou = punchfind.span_iou((e.start, e.end), (c.start + o, c.end + o))
+                long_kp = classify.cut_span(track, int(np.floor(pk - share * med * pose.fps + 0.5)),
+                                            int(np.floor(pk + (1 - share) * med * pose.fps + 0.5)), geom, torso).keypoints
             y = poseswitch.yolo_clip(pose, c.start + o, c.end + o)
             y_all = poseswitch.yolo_clip(pose, c.start + o, c.end + o, None)
-            rows.append({"video": v, "label": c.label, "A": c.alphapose, "Y": y, "Y_all": y_all, "Y_fix": win.keypoints, "Y_ext": ext_kp, "iou": iou,
+            rows.append({"video": v, "label": c.label, "A": c.alphapose, "Y": y, "Y_all": y_all,
+                         "Y_fix": win.keypoints, "Y_ext": ext_kp, "Y_long": long_kp, "iou": iou,
                          "seen": int((y[..., 2] > 0).any(axis=1).sum()) >= 2,
                          "seen_all": int((y_all[..., 2] > 0).any(axis=1).sum()) >= 2,
                          "same": poseswitch.same_person(c, y_all)})
@@ -154,9 +172,9 @@ def main(argv=None) -> int:
     py = predict(model, man, [r["Y"] for r in seen])
     pya = predict(model, man, [r["Y_all"] for r in seen])
     same = np.array([r["same"] is True for r in seen])
-    wseen = [r for r in seen if r["Y_fix"] is not None and r["Y_ext"] is not None]
+    wseen = [r for r in seen if all(r[k] is not None for k in ("Y_fix", "Y_ext", "Y_long"))]
     yw = np.array([r["label"] for r in wseen])
-    pw = {k: predict(model, man, [r[k] for r in wseen]) for k in ("Y", "Y_fix", "Y_ext")}
+    pw = {k: predict(model, man, [r[k] for r in wseen]) for k in ("Y", "Y_fix", "Y_ext", "Y_long")}
     iou_by = {c: [r["iou"] for r in rows if r["iou"] is not None and r["label"] == n] for n, c in enumerate(CLASSES)}
     report.update({
         "n_clips": len(rows), "n_yolo_missed": len(rows) - len(seen),
@@ -166,6 +184,7 @@ def main(argv=None) -> int:
         "window": {**{k: scores(yw, v) for k, v in pw.items()},
                    "Y_minus_Y_ext": paired(yw, pw["Y"], pw["Y_ext"]),
                    "Y_ext_minus_Y_fix": paired(yw, pw["Y_ext"], pw["Y_fix"]),
+                   "Y_ext_minus_Y_long": paired(yw, pw["Y_ext"], pw["Y_long"]),
                    "n_uncuttable": len(seen) - len(wseen),
                    "extent_iou_with_label": {c: {"n": len(v), "mean": float(np.mean(v)) if v else None}
                                              for c, v in iou_by.items()}},
@@ -181,7 +200,9 @@ def main(argv=None) -> int:
         if g:
             print(f"  A - Y accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] on {block['A_minus_Y']['n']}")
     for key, name in (("Y_minus_Y_ext", "what the pipeline's cut costs (Y - Y_ext)"),
-                      ("Y_ext_minus_Y_fix", "what the extent buys over the fixed window (Y_ext - Y_fix)")):
+                      ("Y_ext_minus_Y_fix", "what the extent buys over the fixed window (Y_ext - Y_fix)"),
+                      ("Y_ext_minus_Y_long", "what following each punch's tempo buys over a longer window "
+                                             "(Y_ext - Y_long)")):
         g = report["window"][key].get("accuracy")
         if g:
             print(f"{name}: accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] "
