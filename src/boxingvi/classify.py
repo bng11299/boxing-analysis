@@ -1,22 +1,25 @@
 """Classify punches found in continuous pose: a window of skeleton around each
 detected punch, in, ST-GCN++ punch type and confidence, out.
 
-The classifier was trained on BoxingVI's pre-cut clips, so the window has to look
-like one of those clips, in time and in space. Both are measured on the TRAINING
-clips (`training_geometry`) and carried in the classifier's manifest, never tuned
-on anything that is scored:
+The classifier was trained on BoxingVI's pre-cut clips, so what it is shown has to
+look like one of those clips, in time and in space:
 
-* time: a BoxingVI clip is the labelled span, a median of about 9 real frames
-  (0.375 s) at the source's own 24-30 fps. A window is cut to the same duration,
-  placed so the wrist-speed peak sits where it sits in a training clip, and
-  sampled at the training frame rate -- footage at 60 fps is converted
-  explicitly, not passed through at twice the frames per punch (O54).
+* time: a BoxingVI clip is a labelled punch, start to end, at the source's own
+  24-30 fps. The pipeline estimates each punch's start and end from the width of
+  its wrist-speed peak (`punchfind.extent`, ratios from `training_extent_ratios`)
+  and `cut_span` reads those frames, resampled to the training frame rate --
+  footage at 60 fps is converted explicitly, not passed through at twice the
+  frames per punch (O54). `cut_window`, a fixed-length window, is the baseline
+  the extent replaced: it cost 21 points of accuracy on V6's slow punches.
 * space: BoxingVI coordinates are pixels of a 1920x1080 frame divided by the
   frame size. Phone footage is portrait, and the boxer is nearer or farther. The
   window is scaled so the torso is the training median length in 1080p pixels,
   centred so the hips sit at the training median position, then divided by the
   same 1920x1080. Position and scale are thereby normalised; posture and motion
-  are not touched.
+  are not touched. (Measured on V6: harmless, 0.708 against 0.712.)
+
+The training statistics (`training_geometry`, `training_extent_ratios`) come from
+the TRAINING clips only.
 
 Trust boundaries: the classifier checkpoint is a pickle, so it is opened only
 with ``weights_only=True``, after its size and sha256 match the manifest. The
@@ -51,8 +54,8 @@ from pathlib import Path
 import numpy as np
 
 from .data import CLASSES, MAX_FRAMES, N_CLASSES, N_JOINTS, NATIVE_FPS, SOURCE_SIZE, Track, pad_or_trim
-from .punchfind import (L_HIP, L_SHOULDER, MIN_CONF, R_HIP, R_SHOULDER, VARIANTS,
-                        body_scale, peak_width, wrist_signal)
+from .punchfind import (L_HIP, L_SHOULDER, MIN_CONF, R_HIP, R_SHOULDER, VARIANTS, Extent,
+                        body_scale, extent, peak_width, wrist_signal)
 
 MANIFEST_VERSION = 1
 MAX_CLASSIFIER_BYTES = 64 * 1024 * 1024   # the real file is ~5.5 MB
@@ -173,37 +176,50 @@ def training_geometry(clips, variant: str) -> WindowGeometry:
 
 def training_extent_ratios(clips, variant: str, frac: float) -> dict:
     """How many peak-widths a labelled punch runs before and after its wrist-speed
-    peak: medians over the TRAINING clips whose peak is whole. A clip whose speed is
-    still above the level at its first or last frame has an unknown width and is
-    left out (and counted): its punch was cut by the annotator, not by the motion."""
+    peak: medians (taken separately) over the TRAINING clips whose peak is whole. A
+    clip whose speed is still above the level at its first or last frame has an
+    unknown width and is left out, and counted: the clip starts or ends mid-motion
+    (the annotator's cut, or the previous punch's retraction).
+
+    Leaving those out is a selection: a clip is kept only when its lead and tail
+    are each longer than their half-width, which removes the smallest ratios, so
+    the medians lean long. How far the kept clips differ from all of them is
+    returned (`duration_s_median_*`, `censored_by_class`) so it can be seen."""
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
-    lead, tail, censored = [], [], 0
+    lead, tail, dur_kept, dur_all, skipped = [], [], [], [], 0
+    by_class = {c: [0, 0] for c in CLASSES}   # [censored, measurable]
     for c in clips:
         if c.source not in NATIVE_FPS:
             raise ValueError(f"clip from {c.source!r} has no recorded native frame rate")
         f = NATIVE_FPS[c.source]
         tr = _clip_track(c.keypoints, f, c.source)
-        if tr is None:
+        sig = None
+        if tr is not None:
+            try:
+                sig = wrist_signal(tr, variant)
+            except ValueError:
+                pass
+        if sig is None or not sig.max() > 0:
+            skipped += 1   # too short, no usable body, or no wrist speed at all
             continue
-        try:
-            sig = wrist_signal(tr, variant)
-        except ValueError:
-            continue
-        best = sig.max(axis=1)
-        if not best.max() > 0:
-            continue
-        p = int(np.argmax(best))
+        p = int(np.argmax(sig.max(axis=1)))
         w, cut = peak_width(tr, sig, p, int(np.argmax(sig[p])), frac)
+        n = len(tr.frame_ids)
+        dur_all.append(n / f)
+        by_class[CLASSES[c.label]][1] += 1
         if cut:
-            censored += 1
+            by_class[CLASSES[c.label]][0] += 1
             continue
+        dur_kept.append(n / f)
         lead.append((p / f) / w)
-        tail.append(((len(tr.frame_ids) - 1 - p) / f) / w)
+        tail.append(((n - 1 - p) / f) / w)
     if len(lead) < 10:
         raise ValueError(f"only {len(lead)} training clips with a whole speed peak: too few")
     return {"frac": float(frac), "lead_widths": float(np.median(lead)), "tail_widths": float(np.median(tail)),
-            "n_clips": len(lead), "n_censored": censored, "variant": variant}
+            "n_clips": len(lead), "n_censored": len(dur_all) - len(lead), "n_skipped": skipped, "variant": variant,
+            "duration_s_median_kept": float(np.median(dur_kept)), "duration_s_median_all": float(np.median(dur_all)),
+            "censored_by_class": {c: {"censored": a, "of": b} for c, (a, b) in by_class.items()}}
 
 
 # ----------------------------------------------------------------- windows ---
@@ -288,7 +304,9 @@ def cut_span(track: Track, start: int, end: int, geom: WindowGeometry, torso_px:
     start, end = _frame(start, "start"), _frame(end, "end")
     if end < start:
         raise ValueError(f"span ends ({end}) before it starts ({start})")
-    n = min(MAX_FRAMES, int(math.floor((end - start) / track.fps * geom.fps + 1e-9)) + 1)
+    # Steps of one training frame that fit in the span. The 0.05 lets a span at 24.000 fps be read whole
+    # against a training rate of 23.976 (11 steps come to 10.989), without ever stepping past its last frame.
+    n = min(MAX_FRAMES, int(math.floor((end - start) / track.fps * geom.fps + 0.05)) + 1)
     if n < MIN_OBSERVED_FRAMES:
         return Window(None, 0, "the punch is shorter than two frames at the training frame rate")
     return _window(track, _nearest_frames(track, start / track.fps, n, geom), geom, torso_px, min_conf)
@@ -433,6 +451,19 @@ def hand_agreement(type_sides: "list[str]", finder_sides: "list[str]") -> dict:
 
 
 # ------------------------------------------------------------ extent rule ---
+
+def max_span_s(geom: WindowGeometry) -> float:
+    """The longest punch the classifier can be shown: the corpus's 25 frames at the training rate."""
+    return (MAX_FRAMES - 1) / geom.fps
+
+
+def punch_extent(track: Track, signal: np.ndarray, peak_frame: int, hand: int, rule: dict,
+                 geom: WindowGeometry) -> Extent:
+    """The pipeline's extent for one punch: the rule's ratios, capped at what the
+    classifier can be shown, shortened around the peak if it must be."""
+    return extent(track, signal, peak_frame, hand, rule["lead_widths"], rule["tail_widths"], rule["frac"],
+                  max_s=max_span_s(geom))
+
 
 def read_extent(path: Path, variant: str) -> dict:
     """The punch-extent rule run_punch_extent.py wrote: {frac, lead_widths,

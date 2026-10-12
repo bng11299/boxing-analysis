@@ -56,7 +56,7 @@ FPS = 60.0
 WHY = "pose in only 1 of the window's 9 frames"
 
 
-def row(t, ptype, hand="left", conf=0.9, lead="left"):
+def row(t, ptype, hand="left", conf=0.9, lead="left", note=""):
     """A classify_punches.py row; `lead` is the stance's lead hand."""
     side = "lead" if hand == lead else "rear"
     f = int(t * FPS)
@@ -65,7 +65,7 @@ def row(t, ptype, hand="left", conf=0.9, lead="left"):
                 "1", WHY]
     th = classify.class_side(ptype)
     return [str(f), f"{t:.3f}", hand, "5.000", "no", side, ptype, f"{conf:.3f}", th,
-            "yes" if th == side else "no", str(f - 6), str(f + 17), "9", ""]   # a 24-frame punch: 0.4 s at 60 fps
+            "yes" if th == side else "no", str(f - 6), str(f + 17), "9", note]   # a 24-frame punch: 0.4 s at 60 fps
 
 
 def write_csv(path, rows, header=report.CLASSIFIED_HEADER):
@@ -84,10 +84,13 @@ print("the CSV contract with classify_punches.py")
 import classify_punches  # noqa: E402
 
 check("report reads exactly the columns classify_punches writes", report.CLASSIFIED_HEADER == classify_punches.OUT_HEADER)
+check("... and knows exactly the caveats it writes on a named punch",
+      report.CAVEATS == (classify_punches.NOTE_CENSORED, classify_punches.NOTE_CAPPED))
 
 # Round 1 (0-60 s): 6 jabs, 2 crosses, 1 lead hook, 1 unnamed = 10. Round 2 (90-150 s): 3 jabs, 1 cross = 4.
 # One jab at 75 s, outside the rounds. One of round 1's jabs is thrown by the right (rear) wrist: a disagreement.
-R1 = ([row(2 + 5 * i, "jab") for i in range(5)] + [row(27, "jab", "right"), row(40, "cross", "right"),
+R1 = ([row(2, "jab", note=report.CAVEATS[0]), row(7, "jab", note="; ".join(report.CAVEATS))]
+      + [row(2 + 5 * i, "jab") for i in range(2, 5)] + [row(27, "jab", "right"), row(40, "cross", "right"),
       row(45, "cross", "right"), row(50, "lead_hook"), row(55, "unclassified", "right")])
 R2 = [row(95, "jab"), row(100, "jab"), row(110, "jab"), row(120, "cross", "right")]
 GAP = [row(75, "jab")]
@@ -124,6 +127,10 @@ r_ = row(1, "jab"); r_[2] = "both"; bad("an unknown hand is refused", [r_])
 r_ = row(1, "jab"); r_[0] = "²"; bad("a non-ASCII digit is refused", [r_])
 r_ = row(1, "unclassified"); r_[13] = "=HYPERLINK(\"http://x\")"; bad("a note classify never writes is refused", [r_])
 bad("a short row is refused", [row(1, "jab")[:5]])
+bad("a named punch carrying an unnamed punch's reason is refused", [row(1, "jab", note=WHY)])
+bad("a named punch carrying a made-up caveat is refused", [row(1, "jab", note="probably fine")])
+bad("the same caveat twice is refused", [row(1, "jab", note="; ".join([report.CAVEATS[0]] * 2))])
+r_ = row(1, "unclassified"); r_[13] = report.CAVEATS[0]; bad("an unnamed punch carrying only a caveat is refused", [r_])
 bad("two stances in one file are refused", [row(1, "jab", lead="left"), row(2, "jab", lead="right")])
 check("a file in one southpaw stance is read", len(report.read_classified(
     write_csv(tmp / "sp.csv", [row(1, "jab", "right", lead="right"), row(2, "cross", "left", lead="right")]), DUR)) == 2)
@@ -151,6 +158,7 @@ check("rates: 10 a minute in round 1, 4 in round 2, 7 overall",
       [p["per_min"] for p in facts["rounds"]] == [10.0, 4.0] and facts["per_min"] == 7.0)
 check("lead hand by TYPE: 10 of 13 named (9 jabs, 1 lead hook)", facts["n_type_lead"] == 10)
 check("one punch where the type's hand and the wrist disagree", facts["n_hands_disagree"] == 1)
+check("two named punches whose start and end are unsure", facts["n_extent_unsure"] == 2)
 check("a punch exactly at the end of the last round counts in it",
       report.round_of(150.0, ROUNDS) == 1 and report.round_of(60.0, ROUNDS) is None)
 check("shares add to 100 (largest remainder): 9/13, 3/13, 1/13 -> 69, 23, 8",
@@ -236,6 +244,8 @@ for want in ("In 2 rounds (2:00 of footage) the tool found 14 punches, 7.0 a min
              "Of the 13 it could name, 69% jabs (9), 23% crosses (3) and 8% lead hooks (1).",
              "By punch type, 77% were thrown with your lead hand.",
              "For 1 punch the punch type and the wrist that moved point to different hands",
+             "For 2 of the named punches the start and end are unsure: the wrist left view beside the peak, or "
+             "the punch ran longer than the tool can read.",
              "1 it could not name: the pose was too incomplete to read.",
              "Your punch rate went from 10 a minute in round 1 to 4.0 in round 2: a difference chance alone could produce.",
              "1 punch fell outside the rounds and is not counted.",

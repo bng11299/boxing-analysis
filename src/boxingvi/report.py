@@ -58,12 +58,14 @@ MAX_ROUNDS = 100
 MAX_JSON_BYTES = 4 * 1024 * 1024
 PLURAL = {"jab": "jabs", "cross": "crosses", "lead_hook": "lead hooks", "lead_uppercut": "lead uppercuts",
           "rear_hook": "rear hooks", "rear_uppercut": "rear uppercuts"}
-# The only notes classify_punches.py writes.
-_NOTES = (re.compile(r""), re.compile(r"pose in only [0-9]+ of the window's [0-9]+ frames"),
-          re.compile(r"no frame in the window shows both hips"),
-          re.compile(r"joints fall far outside the frame after scaling"),
-          re.compile(r"no wrist speed at the peak"),
-          re.compile(r"the punch is shorter than two frames at the training frame rate"))
+# The only notes classify_punches.py writes. An unnamed punch carries one REASON; a named
+# punch carries nothing, or one or both CAVEATS about where it starts and ends.
+_REASONS = (re.compile(r"pose in only [0-9]+ of the window's [0-9]+ frames"),
+            re.compile(r"no frame in the window shows both hips"),
+            re.compile(r"joints fall far outside the frame after scaling"),
+            re.compile(r"the punch is shorter than two frames at the training frame rate"))
+CAVEATS = ("the wrist's pose drops out beside the peak: the punch may run longer than read",
+           "longer than the classifier can be shown: shortened around the peak")
 _INT = re.compile(r"-?[0-9]+")   # a punch's estimated start can fall before the clip's first frame
 _DIGITS = re.compile(r"[0-9]+")
 _DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -134,15 +136,15 @@ def read_classified(path: Path, duration_s: float) -> "list[dict]":
                     raise ValueError(f"{where}: punch frames {a_!r}-{b_!r} do not contain its peak")
             elif d["punch_type"] != UNCLASSIFIED:
                 raise ValueError(f"{where}: a classified punch without the frames it was read from")
-            if not any(p.fullmatch(d["note"]) for p in _NOTES):
-                raise ValueError(f"{where}: note is not one classify_punches.py writes")
             if d["punch_type"] == UNCLASSIFIED:
-                if d["confidence"] or d["type_hand"] or d["hands_agree"] or not d["note"]:
-                    raise ValueError(f"{where}: an unclassified punch carries a reading or lacks its reason")
+                if (d["confidence"] or d["type_hand"] or d["hands_agree"]
+                        or not any(p.fullmatch(d["note"]) for p in _REASONS)):
+                    raise ValueError(f"{where}: an unclassified punch carries a reading or lacks a known reason")
                 conf = None
             elif d["punch_type"] in CLASSES:
-                if d["note"]:
-                    raise ValueError(f"{where}: a classified punch carries an unclassified reason")
+                notes = d["note"].split("; ") if d["note"] else []
+                if len(set(notes)) != len(notes) or any(x not in CAVEATS for x in notes):
+                    raise ValueError(f"{where}: note is not a caveat classify_punches.py writes")
                 if not _DECIMAL.fullmatch(d["confidence"]):
                     raise ValueError(f"{where}: confidence {d['confidence']!r} is not a number")
                 conf = _prob(float(d["confidence"]), f"{where}: confidence")
@@ -312,7 +314,8 @@ def compute_facts(rows, rounds, duration_s: float) -> dict:
             "round_minutes": minutes,
             "types": {c: sum(r["punch_type"] == c for r in named) for c in CLASSES},
             "n_type_lead": sum(r["type_hand"] == "lead" for r in named),
-            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named)}
+            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named),
+            "n_extent_unsure": sum(bool(r["note"]) for r in named)}
 
 
 def shares(counts: "dict[str, int]") -> "dict[str, int]":
@@ -403,6 +406,10 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
                 k = facts["n_hands_disagree"]
                 w.say(f"For {w.count(k)} {_punches(k)} the punch type and the wrist that moved point to "
                       f"different hands; one of the two readings is wrong there.")
+        if facts["n_named"] and facts["n_extent_unsure"]:
+            k = facts["n_extent_unsure"]
+            w.say(f"For {w.count(k)} of the named {_punches(k)} the start and end are unsure: the wrist left view "
+                  f"beside the peak, or the punch ran longer than the tool can read.")
         if facts["n_unnamed"]:
             w.say(f"{w.count(facts['n_unnamed'])} it could not name: the pose was too incomplete to read.")
         first, last = rounds[0], rounds[-1]
@@ -477,7 +484,7 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
     if not (math.isfinite(fps) and fps > 0):
         raise ValueError("fps must be positive")
     ws.append(["round", "time (s)", "time (m:ss)", "hand (wrist that moved)", "lead/rear", "punch type",
-               "confidence", "type agrees with wrist", "punch length (s)", "why not named"])
+               "confidence", "type agrees with wrist", "punch length (s)", "note"])
     for r in rows:
         k = round_of(r["time_s"], rounds)
         s = int(r["time_s"])

@@ -16,14 +16,19 @@ unclassified, with the reason; it is never given a guessed type. Beside it,
 Each punch is cut from its start to its end, estimated from the width of its
 wrist-speed peak (punchfind.extent, results/punch_extent.json from
 run_punch_extent.py), not with a fixed-length window: on V6's second half that
-raised accuracy from 0.500 to 0.601, still 0.15 short of the labelled spans.
+raised accuracy from 0.500 to 0.601, still 0.15 short of the labelled spans. A
+punch whose extent is uncertain is still named, and says so in its note: the
+wrist's pose dropped out beside the peak, or the punch ran longer than the
+classifier can be shown.
 
 The classifier was trained on AlphaPose skeletons from YouTube footage at 24-30
 fps. On YOLO11-pose skeletons of phone footage its accuracy is UNMEASURED until
 the pose-switch measurement exists (checklist W7). The hand-agreement line below
 is a consistency check between two readings of the same skeleton, not accuracy.
-With --labels, accuracy is measured: on the finder's matched punches, and on
-every labelled punch as if the finder had been perfect.
+With --labels, accuracy is measured three ways: on the finder's matched punches
+(the pipeline as it runs); on every labelled punch cut by the extent at its own
+wrist-speed peak (a perfect finder, the pipeline's cut); and on every labelled
+punch read from its labelled frames (a perfect finder AND perfect start and end).
 """
 
 from __future__ import annotations
@@ -52,6 +57,8 @@ OUT_HEADER = PUNCH_HEADER + ["lead_rear", "punch_type", "confidence", "type_hand
                              "punch_start_frame", "punch_end_frame", "window_frames_observed", "note"]
 DEFAULT_OUT = Path("results/punches")
 DEFAULT_EXTENT = Path("results/punch_extent.json")
+NOTE_CENSORED = "the wrist's pose drops out beside the peak: the punch may run longer than read"
+NOTE_CAPPED = "longer than the classifier can be shown: shortened around the peak"
 MAX_ROWS = 100_000
 _DIGITS = re.compile(r"[0-9]+")
 
@@ -159,17 +166,19 @@ def main(argv=None) -> int:
     torso = punchfind.body_scale(track)
     sig = punchfind.wrist_signal(track, geom.variant)
 
+    row_of = {int(f): i for i, f in enumerate(track.frame_ids)}
     wins, extents = [], []
     for d in rows:
-        try:
-            s_, e_ = punchfind.extent(track, sig, d["frame"], 0 if d["hand"] == "left" else 1,
-                                      ex["lead_widths"], ex["tail_widths"], ex["frac"])
-        except ValueError:   # the finder's hand has no speed here: this CSV was not made from this pose
-            extents.append(None)
-            wins.append(classify.Window(None, 0, "no wrist speed at the peak"))
-            continue
-        extents.append((s_, e_))
-        wins.append(classify.cut_span(track, s_, e_, geom, torso))
+        hand = 0 if d["hand"] == "left" else 1
+        i = row_of.get(d["frame"])
+        # The finder reported this hand's speed peak at this frame. If this pose has no frame
+        # there, or the other hand is the faster one, the CSV was not made from this pose.
+        if i is None or not sig[i, hand] > 0 or int(np.argmax(sig[i])) != hand:
+            raise ValueError(f"{a.punches.name}: frame {d['frame']} is not a {d['hand']}-hand speed peak in "
+                             f"this pose; it was not made from {a.pose.name} with this rule")
+        e = classify.punch_extent(track, sig, d["frame"], hand, ex, geom)
+        extents.append(e)
+        wins.append(classify.cut_span(track, e.start, e.end, geom, torso))
     ok = [i for i, w in enumerate(wins) if w.keypoints is not None]
     probs = classify.predict_proba(model, [wins[i].keypoints for i in ok], man["t_out"])
     pred = {i: p for i, p in zip(ok, probs)}
@@ -183,7 +192,9 @@ def main(argv=None) -> int:
         for i, d in enumerate(rows):
             side = classify.hand_side(d["hand"], a.stance)
             base = [d[k] for k in PUNCH_HEADER] + [side]
-            span = list(extents[i]) if extents[i] else ["", ""]
+            e = extents[i]
+            span = [e.start, e.end]
+            caveat = "; ".join(n for n, on in ((NOTE_CENSORED, e.censored), (NOTE_CAPPED, e.capped)) if on)
             if i not in pred:
                 w.writerow(base + ["unclassified", "", "", ""] + span + [wins[i].observed, wins[i].reason])
                 continue
@@ -193,13 +204,14 @@ def main(argv=None) -> int:
             finder_sides.append(side)
             counts[CLASSES[k]] += 1
             w.writerow(base + [CLASSES[k], f"{pred[i][k]:.3f}", t_side,
-                               "yes" if t_side == side else "no"] + span + [wins[i].observed, ""])
+                               "yes" if t_side == side else "no"] + span + [wins[i].observed, caveat])
 
     agree = classify.hand_agreement(type_sides, finder_sides)
-    lengths = [(e[1] - e[0] + 1) / pose.fps for e in extents if e]
+    lengths = [(e.end - e.start + 1) / pose.fps for e in extents]
+    n_cens, n_cap = sum(e.censored for e in extents), sum(e.capped for e in extents)
     print(f"{clip}: {len(rows)} punches from the finder, {len(ok)} classified, "
-          f"{len(rows) - len(ok)} unclassified (punch length, median "
-          f"{np.median(lengths) if lengths else float('nan'):.2f} s)")
+          f"{len(rows) - len(ok)} unclassified" + (f" (punch length, median {np.median(lengths):.2f} s; "
+          f"{n_cens} cut short by a wrist dropout, {n_cap} capped)" if lengths else ""))
     print("  " + ", ".join(f"{c} {n}" for c, n in counts.items()))
     if agree["n"]:
         print(f"  type and finder name the same hand on {agree['agree']:.1%} of {agree['n']} "
@@ -209,6 +221,7 @@ def main(argv=None) -> int:
     (a.out_dir / f"{clip}.classified.json").write_text(json.dumps({
         "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
         "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule, "extent": ex,
+        "extents_censored": n_cens, "extents_capped": n_cap,
         "pose_frames": len(pose), "fps": pose.fps}, indent=1, allow_nan=False), encoding="utf-8")
     print(f"  -> {out} (+ .json provenance)")
 
@@ -226,22 +239,39 @@ def main(argv=None) -> int:
                 continue
             yt.append(spans[si].label)
             yp.append(int(np.argmax(pred[di])))
-        # Every labelled punch read from its labelled frames: what a perfect finder would allow.
-        pw = [classify.cut_span(track, s.start, s.end, geom, torso) for _, s in named]
-        ious = [punchfind.span_iou(extents[di], (spans[si].start, spans[si].end))
-                for si, di in pairs if extents[di]]
-        keep = [k for k, w_ in enumerate(pw) if w_.keypoints is not None]
-        pp = classify.predict_proba(model, [pw[k].keypoints for k in keep], man["t_out"])
+        def scored(windows) -> "tuple[dict, int]":
+            keep = [k for k, w_ in enumerate(windows) if w_.keypoints is not None]
+            pp = classify.predict_proba(model, [windows[k].keypoints for k in keep], man["t_out"])
+            return (type_scores([named[k][1].label for k in keep], [int(np.argmax(p)) for p in pp]),
+                    len(named) - len(keep))
+
+        # Every labelled punch, two ways. From its labelled frames: perfect finder AND perfect start
+        # and end. By the extent at its own wrist-speed peak: perfect finder, the pipeline's cut.
+        by_label = [classify.cut_span(track, s.start, s.end, geom, torso) for _, s in named]
+        by_extent = []
+        for _, s in named:
+            pk = span_peak(track, sig, s.start, s.end)
+            i = row_of.get(pk)
+            if i is None or not sig[i].max() > 0:
+                by_extent.append(classify.Window(None, 0, "no wrist speed inside the labelled punch"))
+                continue
+            e = classify.punch_extent(track, sig, pk, int(np.argmax(sig[i])), ex, geom)
+            by_extent.append(classify.cut_span(track, e.start, e.end, geom, torso))
+        ious = [punchfind.span_iou((extents[di].start, extents[di].end), (spans[si].start, spans[si].end))
+                for si, di in pairs]
+        (label_scores, label_unc), (extent_scores, extent_unc) = scored(by_label), scored(by_extent)
         result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
                   "classifier_sha256": man["sha256"],
                   "matched_detections": type_scores(yt, yp),
                   "matched_unclassifiable": matched_unclassified,
-                  "every_labelled_punch": type_scores([named[k][1].label for k in keep],
-                                                      [int(np.argmax(p)) for p in pp]),
-                  "labelled_unclassifiable": len(named) - len(keep),
+                  "labelled_punch_by_extent_at_its_peak": extent_scores,
+                  "labelled_punch_by_extent_unclassifiable": extent_unc,
+                  "labelled_punch_from_labelled_frames": label_scores,
+                  "labelled_punch_from_labelled_frames_unclassifiable": label_unc,
                   "extent_iou_with_labels": {"n": len(ious), "mean": float(np.mean(ious)) if ious else None}}
-        m, e = result["matched_detections"], result["every_labelled_punch"]
-        for name, s in (("matched detections", m), ("every labelled punch", e)):
+        for name, s in (("matched detections", result["matched_detections"]),
+                        ("every labelled punch, cut by the extent at its peak", extent_scores),
+                        ("every labelled punch, from its labelled frames", label_scores)):
             if s["n"]:
                 print(f"  vs labels, {name}: type accuracy {s['accuracy']:.3f} on {s['n']} "
                       f"(commonest-type floor {s['majority_floor_accuracy']:.3f}), "
