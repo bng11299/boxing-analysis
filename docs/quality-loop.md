@@ -623,6 +623,66 @@ discarded it, so `run_stgcnpp` gained `save_to`.
   end; its types on own footage are not credible until the window is fixed and the pose
   switch (feat/pose-switch) is measured.
 
+### Iteration 4 -- the punch extent (2026-10-11, vault ADR-0014)
+Brendan chose to estimate each punch's start and end from the wrist-speed curve. Acceptance:
+(1) the extent beats the fixed window on V6's untouched second half, with an interval, in
+overlap with the labelled span and in classifier accuracy; (2) a rule that did not is refused;
+(3) every number says which half of V6 it is from; (4) own footage re-run; (5) suites green.
+- **Why V6 lost 21 points:** not hooks being longer than jabs. In the training clips every
+  type runs 0.3-0.4 s; V6's labelled punches run 0.67 s. It is slow instructional footage.
+- **Tried, dropped:** walking out from the peak while speed holds a fraction of it. Typical
+  error a frame, tails 8-42 frames against labels of 11-23. First-half accuracy 0.538.
+- **Built:** width of the speed peak at half height (sub-frame), times ratios from the training
+  clips whose peak is whole: 1.33 widths before, 1.83 after (1,582 clips kept, 2,196 cut by
+  the clip's edge). `predict_proba` had to learn windows of different lengths (a real bug:
+  `np.stack` on the first run).
+- **Test:** 149 checks; 10 mutants, one survived (truncating every window to 9 frames: the test
+  compared the function with itself, and a randomly initialised classifier barely reacts to
+  its input, 7e-6). Replaced with a stand-in model whose answer is a known function of every
+  frame.
+- **Review: FIX FIRST.** B1 an extent over 25 training frames lost its tail, or the peak itself,
+  to a head-first trim. B2 the width walk treated a wrist dropping below confidence as the end
+  of the punch. B3 `every_labelled_punch` now read the labelled frames but was still described
+  as "a perfect finder" (0.754 vs 0.601 on V6). B4 two new tests were vacuous (a bound any
+  fixed window passes; a ratio recomputed with the code's own call). Also: the censoring is a
+  selection that leans the ratios long; "nothing is fitted to V6" was false as written; the
+  gate could barely fail, so add a control.
+
+### Iteration 5 -- review fixes and the control (2026-10-11)
+- **Fix:** cap around the peak in the rule's proportion, flagged (14 of 685 V6 extents); the
+  walk stays inside the hand's own signal, censored at its edge, flagged in the CSV note and the
+  sidecar; two perfect-finder readings under their own names; a CSV row that is not that hand's
+  speed peak in this pose is refused; a 24.000 fps span read whole against 23.976. Wording
+  corrected: V6 chose the half-height level and the rule's form.
+- **Test:** 172 checks; 9 new mutants, one survived (a wrong-hand CSV row raised for another
+  reason) and got its own fixture. Tests now plant a slow punch (read over twice the frames),
+  scale the ratios with frames planted before the peak (7/5), and check IoU 1 and 1/2.
+- **Real-world facts, V6 second half (406 punches), `results/classify_v6.json`:**
+
+  | reading | accuracy |
+  |---|---|
+  | A labelled spans | 0.754 |
+  | B fixed 0.375 s window at the span's peak | 0.500 |
+  | D extent at the span's peak | 0.608 |
+  | F control: one fixed 0.46 s window (the median extent) | 0.631 |
+  | C fixed window at the finder's detections (301) | 0.598 |
+  | E extent at the finder's detections (301) | 0.684 |
+
+  D - B **+0.108 [+0.071, +0.148]**; E - C +0.086 [+0.047, +0.126]; A - D +0.145 [+0.099,
+  +0.192]; **D - F -0.022 [-0.054, +0.010]**. Overlap with the label 0.647 vs 0.505 (+0.142
+  [+0.131, +0.153]).
+- **What the control says:** the gain is the longer window, not following each punch. The
+  clips kept by the censoring are a median 0.434 s against 0.375 s for all measurable clips, so
+  the ratios lean long, which is what V6 rewards. Per-punch tempo has not earned its place on
+  V6; whether it does on mixed-tempo footage is what `feat/pose-switch` measures (`Y_long`).
+- **Own footage (orthodox):** median punch length 0.42 and 0.40 s, the old window's length,
+  so nothing moved: IMG_4395 26 of 41 lead uppercuts, IMG_4406 17 of 41; type-vs-wrist hand
+  agreement 53.7% and 48.8% against chance 47.6% and 50.8%. 3 and 0 extents cut short by a
+  wrist dropout, 1 and 1 capped. The window was V6's problem, not this footage's.
+- **Residual, accepted:** the IoU intervals resample punches independently (blocks would be
+  wider); the same punch reads 5-12% wider at 24 fps than at 60; `read_extent` is not bound to
+  a classifier hash (the ratios do not depend on its weights).
+
 ## `feat/output-report` -- 2026-10-09
 
 The report a boxer reads: `<clip>.report.xlsx` (Punches, Rounds, Reliability, About) and
