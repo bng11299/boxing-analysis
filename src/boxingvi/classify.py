@@ -50,9 +50,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .data import CLASSES, MAX_FRAMES, N_CLASSES, N_JOINTS, NATIVE_FPS, SOURCE_SIZE, Track
+from .data import CLASSES, MAX_FRAMES, N_CLASSES, N_JOINTS, NATIVE_FPS, SOURCE_SIZE, Track, pad_or_trim
 from .punchfind import (L_HIP, L_SHOULDER, MIN_CONF, R_HIP, R_SHOULDER, VARIANTS,
-                        body_scale, wrist_signal)
+                        body_scale, peak_width, wrist_signal)
 
 MANIFEST_VERSION = 1
 MAX_CLASSIFIER_BYTES = 64 * 1024 * 1024   # the real file is ~5.5 MB
@@ -171,6 +171,41 @@ def training_geometry(clips, variant: str) -> WindowGeometry:
         variant=variant, n_clips=len(dur))
 
 
+def training_extent_ratios(clips, variant: str, frac: float) -> dict:
+    """How many peak-widths a labelled punch runs before and after its wrist-speed
+    peak: medians over the TRAINING clips whose peak is whole. A clip whose speed is
+    still above the level at its first or last frame has an unknown width and is
+    left out (and counted): its punch was cut by the annotator, not by the motion."""
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}")
+    lead, tail, censored = [], [], 0
+    for c in clips:
+        if c.source not in NATIVE_FPS:
+            raise ValueError(f"clip from {c.source!r} has no recorded native frame rate")
+        f = NATIVE_FPS[c.source]
+        tr = _clip_track(c.keypoints, f, c.source)
+        if tr is None:
+            continue
+        try:
+            sig = wrist_signal(tr, variant)
+        except ValueError:
+            continue
+        best = sig.max(axis=1)
+        if not best.max() > 0:
+            continue
+        p = int(np.argmax(best))
+        w, cut = peak_width(tr, sig, p, int(np.argmax(sig[p])), frac)
+        if cut:
+            censored += 1
+            continue
+        lead.append((p / f) / w)
+        tail.append(((len(tr.frame_ids) - 1 - p) / f) / w)
+    if len(lead) < 10:
+        raise ValueError(f"only {len(lead)} training clips with a whole speed peak: too few")
+    return {"frac": float(frac), "lead_widths": float(np.median(lead)), "tail_widths": float(np.median(tail)),
+            "n_clips": len(lead), "n_censored": censored, "variant": variant}
+
+
 # ----------------------------------------------------------------- windows ---
 
 @dataclass(frozen=True)
@@ -182,25 +217,15 @@ class Window:
     reason: str = ""                 # empty when keypoints is set
 
 
-def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: float,
-               min_conf: float = MIN_CONF) -> Window:
-    """The window around a punch whose wrist-speed peak is at video frame
-    `peak_frame`, resampled to the training frame rate and mapped into BoxingVI's
-    normalised 1920x1080 space.
-
-    A sample time with no pose frame, and a joint below `min_conf`, become zeros
-    with validity 0 -- exactly how the corpus marks padding and dropped joints,
-    so the classifier's input preparation drops them the same way.
-    """
-    if isinstance(peak_frame, bool) or not isinstance(peak_frame, (int, np.integer)):
-        raise ValueError(f"peak frame must be an integer, got {peak_frame!r}")
+def _window(track: Track, want: np.ndarray, geom: WindowGeometry, torso_px: float,
+            min_conf: float) -> Window:
+    """Video frames `want`, in order, as one clip in BoxingVI's normalised 1920x1080
+    space. A frame with no pose, and a joint below `min_conf`, become zeros with
+    validity 0 -- exactly how the corpus marks padding and dropped joints, so the
+    classifier's input preparation drops them the same way."""
     if not (math.isfinite(torso_px) and torso_px > 1):
         raise ValueError(f"torso length must be a positive pixel length, got {torso_px!r}")
-    n = geom.n_frames
-    t0 = int(peak_frame) / track.fps - geom.lead_in_s
-    # Nearest frame, ties upward: np.round would send ties to the even frame, so
-    # which frames a window holds would depend on the peak frame's parity.
-    want = np.floor((t0 + np.arange(n) / geom.fps) * track.fps + 0.5).astype(np.int64)
+    n = len(want)
     pos = np.searchsorted(track.frame_ids, want)
     pos_c = np.clip(pos, 0, len(track.frame_ids) - 1)
     present = track.frame_ids[pos_c] == want
@@ -231,6 +256,42 @@ def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: fl
     if seen.min() < COORD_LO or seen.max() > COORD_HI:
         return Window(None, observed, "joints fall far outside the frame after scaling")
     return Window(out, observed)
+
+
+def _frame(v, what: str) -> int:
+    if isinstance(v, bool) or not isinstance(v, (int, np.integer)):
+        raise ValueError(f"{what} must be an integer frame, got {v!r}")
+    return int(v)
+
+
+def _nearest_frames(track: Track, t0: float, n: int, geom: WindowGeometry) -> np.ndarray:
+    # Nearest frame, ties upward: np.round would send ties to the even frame, so
+    # which frames a window holds would depend on the first frame's parity.
+    return np.floor((t0 + np.arange(n) / geom.fps) * track.fps + 0.5).astype(np.int64)
+
+
+def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: float,
+               min_conf: float = MIN_CONF) -> Window:
+    """A FIXED-length window (the training clips' median length and peak position)
+    around the punch whose wrist-speed peak is at video frame `peak_frame`. Kept as
+    the baseline `cut_span` is measured against: on V6 it cost 21 points of
+    accuracy, because that footage's punches run about twice the median clip."""
+    t0 = _frame(peak_frame, "peak frame") / track.fps - geom.lead_in_s
+    return _window(track, _nearest_frames(track, t0, geom.n_frames, geom), geom, torso_px, min_conf)
+
+
+def cut_span(track: Track, start: int, end: int, geom: WindowGeometry, torso_px: float,
+             min_conf: float = MIN_CONF) -> Window:
+    """The punch from video frame `start` to `end` (inclusive), as the corpus cuts
+    a labelled span: every frame of it, resampled to the training frame rate, and
+    trimmed to the corpus's 25 frames if longer (the corpus trims the tail too)."""
+    start, end = _frame(start, "start"), _frame(end, "end")
+    if end < start:
+        raise ValueError(f"span ends ({end}) before it starts ({start})")
+    n = min(MAX_FRAMES, int(math.floor((end - start) / track.fps * geom.fps + 1e-9)) + 1)
+    if n < MIN_OBSERVED_FRAMES:
+        return Window(None, 0, "the punch is shorter than two frames at the training frame rate")
+    return _window(track, _nearest_frames(track, start / track.fps, n, geom), geom, torso_px, min_conf)
 
 
 # -------------------------------------------------------------- classifier ---
@@ -317,14 +378,19 @@ def load_classifier(manifest_path: Path):
 
 
 def predict_proba(model, windows: "list[np.ndarray]", t_out: int) -> np.ndarray:
-    """(N, n_classes) softmax probabilities for windows of shape (T, 17, 3)."""
+    """(N, n_classes) softmax probabilities for windows of shape (T, 17, 3). The
+    windows may differ in length (a punch's extent does): each is padded to the
+    corpus's 25 frames with empty frames, which the input preparation drops, so a
+    window's own frames are all the classifier sees."""
     import torch
 
     from .stgcnpp import prepare_input
 
     if not windows:
         return np.zeros((0, N_CLASSES))
-    x = prepare_input(np.stack(windows).astype(np.float32), t_out)
+    if any(len(w) > MAX_FRAMES for w in windows):
+        raise ValueError(f"a window is longer than the corpus's {MAX_FRAMES} frames")
+    x = prepare_input(np.stack([pad_or_trim(np.asarray(w, dtype=np.float32)) for w in windows]), t_out)
     with torch.no_grad():
         logits = torch.cat([model(x[i:i + 256]) for i in range(0, len(x), 256)])
     return torch.softmax(logits, dim=1).numpy().astype(np.float64)
@@ -364,3 +430,35 @@ def hand_agreement(type_sides: "list[str]", finder_sides: "list[str]") -> dict:
     agree = float((a == b).mean())
     p, q = float(a.mean()), float(b.mean())
     return {"n": n, "agree": agree, "chance": p * q + (1 - p) * (1 - q)}
+
+
+# ------------------------------------------------------------ extent rule ---
+
+def read_extent(path: Path, variant: str) -> dict:
+    """The punch-extent rule run_punch_extent.py wrote: {frac, lead_widths,
+    tail_widths}. Refused unless it is well formed, was measured with the same
+    wrist-speed `variant` as the classifier's window, and beat the fixed window
+    on the footage it was tested on -- a rule that did not earn its place is not
+    quietly used."""
+    path = Path(path)
+    with path.open("rb") as f:
+        raw = f.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise ValueError(f"{path.name}: too large to be a punch-extent rule")
+    d = json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
+    if not isinstance(d, dict):
+        raise ValueError(f"{path.name}: expected a JSON object")
+    out = {}
+    for k, lo, hi in (("frac", 0.0, 1.0), ("lead_widths", 0.0, 20.0), ("tail_widths", 0.0, 20.0)):
+        v = d.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise ValueError(f"{path.name}: {k} must be a number in [{lo:g}, {hi:g}], got {v!r}")
+        out[k] = float(v)
+    if not (0 < out["frac"] < 1 and out["lead_widths"] + out["tail_widths"] > 0):
+        raise ValueError(f"{path.name}: frac must be strictly inside (0, 1) and the extent non-empty")
+    if d.get("variant") != variant:
+        raise ValueError(f"{path.name}: measured with wrist-speed variant {d.get('variant')!r}, "
+                         f"not the classifier window's {variant!r}")
+    if d.get("beats_fixed_window") is not True:
+        raise ValueError(f"{path.name}: this extent rule did not beat the fixed window where it was tested")
+    return out
