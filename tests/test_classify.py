@@ -293,6 +293,156 @@ classify.write_manifest(tmp / "part.json", tmp / "part.pt", GEOM, 50, {})
 raises("checkpoint: a state_dict missing a tensor is refused (strict load)",
        lambda: classify.load_classifier(tmp / "part.json"), RuntimeError)
 
+print("punch extent: the width of the wrist-speed peak")
+ids60 = np.arange(400)
+flat = body(400, 60.0)
+
+
+def tri(centre, half_width, frames=ids60, height=4.0):
+    """A triangular speed peak on the left hand: `height` at `centre`, zero `half_width` frames away."""
+    sg = np.zeros((len(frames), 2))
+    sg[:, 0] = np.clip(1 - np.abs(frames - centre) / half_width, 0, None) * height
+    return sg
+
+
+w7, cut7 = punchfind.peak_width(flat, tri(100, 7), 100, 0)
+check("a triangle that falls to zero 7 frames out is 7 frames wide at half height (3.5 each side, interpolated)",
+      abs(w7 - 7 / 60) < 1e-9 and not cut7, f"{w7 * 60:.3f} frames")
+w14, _ = punchfind.peak_width(flat, tri(100, 14), 100, 0)
+check("a peak twice as wide measures twice as wide", abs(w14 - 2 * w7) < 1e-9)
+check("the width does not depend on the peak's height", abs(punchfind.peak_width(flat, tri(100, 7, height=9.0), 100, 0)[0] - w7) < 1e-9)
+_, cut_edge = punchfind.peak_width(flat, tri(2, 7), 2, 0)
+check("a peak still above half height at the first frame of the pose is censored", cut_edge)
+gap_ids = np.r_[np.arange(0, 103), np.arange(140, 437)]
+gapped = body(len(gap_ids), 60.0, ids=gap_ids)
+_, cut_gap = punchfind.peak_width(gapped, tri(100, 7, frames=gap_ids), 100, 0)
+check("... and so is one that runs into a gap in the pose (never measured across it)", cut_gap)
+raises("width: a hand other than 0 or 1 is refused", lambda: punchfind.peak_width(flat, tri(100, 7), 100, 2))
+raises("width: a level of 1.0 is refused", lambda: punchfind.peak_width(flat, tri(100, 7), 100, 0, 1.0))
+raises("width: a peak frame that is not in the track is refused", lambda: punchfind.peak_width(gapped, tri(100, 7, frames=gap_ids), 120, 0))
+raises("width: the other hand, which has no speed there, is refused (not its peak)",
+       lambda: punchfind.peak_width(flat, tri(100, 7), 100, 1))
+raises("width: a signal of the wrong shape is refused", lambda: punchfind.peak_width(flat, tri(100, 7)[:50], 100, 0))
+
+print("punch extent: start and end")
+check("1 width before the peak and 2 after: 7 frames wide -> frames 93 to 114",
+      punchfind.extent(flat, tri(100, 7), 100, 0, 1.0, 2.0) == (93, 114))
+a14, b14 = punchfind.extent(flat, tri(100, 14), 100, 0, 1.0, 2.0)
+check("a slower punch (twice the width) gets twice the extent: the window follows the tempo",
+      (100 - a14, b14 - 100) == (14, 28))
+check("an extent never collapses to one frame", punchfind.extent(flat, tri(100, 1), 100, 0, 0.0, 0.01)[1] > 100)
+raises("extent: negative widths are refused", lambda: punchfind.extent(flat, tri(100, 7), 100, 0, -1.0, 2.0))
+raises("extent: zero widths both sides are refused", lambda: punchfind.extent(flat, tri(100, 7), 100, 0, 0.0, 0.0))
+check("span IoU: (0-9) and (5-14) share 5 of 15 frames", abs(punchfind.span_iou((0, 9), (5, 14)) - 5 / 15) < 1e-12)
+check("span IoU: identical 1, disjoint 0", punchfind.span_iou((3, 8), (3, 8)) == 1 and punchfind.span_iou((0, 4), (9, 12)) == 0)
+raises("span IoU: a span that ends before it starts is refused", lambda: punchfind.span_iou((5, 4), (0, 9)))
+
+print("cutting a punch by its extent")
+coded60 = body(400, 60.0)
+coded60.xy[:, 0, 0] += 0.001 * coded60.frame_ids
+
+
+def frames_of(win):
+    return np.round(((win.keypoints[:, 0, 0] - GEOM.hip_x) * w) / 2 / 0.001)   # scale 2: torso 100 -> 200 px
+
+
+cs = classify.cut_span(coded60, 100, 124, GEOM, 100.0)
+# Worked by hand: 24 frames at 60 fps is 0.4 s, 9.6 steps of 1/24 s, so 10 samples 2.5 frames apart from 100;
+# x.5 goes up: 100 103 105 108 110 113 115 118 120 123.
+check("a 60 fps span is resampled at the training rate from its first frame to its last",
+      np.array_equal(frames_of(cs), [100, 103, 105, 108, 110, 113, 115, 118, 120, 123]), str(frames_of(cs)))
+c24 = body(400, 24.0, hx=960, hy=600)
+c24.xy[:, 0, 0] += 0.001 * c24.frame_ids
+k24 = classify.cut_span(c24, 50, 61, GEOM, 100.0)
+check("at the training rate a span is its own frames, as the corpus cuts a labelled span",
+      np.array_equal(frames_of(k24), np.arange(50, 62)))
+check("a span longer than the corpus's 25 frames keeps its first 25 (the corpus trims the tail too)",
+      np.array_equal(frames_of(classify.cut_span(c24, 50, 99, GEOM, 100.0)), np.arange(50, 75)))
+one = classify.cut_span(coded60, 100, 101, GEOM, 100.0)
+check("a punch under two training frames long is unclassifiable, with the reason",
+      one.keypoints is None and "shorter than two frames" in one.reason)
+raises("a span that ends before it starts is refused", lambda: classify.cut_span(coded60, 120, 100, GEOM, 100.0))
+raises("a fractional span frame is refused", lambda: classify.cut_span(coded60, 100.5, 120, GEOM, 100.0))
+off = classify.cut_span(coded60, 380, 430, GEOM, 100.0)
+check("a span running past the end of the pose is unclassifiable when under half of it has pose",
+      off.keypoints is None and "pose in only" in off.reason, off.reason)
+
+print("extent ratios from training clips")
+whole = []
+for q in pk:   # the round-trip track: clips from 5 frames before each finder peak, 14 frames long
+    kp = np.zeros((25, N_JOINTS, 3), np.float32)
+    kp[:14, :, 0] = cont.xy[q - 5:q + 9, :, 0] / w
+    kp[:14, :, 1] = cont.xy[q - 5:q + 9, :, 1] / h
+    kp[:14, :, 2] = 1
+    whole.append(Clip(kp, 1, "", "V1"))
+er = classify.training_extent_ratios(whole, "relative", 0.5)
+one_tr = classify._clip_track(whole[0].keypoints, 24.0, "V1")
+one_sig = punchfind.wrist_signal(one_tr, "relative")
+pk0 = int(np.argmax(one_sig.max(axis=1)))
+w0, cut0 = punchfind.peak_width(one_tr, one_sig, pk0, int(np.argmax(one_sig[pk0])), 0.5)
+check("control: these clips hold a whole speed peak", not cut0 and er["n_clips"] == len(whole) and er["n_censored"] == 0,
+      str(er))
+check("lead and tail are the clip's frames before and after its peak, in peak-widths",
+      abs(er["lead_widths"] - (pk0 / 24) / w0) < 1e-9 and abs(er["tail_widths"] - ((13 - pk0) / 24) / w0) < 1e-9, str(er))
+moving = body(14, 24.0, hx=960, hy=600).xy      # the right wrist already at full speed in the clip's first frame,
+moving[:5, 10, 0] += np.linspace(0, 200, 5)     # then still: its speed peak was cut off by the start of the clip
+moving[5:, 10, 0] += 200
+kp_cut = np.zeros((25, N_JOINTS, 3), np.float32)
+kp_cut[:14, :, 0], kp_cut[:14, :, 1], kp_cut[:14, :, 2] = moving[..., 0] / w, moving[..., 1] / h, 1
+cut_clips = [Clip(kp_cut, 1, "", "V1") for _ in whole]
+mixed = classify.training_extent_ratios(whole + cut_clips, "relative", 0.5)
+check("clips whose peak is cut by the clip's first frame are left out and counted, not measured",
+      mixed["n_censored"] == len(cut_clips) and mixed["n_clips"] == len(whole)
+      and mixed["lead_widths"] == er["lead_widths"], str(mixed))
+raises("too few whole clips is refused", lambda: classify.training_extent_ratios(whole[:3], "relative", 0.5))
+raises("an unknown variant is refused", lambda: classify.training_extent_ratios(whole, "sideways", 0.5))
+
+print("the extent rule file")
+extent_file = tmp / "punch_extent.json"
+
+
+def extent_json(**kw):
+    d = {"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8, "variant": "relative", "beats_fixed_window": True, **kw}
+    extent_file.write_text(json.dumps({k: v for k, v in d.items() if v is not None}), encoding="utf-8")
+    return lambda: classify.read_extent(extent_file, "relative")
+
+
+check("a good rule file is read", extent_json()() == {"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8})
+raises("a rule that did not beat the fixed window is refused", extent_json(beats_fixed_window=False))
+raises("a rule with no verdict is refused (truthy is not True)", extent_json(beats_fixed_window="yes"))
+raises("a rule measured with another wrist-speed variant is refused", extent_json(variant="radial"))
+raises("a width level of 1.0 is refused", extent_json(frac=1.0))
+raises("a missing lead is refused", extent_json(lead_widths=None))
+raises("a boolean tail is refused", extent_json(tail_widths=True))
+raises("an absurd tail is refused", extent_json(tail_widths=500.0))
+extent_file.write_text('{"frac": NaN}', encoding="utf-8")
+raises("NaN in the rule file is refused", lambda: classify.read_extent(extent_file, "relative"))
+extent_json()
+
+print("windows of different lengths")
+def frame_reader(x):
+    """A stand-in classifier whose answer is a known function of EVERY frame it is given:
+    logit 0 is 100 x the mean nose-x over the resampled frames. Nothing random to be insensitive."""
+    out = torch.zeros(len(x), len(CLASSES))
+    out[:, 0] = 100 * x[:, 0, :, 0, 0].mean(dim=1)
+    return out
+
+
+def alone(win):   # the stand-in on this window's own frames, with no batching or padding code in the way
+    return torch.softmax(frame_reader(prepare_input(win[None].astype(np.float32), 50)), 1).numpy()[0]
+
+
+short_w = cs.keypoints                               # 10 frames
+long_w = short_w[np.r_[0:10, 0:4]].copy()            # 14 frames: the same punch, then four more
+long_w[10:, 0, 0] += 0.2                             # ... in which the nose is somewhere else
+both = classify.predict_proba(frame_reader, [short_w, long_w], 50)
+check("control: a punch's later frames change the answer (so cutting them off would show)",
+      not np.allclose(alone(long_w), alone(long_w[:10]), atol=1e-3))
+check("a 10-frame and a 14-frame punch classify together exactly as each does read whole and alone",
+      np.allclose(both[0], alone(short_w), atol=1e-6) and np.allclose(both[1], alone(long_w), atol=1e-6))
+raises("a window longer than the corpus's 25 frames is refused",
+       lambda: classify.predict_proba(loaded, [np.ones((26, N_JOINTS, 3), np.float32)], 50))
+
 print("hands")
 check("orthodox: left leads", classify.hand_side("left", "orthodox") == "lead"
       and classify.hand_side("right", "orthodox") == "rear")
@@ -323,14 +473,18 @@ rule = tmp / "rule.json"
 rule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
 find_punches.main(["--pose", str(tmp / "IMG_7777.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o")])
 punches = tmp / "o" / "IMG_7777.punches.csv"
-args = ["--pose", str(tmp / "IMG_7777.pose.npz"), "--punches", str(punches), "--classifier", str(mpath),
-        "--rule", str(rule), "--out-dir", str(tmp / "o")]
+args = ["--rule", str(rule), "--extent", str(extent_file), "--pose", str(tmp / "IMG_7777.pose.npz"),
+        "--punches", str(punches), "--classifier", str(mpath), "--out-dir", str(tmp / "o")]
 rc = classify_punches.main(args + ["--stance", "orthodox"])
 rows = list(csv.DictReader((tmp / "o" / "IMG_7777.classified.csv").open(encoding="utf-8")))
 check("end to end: one row per finder punch, every finder column kept",
       rc == 0 and len(rows) == 3 and rows[0]["frame"] == next(csv.DictReader(punches.open(encoding="utf-8")))["frame"])
 check("each row has a type from the class list and a confidence in (0, 1]",
       all(r["punch_type"] in CLASSES and 0 < float(r["confidence"]) <= 1 for r in rows), str(rows))
+check("each punch records the frames it was read from, around its peak",
+      all(int(r["punch_start_frame"]) <= int(r["frame"]) <= int(r["punch_end_frame"]) for r in rows), str(rows[0]))
+check("... and they are a tempo-scaled extent, not one fixed length for every clip",
+      all(2 <= int(r["punch_end_frame"]) - int(r["punch_start_frame"]) <= 60 for r in rows))
 check("orthodox: left-hand punches are lead, right-hand punches rear",
       [r["lead_rear"] for r in rows] == ["lead", "lead", "rear"])
 check("hands_agree says whether the type's hand is the finder's",
@@ -357,17 +511,20 @@ xy_p = part.xy.copy(); xy_p[n - 3:] = np.nan
 part = pose_yolo.PoseSequence(xy_p, cf, part.detected, fps, 1080, 1920, "IMG_7777.mov", "test")
 part.save(tmp / "IMG_8888.pose.npz")
 classify_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--punches", str(tmp / "IMG_8888.punches.csv"),
-                       "--classifier", str(mpath), "--rule", str(rule), "--stance", "orthodox",
+                       "--classifier", str(mpath), "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox",
                        "--out-dir", str(tmp / "o")])
 raises("a punches CSV named for another clip is refused",
        lambda: classify_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--punches", str(punches),
-                                      "--classifier", str(mpath), "--rule", str(rule), "--stance", "orthodox",
+                                      "--classifier", str(mpath), "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox",
                                       "--out-dir", str(tmp / "o")]))
 radial = tmp / "radial.json"
 radial.write_text(json.dumps({"chosen": {"variant": "radial", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
 raises("a finder rule with another wrist-speed variant than the window's is refused",
-       lambda: classify_punches.main(args[:-4] + ["--rule", str(radial), "--out-dir", str(tmp / "o"),
-                                                  "--stance", "orthodox"]))
+       lambda: classify_punches.main(args + ["--rule", str(radial), "--stance", "orthodox"]))
+extent_json(beats_fixed_window=False)
+raises("an extent rule that did not beat the fixed window is refused by the CLI",
+       lambda: classify_punches.main(args + ["--stance", "orthodox"]))
+extent_json()
 rows_e = list(csv.DictReader((tmp / "o" / "IMG_8888.classified.csv").open(encoding="utf-8")))
 check("a punch whose window is mostly past the pose is kept as unclassified, with the reason",
       rows_e[-1]["punch_type"] == "unclassified" and rows_e[-1]["confidence"] == "" and rows_e[-1]["note"] != "",
@@ -389,7 +546,7 @@ lab8.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
     {"start": int(3.0 * fps), "end": int(3.25 * fps), "label": "jab"},
     {"start": n - 4, "end": n - 1, "label": "jab"}]}), encoding="utf-8")   # the punch at the end of the pose
 classify_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--punches", str(tmp / "IMG_8888.punches.csv"),
-                       "--classifier", str(mpath), "--rule", str(rule), "--stance", "orthodox",
+                       "--classifier", str(mpath), "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox",
                        "--out-dir", str(tmp / "o"), "--labels", str(lab8)])
 sc8 = json.loads((tmp / "o" / "IMG_8888.classify_score.json").read_text(encoding="utf-8"))
 check("a matched punch that could not be classified is counted, not silently dropped from the score",

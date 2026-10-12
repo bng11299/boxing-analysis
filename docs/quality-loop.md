@@ -599,6 +599,30 @@ discarded it, so `run_stgcnpp` gained `save_to`.
 - **Gate reproduce:** clean clone of `6fa5540`: classify 100, pipeline 260, hands 38,
   labels 50, ingest 109 -- the working tree's numbers.
 
+### Iteration 3 -- real data (2026-10-09)
+- **Reproduction gate held twice.** First retrain: 30 epochs, because results/stgcnpp.json
+  records `epochs: 30` (the other arms) and no `stgcnpp_epochs`, while its log shows ST-GCN++
+  ran 20. It scored 0.7951 / 0.7141 and was **refused, nothing saved**. Fix: the epochs come
+  from the reference, which must record them (the 09-22 seed-0 sweep run: 20 epochs, same
+  confusion matrix). Second retrain: **0.8145 / 0.7207, exactly the reported run**; saved,
+  sha256 `32c1982d91a9...`, geometry lead-in 0.125 s, 9 frames at 24 fps.
+- **V6 window cost (results/classify_v6.json), 685 hooks and uppercuts:** A corpus-style span
+  clips 0.712 accuracy; B the pipeline's window at the span's wrist-speed peak 0.504; C the
+  window at the finder's own matched detections 0.594 on 493. A - B **+0.209 [+0.169,
+  +0.247]**; B - C -0.010 [-0.032, +0.014]: finder timing costs nothing measurable, the
+  window costs 21 points. All three beat the commonest-type floor (0.378).
+- **Ablation (scratch, not committed):** span frames scaled and centred 0.708 (canonicalisation
+  is harmless); fixed 0.375 s window raw 0.450, scaled 0.504; fixed 0.5 / 0.625 / 0.75 s raw
+  0.523 / 0.536 / 0.543. V6 spans are a median 16 frames (0.67 s) against the training median
+  9 (0.375 s, mostly jabs and crosses): a fixed window cuts hooks and uppercuts short, and no
+  fixed length recovers the span-cut accuracy. **Open design decision:** estimate each punch's
+  start and end (not just its peak), or classify several windows and keep the most confident.
+- **Own footage, provisional (stance unconfirmed, outputs in scratch only):** IMG_4395 42
+  punches, IMG_4406 41; typed 64% / 46% lead uppercuts, 5% jabs. Type-vs-wrist hand agreement
+  54.8% and 56.1% against chance 48.2% and 50.9%: barely above chance. The step runs end to
+  end; its types on own footage are not credible until the window is fixed and the pose
+  switch (feat/pose-switch) is measured.
+
 ## `feat/output-report` -- 2026-10-09
 
 The report a boxer reads: `<clip>.report.xlsx` (Punches, Rounds, Reliability, About) and

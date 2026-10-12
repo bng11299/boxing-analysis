@@ -48,7 +48,7 @@ from .data import CLASSES, HELD_OUT_VIDEOS
 
 CLASSIFIED_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_interpolated_frame",
                      "lead_rear", "punch_type", "confidence", "type_hand", "hands_agree",
-                     "window_frames_observed", "note"]
+                     "punch_start_frame", "punch_end_frame", "window_frames_observed", "note"]
 UNCLASSIFIED = "unclassified"
 LOW_RECALL = 0.70
 COUNT_BIAS = 0.20
@@ -61,7 +61,10 @@ PLURAL = {"jab": "jabs", "cross": "crosses", "lead_hook": "lead hooks", "lead_up
 # The only notes classify_punches.py writes.
 _NOTES = (re.compile(r""), re.compile(r"pose in only [0-9]+ of the window's [0-9]+ frames"),
           re.compile(r"no frame in the window shows both hips"),
-          re.compile(r"joints fall far outside the frame after scaling"))
+          re.compile(r"joints fall far outside the frame after scaling"),
+          re.compile(r"no wrist speed at the peak"),
+          re.compile(r"the punch is shorter than two frames at the training frame rate"))
+_INT = re.compile(r"-?[0-9]+")   # a punch's estimated start can fall before the clip's first frame
 _DIGITS = re.compile(r"[0-9]+")
 _DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -125,6 +128,12 @@ def read_classified(path: Path, duration_s: float) -> "list[dict]":
             leads.add(d["hand"] if d["lead_rear"] == "lead" else ("right" if d["hand"] == "left" else "left"))
             if d["peak_on_interpolated_frame"] not in ("yes", "no"):
                 raise ValueError(f"{where}: interpolated flag {d['peak_on_interpolated_frame']!r}")
+            a_, b_ = d["punch_start_frame"], d["punch_end_frame"]
+            if a_ or b_:
+                if not (_INT.fullmatch(a_) and _INT.fullmatch(b_)) or not int(a_) <= int(d["frame"]) <= int(b_):
+                    raise ValueError(f"{where}: punch frames {a_!r}-{b_!r} do not contain its peak")
+            elif d["punch_type"] != UNCLASSIFIED:
+                raise ValueError(f"{where}: a classified punch without the frames it was read from")
             if not any(p.fullmatch(d["note"]) for p in _NOTES):
                 raise ValueError(f"{where}: note is not one classify_punches.py writes")
             if d["punch_type"] == UNCLASSIFIED:
@@ -145,7 +154,8 @@ def read_classified(path: Path, duration_s: float) -> "list[dict]":
             rows.append({"frame": int(d["frame"]), "time_s": float(d["time_s"]), "hand": d["hand"],
                          "lead_rear": d["lead_rear"], "punch_type": d["punch_type"], "confidence": conf,
                          "type_hand": d["type_hand"] or None, "hands_agree": d["hands_agree"] or None,
-                         "note": d["note"], "interpolated": d["peak_on_interpolated_frame"] == "yes"})
+                         "note": d["note"], "interpolated": d["peak_on_interpolated_frame"] == "yes",
+                         "span": (int(a_), int(b_)) if a_ else None})
     if len(leads) > 1:
         raise ValueError(f"{path.name}: rows disagree about which hand leads (two stances in one file)")
     return sorted(rows, key=lambda x: x["frame"])
@@ -457,14 +467,17 @@ def _cell(v):
     return v
 
 
-def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict, text: str) -> None:
+def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict, text: str,
+                   fps: float) -> None:
     from openpyxl import Workbook
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Punches"
+    if not (math.isfinite(fps) and fps > 0):
+        raise ValueError("fps must be positive")
     ws.append(["round", "time (s)", "time (m:ss)", "hand (wrist that moved)", "lead/rear", "punch type",
-               "confidence", "type agrees with wrist", "why not named"])
+               "confidence", "type agrees with wrist", "punch length (s)", "why not named"])
     for r in rows:
         k = round_of(r["time_s"], rounds)
         s = int(r["time_s"])
@@ -472,7 +485,8 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
             k + 1 if k is not None else "outside rounds", round(r["time_s"], 3), f"{s // 60}:{s % 60:02d}",
             r["hand"], r["lead_rear"], r["punch_type"].replace("_", " "),
             None if r["confidence"] is None else round(r["confidence"], 3),
-            r["hands_agree"] or "", r["note"])])
+            r["hands_agree"] or "",
+            None if r["span"] is None else round((r["span"][1] - r["span"][0] + 1) / fps, 2), r["note"])])
     ws = wb.create_sheet("Rounds")
     ws.append(["round", "start (s)", "end (s)", "punches", "per minute"]
               + [PLURAL[c] for c in CLASSES] + ["not named"])

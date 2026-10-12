@@ -59,11 +59,13 @@ WHY = "pose in only 1 of the window's 9 frames"
 def row(t, ptype, hand="left", conf=0.9, lead="left"):
     """A classify_punches.py row; `lead` is the stance's lead hand."""
     side = "lead" if hand == lead else "rear"
+    f = int(t * FPS)
     if ptype == "unclassified":
-        return [str(int(t * FPS)), f"{t:.3f}", hand, "5.000", "no", side, "unclassified", "", "", "", "1", WHY]
+        return [str(f), f"{t:.3f}", hand, "5.000", "no", side, "unclassified", "", "", "", str(f - 6), str(f + 17),
+                "1", WHY]
     th = classify.class_side(ptype)
-    return [str(int(t * FPS)), f"{t:.3f}", hand, "5.000", "no", side, ptype, f"{conf:.3f}", th,
-            "yes" if th == side else "no", "9", ""]
+    return [str(f), f"{t:.3f}", hand, "5.000", "no", side, ptype, f"{conf:.3f}", th,
+            "yes" if th == side else "no", str(f - 6), str(f + 17), "9", ""]   # a 24-frame punch: 0.4 s at 60 fps
 
 
 def write_csv(path, rows, header=report.CLASSIFIED_HEADER):
@@ -110,12 +112,17 @@ r_ = row(1, "jab"); r_[7] = "1.500"; bad("a confidence above 1 is refused", [r_]
 r_ = row(1, "jab"); r_[7] = ""; bad("a named punch without a confidence is refused", [r_])
 r_ = row(1, "unclassified"); r_[7] = "0.5"; bad("an unclassified punch carrying a confidence is refused", [r_])
 r_ = row(1, "unclassified"); r_[9] = "yes"; bad("an unclassified punch carrying an agreement flag is refused", [r_])
-r_ = row(1, "unclassified"); r_[11] = ""; bad("an unclassified punch without its reason is refused", [r_])
+r_ = row(1, "unclassified"); r_[13] = ""; bad("an unclassified punch without its reason is refused", [r_])
+r_ = row(1, "jab"); r_[10] = ""; r_[11] = ""; bad("a classified punch without the frames it was read from is refused", [r_])
+r_ = row(1, "jab"); r_[10] = str(int(FPS) + 5); bad("punch frames that do not contain the peak are refused", [r_])
+r_ = row(1, "jab"); r_[11] = "1e3"; bad("a punch frame that is not a whole number is refused", [r_])
+r_ = row(0.05, "jab"); check("a punch whose estimated start falls before frame 0 is read (start -3)",
+                              report.read_classified(write_csv(tmp / "neg.csv", [r_]), DUR)[0]["span"] == (-3, 20))
 r_ = row(1, "jab"); r_[8] = "rear"; bad("a type hand that does not follow from the type is refused", [r_])
 r_ = row(1, "jab"); r_[9] = "no"; bad("an agreement flag that does not follow from the hands is refused", [r_])
 r_ = row(1, "jab"); r_[2] = "both"; bad("an unknown hand is refused", [r_])
 r_ = row(1, "jab"); r_[0] = "²"; bad("a non-ASCII digit is refused", [r_])
-r_ = row(1, "unclassified"); r_[11] = "=HYPERLINK(\"http://x\")"; bad("a note classify never writes is refused", [r_])
+r_ = row(1, "unclassified"); r_[13] = "=HYPERLINK(\"http://x\")"; bad("a note classify never writes is refused", [r_])
 bad("a short row is refused", [row(1, "jab")[:5]])
 bad("two stances in one file are refused", [row(1, "jab", lead="left"), row(2, "jab", lead="right")])
 check("a file in one southpaw stance is read", len(report.read_classified(
@@ -328,12 +335,13 @@ print("spreadsheet")
 from openpyxl import load_workbook  # noqa: E402
 
 xl = tmp / "IMG_1.report.xlsx"
-report.write_workbook(xl, "IMG_1", rows, ROUNDS, facts, bench, text)
+report.write_workbook(xl, "IMG_1", rows, ROUNDS, facts, bench, text, FPS)
 wb = load_workbook(xl)
 check("four sheets", wb.sheetnames == ["Punches", "Rounds", "Reliability", "About"])
 p = list(wb["Punches"].iter_rows(values_only=True))
 check("one Punches row per punch, the one outside the rounds marked", len(p) == 1 + 15
       and sum(r[0] == "outside rounds" for r in p[1:]) == 1)
+check("each punch shows its length: 24 frames at 60 fps is 0.4 s", all(r[8] == 0.4 for r in p[1:]), str(p[1]))
 rr = list(wb["Rounds"].iter_rows(values_only=True))
 check("Rounds: per round and total counts equal the facts", [r[3] for r in rr[1:]] == [10, 4, 14] and rr[-1][0] == "all")
 rel = list(wb["Reliability"].iter_rows(values_only=True))

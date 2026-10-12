@@ -64,7 +64,7 @@ def main(argv=None) -> int:
     facts = report.compute_facts(rows, rounds, duration)
     text, _ = report.summary(facts, bench, finder, own)
     a.out_dir.mkdir(parents=True, exist_ok=True)
-    report.write_workbook(a.out_dir / f"{clip}.report.xlsx", clip, rows, rounds, facts, bench, text)
+    report.write_workbook(a.out_dir / f"{clip}.report.xlsx", clip, rows, rounds, facts, bench, text, pose.fps)
     (a.out_dir / f"{clip}.summary.txt").write_text(text + "\n", encoding="utf-8")
     print(text)
     print(f"-> {a.out_dir / f'{clip}.report.xlsx'} and {clip}.summary.txt")
