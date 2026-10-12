@@ -7,10 +7,16 @@
 
 Writes results/punches/<clip>.classified.csv: the finder's rows, plus the hand as
 lead/rear (from --stance, which is required: the tool does not guess a stance),
-the punch type, the classifier's confidence (its softmax probability), and
-whether the type names the same hand the finder did. A row the classifier cannot
-see well enough is kept and marked unclassified, with the reason; it is never
-given a guessed type.
+the punch type, the classifier's confidence (its softmax probability), whether
+the type names the same hand the finder did, and the frames the punch was read
+from. A row the classifier cannot see well enough is kept and marked
+unclassified, with the reason; it is never given a guessed type. Beside it,
+<clip>.classified.json records which classifier, rule and stance produced it.
+
+Each punch is cut from its start to its end, estimated from the width of its
+wrist-speed peak (punchfind.extent, results/punch_extent.json from
+run_punch_extent.py), not with a fixed-length window: on V6's second half that
+raised accuracy from 0.500 to 0.601, still 0.15 short of the labelled spans.
 
 The classifier was trained on AlphaPose skeletons from YouTube footage at 24-30
 fps. On YOLO11-pose skeletons of phone footage its accuracy is UNMEASURED until
@@ -24,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -42,8 +49,9 @@ from find_punches import DEFAULT_RULE, TOL_S, load_labels, load_rule  # noqa: E4
 
 PUNCH_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_interpolated_frame"]
 OUT_HEADER = PUNCH_HEADER + ["lead_rear", "punch_type", "confidence", "type_hand", "hands_agree",
-                             "window_frames_observed", "note"]
+                             "punch_start_frame", "punch_end_frame", "window_frames_observed", "note"]
 DEFAULT_OUT = Path("results/punches")
+DEFAULT_EXTENT = Path("results/punch_extent.json")
 MAX_ROWS = 100_000
 _DIGITS = re.compile(r"[0-9]+")
 
@@ -124,6 +132,8 @@ def main(argv=None) -> int:
     ap.add_argument("--labels", type=Path)
     ap.add_argument("--rule", type=Path, default=DEFAULT_RULE,
                     help="the rule find_punches.py ran with; its variant must be the window's")
+    ap.add_argument("--extent", type=Path, default=DEFAULT_EXTENT,
+                    help="the punch-extent rule from run_punch_extent.py")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     a = ap.parse_args(argv)
 
@@ -137,16 +147,29 @@ def main(argv=None) -> int:
     geom: classify.WindowGeometry = man["geometry"]
     # The window's lead-in was measured with one wrist-speed variant; a peak found
     # with the other one is a different moment of the punch.
-    if load_rule(a.rule)["variant"] != geom.variant:
+    rule = load_rule(a.rule)
+    if rule["variant"] != geom.variant:
         raise ValueError(f"the punch finder's rule uses another wrist-speed variant than the "
                          f"classifier's window ({geom.variant}); re-run one of them to match")
+    ex = classify.read_extent(a.extent, geom.variant)
 
     # The same track the finder ran on, so every peak frame it reported exists here.
     raw = pose.to_track(usable_only=False)
     track = punchfind.bridge(raw, int(round(punchfind.BRIDGE_S * pose.fps)))
     torso = punchfind.body_scale(track)
+    sig = punchfind.wrist_signal(track, geom.variant)
 
-    wins = [classify.cut_window(track, d["frame"], geom, torso) for d in rows]
+    wins, extents = [], []
+    for d in rows:
+        try:
+            s_, e_ = punchfind.extent(track, sig, d["frame"], 0 if d["hand"] == "left" else 1,
+                                      ex["lead_widths"], ex["tail_widths"], ex["frac"])
+        except ValueError:   # the finder's hand has no speed here: this CSV was not made from this pose
+            extents.append(None)
+            wins.append(classify.Window(None, 0, "no wrist speed at the peak"))
+            continue
+        extents.append((s_, e_))
+        wins.append(classify.cut_span(track, s_, e_, geom, torso))
     ok = [i for i, w in enumerate(wins) if w.keypoints is not None]
     probs = classify.predict_proba(model, [wins[i].keypoints for i in ok], man["t_out"])
     pred = {i: p for i, p in zip(ok, probs)}
@@ -160,8 +183,9 @@ def main(argv=None) -> int:
         for i, d in enumerate(rows):
             side = classify.hand_side(d["hand"], a.stance)
             base = [d[k] for k in PUNCH_HEADER] + [side]
+            span = list(extents[i]) if extents[i] else ["", ""]
             if i not in pred:
-                w.writerow(base + ["unclassified", "", "", "", wins[i].observed, wins[i].reason])
+                w.writerow(base + ["unclassified", "", "", ""] + span + [wins[i].observed, wins[i].reason])
                 continue
             k = int(np.argmax(pred[i]))
             t_side = classify.class_side(CLASSES[k])
@@ -169,16 +193,24 @@ def main(argv=None) -> int:
             finder_sides.append(side)
             counts[CLASSES[k]] += 1
             w.writerow(base + [CLASSES[k], f"{pred[i][k]:.3f}", t_side,
-                               "yes" if t_side == side else "no", wins[i].observed, ""])
+                               "yes" if t_side == side else "no"] + span + [wins[i].observed, ""])
 
     agree = classify.hand_agreement(type_sides, finder_sides)
+    lengths = [(e[1] - e[0] + 1) / pose.fps for e in extents if e]
     print(f"{clip}: {len(rows)} punches from the finder, {len(ok)} classified, "
-          f"{len(rows) - len(ok)} unclassified (window: {geom.n_frames} frames at {geom.fps:g} fps)")
+          f"{len(rows) - len(ok)} unclassified (punch length, median "
+          f"{np.median(lengths) if lengths else float('nan'):.2f} s)")
     print("  " + ", ".join(f"{c} {n}" for c, n in counts.items()))
     if agree["n"]:
         print(f"  type and finder name the same hand on {agree['agree']:.1%} of {agree['n']} "
               f"(chance for these proportions {agree['chance']:.1%}); a consistency check, not accuracy")
-    print(f"  -> {out}")
+    # Provenance for whatever reads the CSV next (report_punches.py): which model named
+    # these punches, from which finder rule, extent rule and stance, and the CSV's own hash.
+    (a.out_dir / f"{clip}.classified.json").write_text(json.dumps({
+        "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+        "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule, "extent": ex,
+        "pose_frames": len(pose), "fps": pose.fps}, indent=1, allow_nan=False), encoding="utf-8")
+    print(f"  -> {out} (+ .json provenance)")
 
     if a.labels:
         spans = load_labels(a.labels, len(pose), pose.fps)
@@ -194,8 +226,10 @@ def main(argv=None) -> int:
                 continue
             yt.append(spans[si].label)
             yp.append(int(np.argmax(pred[di])))
-        sig = punchfind.wrist_signal(track, geom.variant)
-        pw = [classify.cut_window(track, span_peak(track, sig, s.start, s.end), geom, torso) for _, s in named]
+        # Every labelled punch read from its labelled frames: what a perfect finder would allow.
+        pw = [classify.cut_span(track, s.start, s.end, geom, torso) for _, s in named]
+        ious = [punchfind.span_iou(extents[di], (spans[si].start, spans[si].end))
+                for si, di in pairs if extents[di]]
         keep = [k for k, w_ in enumerate(pw) if w_.keypoints is not None]
         pp = classify.predict_proba(model, [pw[k].keypoints for k in keep], man["t_out"])
         result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
@@ -204,7 +238,8 @@ def main(argv=None) -> int:
                   "matched_unclassifiable": matched_unclassified,
                   "every_labelled_punch": type_scores([named[k][1].label for k in keep],
                                                       [int(np.argmax(p)) for p in pp]),
-                  "labelled_unclassifiable": len(named) - len(keep)}
+                  "labelled_unclassifiable": len(named) - len(keep),
+                  "extent_iou_with_labels": {"n": len(ious), "mean": float(np.mean(ious)) if ious else None}}
         m, e = result["matched_detections"], result["every_labelled_punch"]
         for name, s in (("matched detections", m), ("every labelled punch", e)):
             if s["n"]:
