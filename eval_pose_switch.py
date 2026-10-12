@@ -10,7 +10,7 @@ Step 1, on the NVIDIA laptop (pose only; nothing here needs a GPU):
 Step 2, anywhere, once results/ingest/V2.pose.npz, V5 and V9 have synced back:
 
     python eval_pose_switch.py --data data --poses results/ingest \\
-        --classifier weights/classifier/stgcnpp-boxingvi-seed0.json
+        --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --extent results/punch_extent.json
 
 Gates, in order; each one that fails stops the run with nothing scored:
 1. the saved classifier, reading the corpus's own held-out clips, reproduces the
@@ -25,10 +25,14 @@ Readings of the same held-out punches by the same classifier:
   Y      YOLO11-pose over the same frames, joints below confidence 0.3 dropped
          (the pipeline's rule)
   Y_all  YOLO11-pose keeping every detected joint (AlphaPose drops few)
-  Y_win  YOLO11-pose through the pipeline's own window (classify.cut_window) at the
-         wrist-speed peak inside the span: the pipeline with perfect punch timing.
-         Y - Y_win is the cost of the fixed-length window, on all six punch types
-         (on V6, hooks and uppercuts only, it was 21 points: results/classify_v6.json)
+  Y_fix  YOLO11-pose through the FIXED-length window (classify.cut_window) at the
+         wrist-speed peak inside the span: the old cut, with perfect punch timing
+  Y_ext  YOLO11-pose through the punch EXTENT (punchfind.extent + classify.cut_span)
+         at the same peak: the pipeline's cut, with perfect punch timing.
+         Y - Y_ext is what the pipeline's cut costs and Y_ext - Y_fix what the extent
+         buys, here on all six punch types (V6 had hooks and uppercuts only:
+         results/classify_v6.json). The extent's overlap with each labelled span is
+         reported too, by punch type: its first check on jabs and crosses.
 Reported on every clip YOLO saw, and separately on clips where YOLO followed the
 same person as AlphaPose; clips YOLO missed are counted. Paired bootstrap
 intervals on A - Y.
@@ -86,10 +90,12 @@ def main(argv=None) -> int:
     ap.add_argument("--poses", type=Path, required=True, help="folder with <video>.pose.npz from run_ingest.py")
     ap.add_argument("--classifier", type=Path, required=True)
     ap.add_argument("--videos", default="V2,V5,V9")
+    ap.add_argument("--extent", type=Path, default=Path("results/punch_extent.json"))
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     a = ap.parse_args(argv)
     videos = a.videos.split(",")
     model, man = classify.load_classifier(a.classifier)
+    ex = classify.read_extent(a.extent, man["geometry"].variant)
 
     # Gate 1: the reported model and input path, on the corpus's own held-out clips.
     held = (man.get("held_out") or {})
@@ -126,10 +132,18 @@ def main(argv=None) -> int:
         torso = punchfind.body_scale(track)
         sig = punchfind.wrist_signal(track, geom.variant)
         for c in clips:
-            win = classify.cut_window(track, span_peak(track, sig, c.start + o, c.end + o), geom, torso)
+            pk = span_peak(track, sig, c.start + o, c.end + o)
+            win = classify.cut_window(track, pk, geom, torso)
+            i = int(np.searchsorted(track.frame_ids, pk))
+            ext_kp, iou = None, None
+            if i < len(track.frame_ids) and track.frame_ids[i] == pk and sig[i].max() > 0:
+                s_, e_ = punchfind.extent(track, sig, pk, int(np.argmax(sig[i])), ex["lead_widths"],
+                                          ex["tail_widths"], ex["frac"])
+                ext_kp = classify.cut_span(track, s_, e_, geom, torso).keypoints
+                iou = punchfind.span_iou((s_, e_), (c.start + o, c.end + o))
             y = poseswitch.yolo_clip(pose, c.start + o, c.end + o)
             y_all = poseswitch.yolo_clip(pose, c.start + o, c.end + o, None)
-            rows.append({"video": v, "label": c.label, "A": c.alphapose, "Y": y, "Y_all": y_all, "Y_win": win.keypoints,
+            rows.append({"video": v, "label": c.label, "A": c.alphapose, "Y": y, "Y_all": y_all, "Y_fix": win.keypoints, "Y_ext": ext_kp, "iou": iou,
                          "seen": int((y[..., 2] > 0).any(axis=1).sum()) >= 2,
                          "seen_all": int((y_all[..., 2] > 0).any(axis=1).sum()) >= 2,
                          "same": poseswitch.same_person(c, y_all)})
@@ -140,17 +154,21 @@ def main(argv=None) -> int:
     py = predict(model, man, [r["Y"] for r in seen])
     pya = predict(model, man, [r["Y_all"] for r in seen])
     same = np.array([r["same"] is True for r in seen])
-    wseen = [r for r in seen if r["Y_win"] is not None]
+    wseen = [r for r in seen if r["Y_fix"] is not None and r["Y_ext"] is not None]
     yw = np.array([r["label"] for r in wseen])
-    pyw_y = predict(model, man, [r["Y"] for r in wseen])
-    pyw = predict(model, man, [r["Y_win"] for r in wseen])
+    pw = {k: predict(model, man, [r[k] for r in wseen]) for k in ("Y", "Y_fix", "Y_ext")}
+    iou_by = {c: [r["iou"] for r in rows if r["iou"] is not None and r["label"] == n] for n, c in enumerate(CLASSES)}
     report.update({
         "n_clips": len(rows), "n_yolo_missed": len(rows) - len(seen),
         "n_same_person": int(same.sum()), "n_other_person": int(sum(r["same"] is False for r in seen)),
         "all_seen": {"A": scores(y, pa), "Y": scores(y, py), "Y_all": scores(y, pya),
                      "A_minus_Y": paired(y, pa, py), "A_minus_Y_all": paired(y, pa, pya)},
-        "window": {"Y": scores(yw, pyw_y), "Y_win": scores(yw, pyw), "Y_minus_Y_win": paired(yw, pyw_y, pyw),
-                   "n_unwindowable": len(seen) - len(wseen)},
+        "window": {**{k: scores(yw, v) for k, v in pw.items()},
+                   "Y_minus_Y_ext": paired(yw, pw["Y"], pw["Y_ext"]),
+                   "Y_ext_minus_Y_fix": paired(yw, pw["Y_ext"], pw["Y_fix"]),
+                   "n_uncuttable": len(seen) - len(wseen),
+                   "extent_iou_with_label": {c: {"n": len(v), "mean": float(np.mean(v)) if v else None}
+                                             for c, v in iou_by.items()}},
         "same_person": {"A": scores(y[same], pa[same]), "Y": scores(y[same], py[same]),
                         "A_minus_Y": paired(y[same], pa[same], py[same])},
         "limits": ["held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
@@ -162,10 +180,14 @@ def main(argv=None) -> int:
         g = block["A_minus_Y"].get("accuracy")
         if g:
             print(f"  A - Y accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] on {block['A_minus_Y']['n']}")
-    g = report["window"]["Y_minus_Y_win"].get("accuracy")
-    if g:
-        print(f"window cost (Y - Y_win) accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] "
-              f"on {report['window']['Y_minus_Y_win']['n']}")
+    for key, name in (("Y_minus_Y_ext", "what the pipeline's cut costs (Y - Y_ext)"),
+                      ("Y_ext_minus_Y_fix", "what the extent buys over the fixed window (Y_ext - Y_fix)")):
+        g = report["window"][key].get("accuracy")
+        if g:
+            print(f"{name}: accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] "
+                  f"on {report['window'][key]['n']}")
+    print("extent overlap with the labelled span, by type: " + ", ".join(
+        f"{c} {v['mean']:.2f}" for c, v in report["window"]["extent_iou_with_label"].items() if v["mean"] is not None))
     print(f"{report['n_yolo_missed']} clips YOLO did not see; {report['n_other_person']} where it followed someone else")
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(report, indent=1, allow_nan=False, default=float), encoding="utf-8")
