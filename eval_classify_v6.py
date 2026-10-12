@@ -17,6 +17,10 @@ the same labelled punches, by the same saved classifier:
                          the pipeline's cut with a perfect finder
   E  extent, at finder   the same at the finder's matched detections: the pipeline
                          as it runs, on the punches it found
+  F  long fixed, at peak a CONTROL: one fixed window for every punch, as long as the
+                         median extent and split before and after the peak as the
+                         extent rule splits it. D - F is what following each punch's
+                         own tempo buys beyond simply using a longer window
 
 A - D is what the pipeline's cut still costs; D - B is what the extent bought over
 the fixed window; D - E adds the finder's timing. Reported on all of V6 and on its
@@ -52,7 +56,7 @@ TOL_S = 0.1   # the finder's matching tolerance on V6
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
 DEFAULT_EXTENT = Path("results/punch_extent.json")
 DEFAULT_OUT = Path("results/classify_v6.json")
-PAIRS = (("A", "B"), ("A", "D"), ("D", "B"), ("D", "E"), ("E", "C"))
+PAIRS = (("A", "B"), ("A", "D"), ("D", "B"), ("D", "F"), ("D", "E"), ("E", "C"))
 
 
 def corpus_clip(track, s) -> "np.ndarray | None":
@@ -111,11 +115,34 @@ def main(argv=None) -> int:
     det, dh = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
     pairs = dict(punchfind.match(det, spans, int(round(TOL_S * track.fps))))
 
-    def extent_window(peak: int, hand: int):
-        s, e = punchfind.extent(track, sig, peak, hand, ex["lead_widths"], ex["tail_widths"], ex["frac"])
-        return classify.cut_span(track, s, e, geom, torso).keypoints
+    flags = {"censored": 0, "capped": 0, "n": 0}
+    lengths = []
 
-    readings = {k: {} for k in "ABCDE"}
+    def extent_window(peak: int, hand: int, count: bool = False):
+        e = classify.punch_extent(track, sig, peak, hand, ex, geom)
+        if count:
+            flags["n"] += 1
+            flags["censored"] += e.censored
+            flags["capped"] += e.capped
+            lengths.append((e.end - e.start) / track.fps)
+        return classify.cut_span(track, e.start, e.end, geom, torso).keypoints
+
+    # The control window: the median extent's length for every punch, split as the rule splits it.
+    peaks = {}
+    for j, s in enumerate(spans):
+        p = span_peak(track, sig, s.start, s.end)
+        if p in row and sig[row[p]].max() > 0:
+            peaks[j] = p
+            extent_window(p, int(np.argmax(sig[row[p]])), count=True)
+    med = float(np.median(lengths))
+    share = ex["lead_widths"] / (ex["lead_widths"] + ex["tail_widths"])
+
+    def control_window(peak: int):
+        a_ = int(np.floor(peak - share * med * track.fps + 0.5))
+        return classify.cut_span(track, a_, int(np.floor(peak + (1 - share) * med * track.fps + 0.5)),
+                                 geom, torso).keypoints
+
+    readings = {k: {} for k in "ABCDEF"}
     for j, s in enumerate(spans):
         c = corpus_clip(raw, s)
         if c is not None:
@@ -124,10 +151,13 @@ def main(argv=None) -> int:
         w = classify.cut_window(track, p, geom, torso).keypoints
         if w is not None:
             readings["B"][j] = w
-        if sig[row[p]].max() > 0:
+        if j in peaks:
             w = extent_window(p, int(np.argmax(sig[row[p]])))
             if w is not None:
                 readings["D"][j] = w
+            w = control_window(p)
+            if w is not None:
+                readings["F"][j] = w
         if j in pairs:
             w = classify.cut_window(track, int(det[pairs[j]]), geom, torso).keypoints
             if w is not None:
@@ -147,6 +177,7 @@ def main(argv=None) -> int:
     second = {j for j, s in enumerate(spans) if lo <= s.start and s.end <= hi}
     result = {"video": "V6", "n_labelled": len(spans), "classifier_sha256": man["sha256"],
               "geometry": asdict(geom), "extent": ex, "finder_matched": len(pairs),
+              "extents_at_span_peaks": {**flags, "median_length_s": med, "control_window_s": med},
               "all": block(preds, y, set(y)), "second_half": {"window": [lo, hi], **block(preds, y, second)},
               "limits": [
                   "V6 has hooks and uppercuts only: no jabs or crosses",
