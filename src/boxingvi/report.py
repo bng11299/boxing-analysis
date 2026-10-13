@@ -481,6 +481,11 @@ def cut_line(sidecar: dict) -> str:
     used, left = _count(c.get("n_used"), "cut n_used"), _count(c.get("n_left_out"), "cut n_left_out")
     if not isinstance(c.get("capped"), bool):
         raise ValueError("sidecar cut 'capped' must be true or false")
+    if c.get("source") == "training":
+        return (f"Too few punches in this clip to read its tempo: every punch was read over {length:.2f} s around "
+                f"its wrist-speed peak, the median punch length in the benchmark's training clips.")
+    if c.get("source") != "clip":
+        raise ValueError(f"sidecar cut source {c.get('source')!r} is not one classify_punches.py writes")
     return (f"Every punch was read over {length:.2f} s around its wrist-speed peak: the median punch length in "
             f"this clip, from {used} {_punches(used)}"
             + (f" ({left} left out: the wrist left view beside the peak)" if left else "")

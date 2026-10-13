@@ -303,7 +303,8 @@ print("provenance")
 side = tmp / "IMG_1.classified.json"
 
 
-CUT = {"per": "clip", "length_s": 0.4, "lead_share": 0.42, "n_used": 12, "n_left_out": 2, "capped": False}
+CUT = {"per": "clip", "length_s": 0.4, "lead_share": 0.42, "n_used": 12, "n_left_out": 2, "capped": False,
+       "source": "clip"}
 
 
 def sidecar(**kw):
@@ -348,9 +349,15 @@ check("how the clip was cut, in one sentence from the sidecar",
 check("a capped cut says so", report.cut_line({"cut": {**CUT, "n_left_out": 0, "capped": True}}).endswith(
     "from 12 punches; capped at the longest the tool can read."))
 check("a clip with no punch says so", "No punch was found" in report.cut_line({"cut": None}))
+check("a clip with too few punches says its window came from the training clips",
+      report.cut_line({"cut": {**CUT, "source": "training", "length_s": 0.375, "n_used": 0, "n_left_out": 0}})
+      == "Too few punches in this clip to read its tempo: every punch was read over 0.38 s around its wrist-speed "
+         "peak, the median punch length in the benchmark's training clips.")
 for bad_cut, why in (({**CUT, "per": "punch"}, "a per-punch cut"), ({**CUT, "length_s": 60.0}, "a 60 s punch"),
                      ({**CUT, "length_s": True}, "a boolean length"), ({**CUT, "n_used": -1}, "a negative count"),
-                     ({**CUT, "capped": "no"}, "a non-boolean flag"), ("clip", "a string")):
+                     ({**CUT, "capped": "no"}, "a non-boolean flag"), ("clip", "a string"),
+                     ({**CUT, "source": "guess"}, "an unknown source"),
+                     ({k: v for k, v in CUT.items() if k != "source"}, "a cut with no source")):
     raises(f"sidecar cut: {why} is refused", lambda bad_cut=bad_cut: report.cut_line({"cut": bad_cut}))
 report.write_workbook(xl, "IMG_1", rows, ROUNDS, facts, bench, text, FPS, HOW)
 wb = load_workbook(xl)

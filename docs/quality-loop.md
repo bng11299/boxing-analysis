@@ -810,3 +810,15 @@ the figures the project plan states.
   nothing in it said so beyond the hand-disagreement count (19 and 21 of 41).
 - **Residual, open:** the summary does not yet lead with a warning when type-and-wrist hand
   agreement is near chance; it would have flagged the broken input on its own.
+
+### Iteration 4 -- the per-clip cut in the report (2026-10-13)
+- Per-punch caveat notes are gone with the per-clip window (a punch's window no longer depends
+  on its own peak width): a named punch carries no note, and the "start and end are unsure"
+  sentence is removed. The About sheet states how the clip was cut, from the sidecar, validated
+  field by field: the clip's median punch length and how many punches set it, or that there
+  were too few punches and the training clips' median was used.
+- **Test:** 130 checks. Same numbers in a clean clone.
+- **Real reports:** IMG_4395 read over 0.41 s (39 punches; 3 left out), 42 punches: 38% jabs,
+  24% crosses, 14% lead hooks, 14% rear uppercuts, 10% lead uppercuts. IMG_4406 read over
+  0.39 s (41 punches), 41 punches: 41% jabs, 17% crosses, 17% rear uppercuts, 15% lead hooks,
+  10% lead uppercuts. Unmeasured against labels.
