@@ -5,28 +5,31 @@
 
 V6 is the only BoxingVI video that ships as continuous pose with labelled punches,
 and the classifier never trained on it (V6 is excluded from the corpus). So it can
-separate the cost of cutting the punch out from everything else. Five readings of
-the same labelled punches, by the same saved classifier:
+separate the cost of cutting the punch out from everything else. Readings of the
+same labelled punches, by the same saved classifier:
 
-  A  corpus clips        each span cut exactly as the corpus loader cuts V6
-                         (data._load_v6): the span's frames, normalised by 1920x1080
-  B  fixed, at the peak  classify.cut_window at the wrist-speed peak inside the span:
-                         the fixed-length window with a perfect finder (the baseline)
-  C  fixed, at finder    cut_window at the finder's own detections that match a span
-  D  extent, at the peak punchfind.extent + classify.cut_span at the span's peak:
-                         the pipeline's cut with a perfect finder
-  E  extent, at finder   the same at the finder's matched detections: the pipeline
-                         as it runs, on the punches it found
-  F  long fixed, at peak a CONTROL: one fixed window for every punch, as long as the
-                         median extent and split before and after the peak as the
-                         extent rule splits it. D - F is what following each punch's
-                         own tempo buys beyond simply using a longer window
+  A  corpus clips         each span cut exactly as the corpus loader cuts V6
+                          (data._load_v6): the span's frames, normalised by 1920x1080
+  B  old window, at peak  classify.cut_window (fixed 0.375 s) at the wrist-speed peak
+                          inside the span: the first design, with a perfect finder
+  C  old window, at finder  the same at the finder's own detections that match a span
+  D  per punch, at peak   each punch cut by ITS OWN extent (punchfind.extent): the
+                          design ADR-0014 first chose, with a perfect finder
+  E  per punch, at finder the same at the finder's matched detections
+  F  per clip, at peak    THE PIPELINE'S CUT since 2026-10-13 (classify.clip_cut +
+                          clip_window): one length for the whole video, the median of
+                          the punches' own extents, around each punch's peak. Here
+                          the median is over the LABELLED punches: a perfect finder
+  G  per clip, at finder  the pipeline as it runs: the median is over EVERY punch the
+                          finder detected (V6's unlabelled jabs and crosses included),
+                          and the window sits at the finder's matched detections
 
-A - D is what the pipeline's cut still costs; D - B is what the extent bought over
-the fixed window; D - E adds the finder's timing. Reported on all of V6 and on its
-second half alone, because the extent rule's width level and the choice of rule
-were made looking at the first half (run_punch_extent.py); the second half is the
-clean number. Paired bootstrap intervals on the punches both readings can read.
+F - B and G - C are what the per-clip window buys over the old one; D - F what
+sizing each punch on its own adds (it does not); A - F what cutting still costs;
+F - G the finder's timing and its unlabelled detections. Reported on all of V6 and
+on its second half alone, because the extent rule's width level and the choice of
+rule were made looking at the first half (run_punch_extent.py); the second half
+is the clean number. Paired bootstrap intervals on the punches both readings read.
 
 Limits, stated in the results: V6 has only hooks and uppercuts (no jabs or
 crosses), one athlete, and the same channel as training video V1, so its numbers
@@ -56,7 +59,7 @@ TOL_S = 0.1   # the finder's matching tolerance on V6
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
 DEFAULT_EXTENT = Path("results/punch_extent.json")
 DEFAULT_OUT = Path("results/classify_v6.json")
-PAIRS = (("A", "B"), ("A", "D"), ("D", "B"), ("D", "F"), ("F", "B"), ("D", "E"), ("E", "C"))
+PAIRS = (("A", "B"), ("A", "F"), ("F", "B"), ("D", "F"), ("D", "B"), ("G", "C"), ("G", "E"), ("F", "G"))
 
 
 def corpus_clip(track, s) -> "np.ndarray | None":
@@ -115,34 +118,23 @@ def main(argv=None) -> int:
     det, dh = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
     pairs = dict(punchfind.match(det, spans, int(round(TOL_S * track.fps))))
 
-    flags = {"censored": 0, "capped": 0, "n": 0}
-    lengths = []
-
-    def extent_window(peak: int, hand: int, count: bool = False):
+    def extent_window(peak: int, hand: int):
         e = classify.punch_extent(track, sig, peak, hand, ex, geom)
-        if count:
-            flags["n"] += 1
-            flags["censored"] += e.censored
-            flags["capped"] += e.capped
-            lengths.append((e.end - e.start) / track.fps)
         return classify.cut_span(track, e.start, e.end, geom, torso).keypoints
 
-    # The control window: the median extent's length for every punch, split as the rule splits it.
+    def clip_window(peak: int, c: classify.ClipCut):
+        return classify.cut_span(track, *classify.clip_window(peak, c, track.fps), geom, torso).keypoints
+
+    # The labelled punches' peaks (a perfect finder), and every punch the finder detected (the pipeline).
     peaks = {}
     for j, s in enumerate(spans):
         p = span_peak(track, sig, s.start, s.end)
         if p in row and sig[row[p]].max() > 0:
-            peaks[j] = p
-            extent_window(p, int(np.argmax(sig[row[p]])), count=True)
-    med = float(np.median(lengths))
-    share = ex["lead_widths"] / (ex["lead_widths"] + ex["tail_widths"])
+            peaks[j] = (p, int(np.argmax(sig[row[p]])))
+    cut_labelled = classify.clip_cut(track, sig, list(peaks.values()), ex, geom)
+    cut_finder = classify.clip_cut(track, sig, [(int(f), int(h)) for f, h in zip(det, dh)], ex, geom)
 
-    def control_window(peak: int):
-        a_ = int(np.floor(peak - share * med * track.fps + 0.5))
-        return classify.cut_span(track, a_, int(np.floor(peak + (1 - share) * med * track.fps + 0.5)),
-                                 geom, torso).keypoints
-
-    readings = {k: {} for k in "ABCDEF"}
+    readings = {k: {} for k in "ABCDEFG"}
     for j, s in enumerate(spans):
         c = corpus_clip(raw, s)
         if c is not None:
@@ -152,19 +144,18 @@ def main(argv=None) -> int:
         if w is not None:
             readings["B"][j] = w
         if j in peaks:
-            w = extent_window(p, int(np.argmax(sig[row[p]])))
+            w = extent_window(*peaks[j])
             if w is not None:
                 readings["D"][j] = w
-            w = control_window(p)
+            w = clip_window(p, cut_labelled)
             if w is not None:
                 readings["F"][j] = w
         if j in pairs:
-            w = classify.cut_window(track, int(det[pairs[j]]), geom, torso).keypoints
-            if w is not None:
-                readings["C"][j] = w
-            w = extent_window(int(det[pairs[j]]), int(dh[pairs[j]]))
-            if w is not None:
-                readings["E"][j] = w
+            d_ = int(det[pairs[j]])
+            for k, w in (("C", classify.cut_window(track, d_, geom, torso).keypoints),
+                         ("E", extent_window(d_, int(dh[pairs[j]]))), ("G", clip_window(d_, cut_finder))):
+                if w is not None:
+                    readings[k][j] = w
 
     preds = {}
     for k, rd in readings.items():
@@ -177,7 +168,8 @@ def main(argv=None) -> int:
     second = {j for j, s in enumerate(spans) if lo <= s.start and s.end <= hi}
     result = {"video": "V6", "n_labelled": len(spans), "classifier_sha256": man["sha256"],
               "geometry": asdict(geom), "extent": ex, "finder_matched": len(pairs),
-              "extents_at_span_peaks": {**flags, "median_length_s": med, "control_window_s": med},
+              "clip_cut_from_labelled_punches": cut_labelled._asdict(),
+              "clip_cut_from_finder_detections": {**cut_finder._asdict(), "n_detections": int(len(det))},
               "all": block(preds, y, set(y)), "second_half": {"window": [lo, hi], **block(preds, y, second)},
               "limits": [
                   "V6 has hooks and uppercuts only: no jabs or crosses",
@@ -185,6 +177,9 @@ def main(argv=None) -> int:
                   "AlphaPose skeletons as in training: says nothing about the YOLO11-pose switch",
                   "the finder's rule was tuned on V6's first half, and the extent rule's width level and form "
                   "were chosen looking at it: the second half is the clean number"]}
+    print(f"per-clip window: {cut_labelled.length_s:.3f} s from the {cut_labelled.n_used} labelled punches; "
+          f"{cut_finder.length_s:.3f} s from the finder's {cut_finder.n_used} detections "
+          f"({cut_finder.n_left_out} left out)")
     for name in ("all", "second_half"):
         b = result[name]
         print(f"V6 {name.replace('_', ' ')}:")
