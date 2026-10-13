@@ -8,11 +8,16 @@ wrist holds at least half its peak speed. The two ratios are medians over the
 TRAINING clips (classify.training_extent_ratios). V6 did not set them; it did
 decide the half-height level and the form of the rule (see below).
 
-V6 is then the test: overlap (IoU) between the extent and each labelled span,
-against the fixed window (the training clips' median length and peak position,
-from the classifier's manifest), which is the baseline the extent must beat. The
-result file says whether it did, on V6's second half, with a paired bootstrap
-interval; classify_punches.py refuses an extent file that did not.
+V6 is then the test: overlap (IoU) with each labelled span, for two cuts built on
+the rule, against the old fixed window (the training clips' median length and
+peak position, from the classifier's manifest):
+  per punch   each punch's own extent
+  per clip    THE PIPELINE'S CUT (ADR-0014 as amended 2026-10-13): one length for
+              the whole video, the median of the punches' own extents, around each
+              punch's peak (classify.clip_cut / clip_window)
+The result file says whether the pipeline's cut beat the old window on V6's second
+half, with a paired bootstrap interval; classify_punches.py refuses a rule file
+whose cut did not.
 
 What V6's first half WAS used for, so the second half is the clean number: the
 width level (0.5, from 0.5 / 0.6 / 0.7) and the choice of this rule over a
@@ -111,16 +116,22 @@ def main(argv=None) -> int:
         e = classify.punch_extent(track, sig, p, h, ratios, geom)
         return e.start, e.end
 
+    clip = classify.clip_cut(track, sig, [(p, h) for p, h, u in zip(peaks, hands, usable) if u], ratios, geom)
+
     out = {"rule": "extent = [peak - lead_widths * width, peak + tail_widths * width]; width = time the punching "
                    "wrist holds >= frac of its peak speed",
            **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(HELD_OUT_VIDEOS),
-           "tested_on": "V6", "fps": track.fps, "v6": {}}
+           "tested_on": "V6", "fps": track.fps, "v6": {}, "v6_clip_cut": clip._asdict(),
+           "pipeline_cut": "per clip: every punch read over the median of the clip's own punch extents"}
     for name, w in (("first_half", tuple(r["tune_window"])), ("second_half", tuple(r["test_window"]))):
         idx = [j for j, s in enumerate(spans) if w[0] <= s.start and s.end <= w[1] and usable[j]]
         sp = [spans[j] for j in idx]
         e, f = [ext(peaks[j], hands[j]) for j in idx], [fixed_span(peaks[j], track.fps, geom) for j in idx]
+        c = [classify.clip_window(peaks[j], clip, track.fps) for j in idx]
         out["v6"][name] = {"window": list(w), "extent": describe(e, sp), "fixed_window": describe(f, sp),
-                           "extent_minus_fixed_iou": paired_gain(e, f, sp)}
+                           "clip_window": describe(c, sp), "extent_minus_fixed_iou": paired_gain(e, f, sp),
+                           "clip_minus_fixed_iou": paired_gain(c, f, sp),
+                           "clip_minus_extent_iou": paired_gain(c, e, sp)}
     # As the pipeline runs: anchored at the finder's own detections, second half only.
     det, dh = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
     w = tuple(r["test_window"])
@@ -132,8 +143,8 @@ def main(argv=None) -> int:
         f = [fixed_span(int(det[di]), track.fps, geom) for _, di in m]
         out["v6"]["second_half_at_finder_detections"] = {
             "extent": describe(e, sp), "fixed_window": describe(f, sp), "extent_minus_fixed_iou": paired_gain(e, f, sp)}
-    gain = out["v6"]["second_half"]["extent_minus_fixed_iou"]
-    out["beats_fixed_window"] = bool(gain["ci_low"] > 0)
+    gain = out["v6"]["second_half"]["clip_minus_fixed_iou"]
+    out["beats_fixed_window"] = bool(gain["ci_low"] > 0)   # the pipeline's cut, on the clean half
     out["first_half_was_used_for"] = "choosing the width level (0.5 of 0.5/0.6/0.7) and this rule over a threshold walk"
     out["limits"] = ["V6: one athlete, hooks and uppercuts only, AlphaPose at 24 fps",
                      "V6's labelled spans run nearly twice as long as training clips of the same types",
@@ -144,11 +155,17 @@ def main(argv=None) -> int:
         if not t:
             continue
         g = t["extent_minus_fixed_iou"]
-        print(f"V6 {name.replace('_', ' ')} ({t['extent']['n']} punches): extent IoU {t['extent']['iou_mean']:.3f} "
-              f"(median {t['extent']['length_frames_median']:.0f} frames; labels "
-              f"{t['extent']['labelled_length_frames_median']:.0f}) vs fixed window "
+        print(f"V6 {name.replace('_', ' ')} ({t['extent']['n']} punches): per-punch extent IoU "
+              f"{t['extent']['iou_mean']:.3f} (median {t['extent']['length_frames_median']:.0f} frames; labels "
+              f"{t['extent']['labelled_length_frames_median']:.0f}) vs old window "
               f"{t['fixed_window']['iou_mean']:.3f}; gain {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}]")
-    print("beats the fixed window on the second half: " + ("YES" if out["beats_fixed_window"] else "NO"))
+        if "clip_window" in t:
+            g = t["clip_minus_fixed_iou"]
+            print(f"   per-clip window IoU {t['clip_window']['iou_mean']:.3f} "
+                  f"({t['clip_window']['length_frames_median']:.0f} frames); over the old window {g['point']:+.3f} "
+                  f"[{g['ci_low']:+.3f}, {g['ci_high']:+.3f}]")
+    print("the pipeline's cut (per clip) beats the old window on the second half: "
+          + ("YES" if out["beats_fixed_window"] else "NO"))
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(out, indent=1, allow_nan=False), encoding="utf-8")
     print(f"-> {a.out}")

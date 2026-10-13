@@ -386,6 +386,49 @@ for f_ in (24.0, 60.0):
 check("its extent in seconds agrees within 20% at 24 and 60 fps (the width is measured on the sampled curve)",
       abs(secs[24.0] / secs[60.0] - 1) < 0.20, str(secs))
 
+print("one window per clip: the clip's median punch length")
+RULE = {"lead_widths": 1.0, "tail_widths": 2.0, "frac": 0.5}
+
+
+def clip_sig(centres_halfwidths, frames=ids60):
+    sg = np.zeros((len(frames), 2))
+    for c_, hw in centres_halfwidths:
+        sg[:, 0] = np.maximum(sg[:, 0], np.clip(1 - np.abs(frames - c_) / hw, 0, None) * 4.0)
+    return sg
+
+
+# Three punches 7, 7 and 14 frames wide at 60 fps: own extents 3 x 7 = 21, 21 and 42 frames. Median 21 frames.
+three = clip_sig([(60, 7), (160, 7), (260, 14)])
+cc = classify.clip_cut(flat, three, [(60, 0), (160, 0), (260, 0)], RULE, GEOM)
+check("the clip's length is the median of its punches' own extents: 21 frames, 0.35 s, a third before the peak",
+      abs(cc.length_s - 21 / 60) < 1e-9 and abs(cc.lead_share - 1 / 3) < 1e-12 and cc.n_used == 3
+      and cc.n_left_out == 0 and not cc.capped, str(cc))
+check("every punch is read over that length around its own peak: 7 frames before, 14 after",
+      [classify.clip_window(pf, cc, 60.0) for pf in (60, 160, 260)] == [(53, 74), (153, 174), (253, 274)])
+check("... including the wide one, whose own extent would have been twice as long",
+      classify.punch_extent(flat, three, 260, 0, RULE, GEOM)[:2] == (246, 288))
+slow = classify.clip_cut(flat, clip_sig([(60, 14), (160, 14), (260, 14)]), [(60, 0), (160, 0), (260, 0)], RULE, GEOM)
+check("a clip of slower punches gets a longer window: tempo is still followed, per clip", abs(slow.length_s - 42 / 60) < 1e-9)
+# The left wrist lost for 8 frames right after the peak at 160: that punch's extent is unknown.
+drop3 = np.ones((400, N_JOINTS)); drop3[163:171, 9] = 0.05
+lost3 = body(400, 60.0, conf=drop3)
+cl = classify.clip_cut(lost3, clip_sig([(60, 7), (160, 14), (260, 7)]), [(60, 0), (160, 0), (260, 0)], RULE, GEOM)
+check("a punch whose speed peak is cut off by a wrist dropout is left out of the median, and counted",
+      cl.n_used == 2 and cl.n_left_out == 1 and abs(cl.length_s - 21 / 60) < 1e-9, str(cl))
+drop_all = np.ones((400, N_JOINTS)); drop_all[63:71, 9] = 0.05; drop_all[163:171, 9] = 0.05
+la = classify.clip_cut(body(400, 60.0, conf=drop_all), clip_sig([(60, 7), (160, 7), (260, 7)]),
+                       [(60, 0), (160, 0), (260, 0)], RULE, GEOM)
+check("when most punches are cut off, all are used rather than a median of one", la.n_used == 3 and la.n_left_out == 0, str(la))
+long_c = classify.clip_cut(flat, clip_sig([(200, 60)]), [(200, 0)], RULE, GEOM)
+check("a clip whose punches run longer than the classifier can be shown is capped at 25 training frames, and says so",
+      long_c.capped and abs(long_c.length_s - 1.0) < 1e-9, str(long_c))
+ws, we = classify.clip_window(200, long_c, 60.0)
+check("... and the capped window still holds the peak, a third in, and fits the corpus's 25 frames",
+      ws < 200 < we and (we - ws) / 60 <= 1.0 + 1e-9 and abs((200 - ws) / (we - ws) - 1 / 3) < 0.02
+      and len(classify.cut_span(flat, ws, we, GEOM, 100.0).keypoints) == 25)
+check("no punch, no cut", classify.clip_cut(flat, three, [], RULE, GEOM) is None)
+raises("a fractional peak frame is refused by the window", lambda: classify.clip_window(60.5, cc, 60.0))
+
 print("cutting a punch by its extent")
 coded60 = body(400, 60.0)
 coded60.xy[:, 0, 0] += 0.001 * coded60.frame_ids
@@ -550,8 +593,15 @@ check("each row has a type from the class list and a confidence in (0, 1]",
 check("each punch records the frames it was read from, around its peak",
       all(int(r["punch_start_frame"]) <= int(r["frame"]) <= int(r["punch_end_frame"]) for r in rows), str(rows[0]))
 length = [int(r["punch_end_frame"]) - int(r["punch_start_frame"]) for r in rows]
-check("the slow punch is read over about twice the frames of the quick ones: the extent follows tempo",
-      1.6 < length[1] / length[0] < 2.4 and abs(length[2] / length[0] - 1) < 0.25, str(length))
+check("every punch in the clip is read over the same length, the slow one included",
+      max(length) - min(length) <= 1, str(length))
+own = [classify.punch_extent(*a_, {"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8}, GEOM) for a_ in
+       [(punchfind.bridge(pose.to_track(usable_only=False), 3),
+         punchfind.wrist_signal(punchfind.bridge(pose.to_track(usable_only=False), 3), "relative"),
+         int(r["frame"]), 0 if r["hand"] == "left" else 1) for r in rows]]
+own_len = sorted(e.end - e.start for e in own)
+check("... and that length is the median of the three punches' own extents (the two quick ones set it)",
+      abs(length[0] - own_len[1]) <= 1 and own_len[2] > 1.6 * own_len[1], f"{length} vs own {own_len}")
 check("orthodox: left-hand punches are lead, right-hand punches rear",
       [r["lead_rear"] for r in rows] == ["lead", "lead", "rear"])
 check("hands_agree says whether the type's hand is the finder's",
@@ -561,7 +611,8 @@ check("the sidecar names the classifier, the extent rule and the stance, and has
       prov["classifier_sha256"] == man["sha256"] and prov["stance"] == "orthodox" and prov["pose_frames"] == n
       and prov["extent"] == {"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8}
       and prov["csv_sha256"] == hashlib.sha256((tmp / "o" / "IMG_7777.classified.csv").read_bytes()).hexdigest()
-      and prov["extents_censored"] == 0 and prov["extents_capped"] == 0, str(prov))
+      and prov["cut"]["per"] == "clip" and prov["cut"]["n_used"] == 3 and prov["cut"]["n_left_out"] == 0
+      and not prov["cut"]["capped"] and abs(prov["cut"]["length_s"] * fps - length[0]) <= 1, str(prov))
 classify_punches.main(args + ["--stance", "southpaw"])
 rows_s = list(csv.DictReader((tmp / "o" / "IMG_7777.classified.csv").open(encoding="utf-8")))
 check("southpaw flips lead and rear, and nothing else",
@@ -600,7 +651,8 @@ raises("an extent rule that did not beat the fixed window is refused by the CLI"
        lambda: classify_punches.main(args + ["--stance", "orthodox"]))
 extent_json()
 
-# A wrist that drops out right after the slow punch's peak: still named, and the row says its extent is unsure.
+# A wrist that drops out right after the slow punch's peak: its own extent is unknown, so it is left out of
+# the clip's median, and it is still read over the clip's length like every other punch.
 cf9 = cf.copy(); cf9[int(9.0 * fps) + 8:int(9.0 * fps) + 40, 9] = 0.05
 pose_yolo.PoseSequence(xy.astype(np.float32), cf9, np.ones(n, bool), fps, 1080, 1920, "IMG_9999.mov", "test").save(
     tmp / "IMG_9999.pose.npz")
@@ -609,11 +661,13 @@ classify_punches.main(["--pose", str(tmp / "IMG_9999.pose.npz"), "--punches", st
                        "--classifier", str(mpath), "--rule", str(rule), "--extent", str(extent_file),
                        "--stance", "orthodox", "--out-dir", str(tmp / "o")])
 rows_9 = list(csv.DictReader((tmp / "o" / "IMG_9999.classified.csv").open(encoding="utf-8")))
-noted = [r for r in rows_9 if r["note"] == classify_punches.NOTE_CENSORED]
-check("a punch whose wrist drops out beside the peak is named but carries the caveat in its note",
-      len(noted) >= 1 and all(r["punch_type"] in CLASSES for r in noted)
-      and json.loads((tmp / "o" / "IMG_9999.classified.json").read_text(encoding="utf-8"))["extents_censored"] == len(noted),
-      str([(r["frame"], r["note"]) for r in rows_9]))
+cut9 = json.loads((tmp / "o" / "IMG_9999.classified.json").read_text(encoding="utf-8"))["cut"]
+check("a punch whose wrist drops out beside the peak is left out of the clip's median, and the sidecar counts it",
+      cut9["n_left_out"] >= 1 and cut9["n_used"] + cut9["n_left_out"] == len(rows_9), str(cut9))
+check("... and every punch is still named, over the clip's one length, with no note",
+      all(r["punch_type"] in CLASSES and r["note"] == "" for r in rows_9)
+      and len({int(r["punch_end_frame"]) - int(r["punch_start_frame"]) for r in rows_9}) <= 2,
+      str([(r["frame"], r["punch_type"], r["note"]) for r in rows_9]))
 
 # The other hand drifting slowly while the left one punches: a CSV that names the WRONG hand at that frame
 # points at a hand with some speed there, but not its peak. It must be refused, not measured.
@@ -640,18 +694,19 @@ lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": spans}), encoding
 classify_punches.main(args + ["--stance", "orthodox", "--labels", str(lab)])
 sc = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding="utf-8"))
 check("scored against labels: 'unclear' punches are not scored for type, in any of the three readings",
-      sc["matched_detections"]["n"] == 2 and sc["labelled_punch_by_extent_at_its_peak"]["n"] == 2
+      sc["matched_detections"]["n"] == 2 and sc["labelled_punch_by_clip_window_at_its_peak"]["n"] == 2
       and sc["labelled_punch_from_labelled_frames"]["n"] == 2, str(sc))
 check("the old ambiguous key is gone: the two perfect-finder readings have their own names",
       "every_labelled_punch" not in sc)
-check("the extent's overlap with labels that equal it is 1, over all 3 matched punches",
-      sc["extent_iou_with_labels"] == {"n": 3, "mean": 1.0}, str(sc["extent_iou_with_labels"]))
+check("the window's overlap with labels that equal it is 1, over all 3 matched punches",
+      sc["window_iou_with_labels"] == {"n": 3, "mean": 1.0}, str(sc["window_iou_with_labels"]))
+check("the score records the cut it scored", sc["cut"]["per"] == "clip" and sc["cut"]["n_used"] == 3)
 check("the score names the classifier it scored, by hash", sc["classifier_sha256"] == man["sha256"])
 check("control: no matched punch is unclassifiable on the whole clip", sc.get("matched_unclassifiable") == 0)
 half = [{"start": s_["start"], "end": (s_["start"] + s_["end"]) // 2, "label": s_["label"]} for s_ in spans]
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": half}), encoding="utf-8")
 classify_punches.main(args + ["--stance", "orthodox", "--labels", str(lab)])
-half_iou = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding="utf-8"))["extent_iou_with_labels"]["mean"]
+half_iou = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding="utf-8"))["window_iou_with_labels"]["mean"]
 check("... and with labels covering only the first half of each, about a half", 0.45 < half_iou < 0.56, str(half_iou))
 lab8 = tmp / "IMG_8888.labels.json"
 lab8.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
@@ -662,7 +717,7 @@ sc8 = json.loads((tmp / "o" / "IMG_8888.classify_score.json").read_text(encoding
 check("a matched punch that could not be classified is counted, not silently dropped from the score",
       sc8["matched_unclassifiable"] == 1 and sc8["matched_detections"]["n"] == 1, str(sc8))
 check("... and the perfect-finder readings count theirs too",
-      sc8["labelled_punch_by_extent_unclassifiable"] == 1 and sc8["labelled_punch_from_labelled_frames_unclassifiable"] == 1,
+      sc8["labelled_punch_by_clip_window_unclassifiable"] == 1 and sc8["labelled_punch_from_labelled_frames_unclassifiable"] == 1,
       str(sc8))
 
 def punches_with(text):
