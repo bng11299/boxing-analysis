@@ -15,9 +15,13 @@ peak position, from the classifier's manifest):
   per clip    THE PIPELINE'S CUT (ADR-0014 as amended 2026-10-13): one length for
               the whole video, the median of the punches' own extents, around each
               punch's peak (classify.clip_cut / clip_window)
-The result file says whether the pipeline's cut beat the old window on V6's second
-half, with a paired bootstrap interval; classify_punches.py refuses a rule file
-whose cut did not.
+Both are measured with a perfect finder (at the wrist-speed peak inside each
+labelled span). THE GATE is measured as the pipeline runs: the per-clip length is
+the median over every punch the FINDER detected in V6, and the windows sit at its
+detections that match a labelled span in V6's second half. The result file says
+whether that beat the old window in overlap with the labels, with a paired
+bootstrap interval, and names the cut it gated; classify_punches.py refuses a
+rule file that gated another cut, or whose cut did not win.
 
 What V6's first half WAS used for, so the second half is the clean number: the
 width level (0.5, from 0.5 / 0.6 / 0.7) and the choice of this rule over a
@@ -141,12 +145,21 @@ def main(argv=None) -> int:
         sp = [spans[si] for si, _ in m]
         e = [ext(int(det[di]), int(dh[di])) for _, di in m]
         f = [fixed_span(int(det[di]), track.fps, geom) for _, di in m]
+        # The pipeline's cut as it runs: one length from EVERY detection, labelled or not.
+        clip_f = classify.clip_cut(track, sig, [(int(a_), int(b_)) for a_, b_ in zip(det, dh)], ratios, geom)
+        c = [classify.clip_window(int(det[di]), clip_f, track.fps) for _, di in m]
+        out["v6_clip_cut_from_finder_detections"] = {**clip_f._asdict(), "n_detections": int(len(det))}
         out["v6"]["second_half_at_finder_detections"] = {
-            "extent": describe(e, sp), "fixed_window": describe(f, sp), "extent_minus_fixed_iou": paired_gain(e, f, sp)}
-    gain = out["v6"]["second_half"]["clip_minus_fixed_iou"]
-    out["beats_fixed_window"] = bool(gain["ci_low"] > 0)   # the pipeline's cut, on the clean half
+            "extent": describe(e, sp), "fixed_window": describe(f, sp), "clip_window": describe(c, sp),
+            "extent_minus_fixed_iou": paired_gain(e, f, sp), "clip_minus_fixed_iou": paired_gain(c, f, sp),
+            "clip_minus_extent_iou": paired_gain(c, e, sp)}
+    gate = out["v6"].get("second_half_at_finder_detections", {}).get("clip_minus_fixed_iou")
+    out["gated_cut"] = classify.GATED_CUT
+    out["beats_fixed_window"] = bool(gate is not None and gate["ci_low"] > 0)
     out["first_half_was_used_for"] = "choosing the width level (0.5 of 0.5/0.6/0.7) and this rule over a threshold walk"
-    out["limits"] = ["V6: one athlete, hooks and uppercuts only, AlphaPose at 24 fps",
+    out["limits"] = ["the per-clip cut was chosen looking at V6's second half and at V5/V9 (ADR-0014, 2026-10-13): "
+                     "this gate is no longer an independent test of it",
+                     "V6: one athlete, hooks and uppercuts only, AlphaPose at 24 fps",
                      "V6's labelled spans run nearly twice as long as training clips of the same types",
                      "the extent of a jab or cross has not been checked against a label here"]
 
@@ -164,8 +177,8 @@ def main(argv=None) -> int:
             print(f"   per-clip window IoU {t['clip_window']['iou_mean']:.3f} "
                   f"({t['clip_window']['length_frames_median']:.0f} frames); over the old window {g['point']:+.3f} "
                   f"[{g['ci_low']:+.3f}, {g['ci_high']:+.3f}]")
-    print("the pipeline's cut (per clip) beats the old window on the second half: "
-          + ("YES" if out["beats_fixed_window"] else "NO"))
+    print("GATE - the pipeline's cut as it runs (per clip, from the finder's detections) beats the old window "
+          "on the second half: " + ("YES" if out["beats_fixed_window"] else "NO"))
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(out, indent=1, allow_nan=False), encoding="utf-8")
     print(f"-> {a.out}")
