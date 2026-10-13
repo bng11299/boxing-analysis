@@ -683,6 +683,28 @@ overlap with the labelled span and in classifier accuracy; (2) a rule that did n
   wider); the same punch reads 5-12% wider at 24 fps than at 60; `read_extent` is not bound to
   a classifier hash (the ratios do not depend on its weights).
 
+### Iteration 6 -- the confidence rule (2026-10-12)
+Found by `feat/pose-switch`, not by this branch's own gates.
+- **Real-world facts, V5 and V9, 742 held-out punches, the same frames read two ways**
+  (`results/pose_switch.json`): AlphaPose 0.896; YOLO11-pose with every detected joint
+  **0.889** (-0.007 [-0.009, +0.024]); YOLO with joints under confidence 0.3 blanked, as
+  `classify._window` did, **0.348**. The rule blanked about 5% of the joints there (mostly a
+  hidden ear or eye), 7% and 20% on own footage.
+- **Fix:** `CLASSIFY_MIN_CONF = 0`: the classifier is shown every joint the pose model detected;
+  a joint with confidence 0 is still blanked. The finder keeps 0.3. 175 checks; both guards
+  reverted fail (keeping undetected joints: 5; back to 0.3: 2).
+- **Own footage, same finder and classifier:** IMG_4395 26 of 41 lead uppercuts -> 13 jabs, 12
+  crosses, 9 lead hooks, 6 rear uppercuts, 2 lead uppercuts; hand agreement 53.7% -> 71.4%
+  (chance 49.7%). IMG_4406 -> 16 jabs, 8 crosses, 7 rear uppercuts, 5 lead hooks, 5 lead
+  uppercuts; 48.8% -> 82.9% (chance 50.3%). Still unmeasured against labels.
+- **Why three iterations of gates missed it:** every synthetic fixture had confident joints;
+  V6 carries no joint confidence, so its evaluation could not see the rule; and the one check
+  on own footage, hand agreement at chance, was read as the window's fault (iteration 3) and
+  then as the pose model's (iteration 5). The rule itself was never a decision: it was the
+  finder's default, reused. What caught it was a reading specified before the run for another
+  reason (`Y_all`, "AlphaPose drops few").
+- **V6 control paired with the old window:** F - B +0.131 [+0.094, +0.167].
+
 ## `feat/output-report` -- 2026-10-09
 
 The report a boxer reads: `<clip>.report.xlsx` (Punches, Rounds, Reliability, About) and
@@ -730,3 +752,19 @@ the figures the project plan states.
 - **Test:** 110 checks; the provenance check runs on every summary variant and caught a
   real slip on its first run ("benchmark video V6" put an unrecorded digit in the text).
   9 new guards reverted, all caught.
+
+### Iteration 3 -- the extent's columns, caveats, and real reports (2026-10-11 to 10-12)
+- **Fix / build:** the report reads `punch_start_frame` / `punch_end_frame` and shows each
+  punch's length; a named punch may carry only the two caveats `classify_punches.py` writes
+  (wrist dropout beside the peak; longer than the classifier can be shown), an unnamed one only
+  a known reason; the summary counts punches whose start and end are unsure. A contract test
+  ties the report's caveat list and CSV header to the writer's.
+- **Test:** 122 checks. Same numbers in a clean clone.
+- **Real reports, after `classify`'s confidence-rule fix:** IMG_4395, 42 punches, 57 a minute:
+  31% jabs, 29% crosses, 21% lead hooks, 14% rear uppercuts, 5% lead uppercuts; type and wrist
+  disagree on the hand for 12. IMG_4406, 41 punches, 63 a minute: 39% jabs, 20% crosses, 17%
+  rear uppercuts, 12% lead hooks, 12% lead uppercuts; disagree for 7. Before the fix the same
+  reports led with 63% and 41% lead uppercuts: the report was faithful to a broken input, and
+  nothing in it said so beyond the hand-disagreement count (19 and 21 of 41).
+- **Residual, open:** the summary does not yet lead with a warning when type-and-wrist hand
+  agreement is near chance; it would have flagged the broken input on its own.
