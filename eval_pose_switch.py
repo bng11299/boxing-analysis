@@ -12,7 +12,12 @@ Step 2, anywhere, once results/ingest/V2.pose.npz, V5 and V9 have synced back:
     python eval_pose_switch.py --data data --poses results/ingest \\
         --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --extent results/punch_extent.json
 
-Gates, in order; each one that fails stops the run with nothing scored:
+Gates, in order. Gates 1 and 2 stop the run with nothing scored. Gate 3 is per
+video: a video whose spans do not align is EXCLUDED, named in the output and in
+the results file, and the rest are scored; if none aligns, nothing is.
+(2026-10-12: V2 fails it. Its shipped skeletons are not at their annotated frames
+of the video BoxingVI links as V2, at any shift or frame-rate ratio, nor anywhere
+else in that video; V5 and V9 sit exactly at theirs. Vault ISSUES-LOG.)
 1. the saved classifier, reading the corpus's own held-out clips, reproduces the
    held-out accuracy and macro F1 its manifest records -- so the model and the
    input path are the reported ones, and any drop below is the pose switch;
@@ -22,21 +27,22 @@ Gates, in order; each one that fails stops the run with nothing scored:
 
 Readings of the same held-out punches by the same classifier:
   A      AlphaPose clips, as shipped
-  Y      YOLO11-pose over the same frames, joints below confidence 0.3 dropped
-         (the pipeline's rule)
-  Y_all  YOLO11-pose keeping every detected joint (AlphaPose drops few)
-  Y_fix  YOLO11-pose through the FIXED-length window (classify.cut_window) at the
-         wrist-speed peak inside the span: the old cut, with perfect punch timing
+  Y_all  YOLO11-pose over the same frames, every detected joint kept: THE PIPELINE'S
+         RULE since 2026-10-12 (classify.CLASSIFY_MIN_CONF). A - Y_all is the cost
+         of the pose-model switch
+  Y      YOLO11-pose with joints under confidence 0.3 blanked: the rule the pipeline
+         used until then, kept as the record of what it cost (0.348 against 0.889)
   Y_ext  YOLO11-pose through the punch EXTENT (punchfind.extent + classify.cut_span)
-         at the same peak: the pipeline's cut, with perfect punch timing.
-         Y - Y_ext is what the pipeline's cut costs and Y_ext - Y_fix what the extent
-         buys, here on all six punch types (V6 had hooks and uppercuts only:
-         results/classify_v6.json). The extent's overlap with each labelled span is
-         reported too, by punch type: its first check on jabs and crosses.
+         at the wrist-speed peak inside the span: the pipeline's cut, with perfect
+         punch timing, every detected joint kept
+  Y_fix  the same through the old FIXED 0.375 s window (classify.cut_window)
   Y_long a CONTROL: one fixed window per video, as long as that video's median
-         extent and split around the peak as the extent rule splits it. Y_ext -
-         Y_long is what following each punch's own tempo buys beyond a longer
-         window (on V6 it bought nothing: -0.022 [-0.054, +0.010])
+         extent and split around the peak as the extent rule splits it
+         Y_all - Y_ext is what the pipeline's cut costs; Y_ext - Y_fix what the
+         extent buys; Y_ext - Y_long what following each punch's own tempo buys
+         beyond a longer window. All on the punch types these videos hold (V6 had
+         hooks and uppercuts only). The extent's overlap with each labelled span is
+         reported by punch type: its first check on jabs and crosses.
 Reported on every clip YOLO saw, and separately on clips where YOLO followed the
 same person as AlphaPose; clips YOLO missed are counted. Paired bootstrap
 intervals on A - Y.
@@ -104,8 +110,9 @@ def main(argv=None) -> int:
     # Gate 1: the reported model and input path, on the corpus's own held-out clips.
     held = (man.get("held_out") or {})
     _, val = split_by_video(load_corpus(a.data))
-    if sorted({c.source for c in val}) != sorted(videos):
-        raise SystemExit(f"the corpus holds out {sorted({c.source for c in val})}, not {sorted(videos)}")
+    held_out = sorted({c.source for c in val})
+    if not set(videos) <= set(held_out) or len(set(videos)) != len(videos):
+        raise SystemExit(f"--videos must be distinct held-out videos ({held_out}), got {videos}")
     xv, yv = to_arrays(val)
     gate = scores(yv, predict(model, man, list(xv)))
     print(f"gate 1: corpus held-out clips, accuracy {gate['accuracy']:.4f} macro F1 {gate['macro_f1']:.4f} "
@@ -114,7 +121,8 @@ def main(argv=None) -> int:
             and abs(gate["macro_f1"] - held["macro_f1"]) < TOL):
         raise SystemExit("GATE 1 FAILED: this classifier does not reproduce its own held-out numbers; nothing scored")
 
-    rows, report = [], {"classifier_sha256": man["sha256"], "gate_corpus_held_out": gate, "videos": {}}
+    rows, report = [], {"classifier_sha256": man["sha256"], "gate_corpus_held_out": gate, "videos": {},
+                        "held_out_videos": held_out, "excluded_videos": {}}
     for v in videos:
         pose = PoseSequence.load(a.poses / f"{v}.pose.npz")
         clips, mismatched = poseswitch.held_out_clips(a.data, v)
@@ -129,7 +137,10 @@ def main(argv=None) -> int:
         print(f"{v}: {len(clips)} clips ({mismatched} spans unusable), best offset {al['best']}, "
               f"sharpness {al['ratio'] if al['ratio'] is None else round(al['ratio'], 2)}")
         if not al["sharp"]:
-            raise SystemExit(f"GATE 3 FAILED: {v} spans do not align with the video's frames; nothing scored")
+            why = "its spans do not align with this video's frames (no offset is clearly better than the others)"
+            report["excluded_videos"][v] = why
+            print(f"GATE 3 FAILED for {v}: {why}. {v} IS EXCLUDED; nothing from it is scored.")
+            continue
         o = al["best"]
         geom = man["geometry"]
         track = punchfind.bridge(pose.to_track(usable_only=False), int(round(punchfind.BRIDGE_S * pose.fps)))
@@ -166,15 +177,20 @@ def main(argv=None) -> int:
                          "seen_all": int((y_all[..., 2] > 0).any(axis=1).sum()) >= 2,
                          "same": poseswitch.same_person(c, y_all)})
 
+    scored = [v for v in videos if v not in report["excluded_videos"]]
+    report["scored_videos"] = scored
+    if not rows:
+        raise SystemExit("GATE 3 FAILED for every video; nothing scored")
     seen = [r for r in rows if r["seen"] and r["seen_all"]]
     y = np.array([r["label"] for r in seen])
     pa = predict(model, man, [r["A"] for r in seen])
     py = predict(model, man, [r["Y"] for r in seen])
     pya = predict(model, man, [r["Y_all"] for r in seen])
     same = np.array([r["same"] is True for r in seen])
+    vid = np.array([r["video"] for r in seen])
     wseen = [r for r in seen if all(r[k] is not None for k in ("Y_fix", "Y_ext", "Y_long"))]
     yw = np.array([r["label"] for r in wseen])
-    pw = {k: predict(model, man, [r[k] for r in wseen]) for k in ("Y", "Y_fix", "Y_ext", "Y_long")}
+    pw = {k: predict(model, man, [r[k] for r in wseen]) for k in ("Y_all", "Y_fix", "Y_ext", "Y_long")}
     iou_by = {c: [r["iou"] for r in rows if r["iou"] is not None and r["label"] == n] for n, c in enumerate(CLASSES)}
     report.update({
         "n_clips": len(rows), "n_yolo_missed": len(rows) - len(seen),
@@ -182,27 +198,48 @@ def main(argv=None) -> int:
         "all_seen": {"A": scores(y, pa), "Y": scores(y, py), "Y_all": scores(y, pya),
                      "A_minus_Y": paired(y, pa, py), "A_minus_Y_all": paired(y, pa, pya)},
         "window": {**{k: scores(yw, v) for k, v in pw.items()},
-                   "Y_minus_Y_ext": paired(yw, pw["Y"], pw["Y_ext"]),
+                   "Y_all_minus_Y_ext": paired(yw, pw["Y_all"], pw["Y_ext"]),
                    "Y_ext_minus_Y_fix": paired(yw, pw["Y_ext"], pw["Y_fix"]),
                    "Y_ext_minus_Y_long": paired(yw, pw["Y_ext"], pw["Y_long"]),
+                   "Y_long_minus_Y_fix": paired(yw, pw["Y_long"], pw["Y_fix"]),
                    "n_uncuttable": len(seen) - len(wseen),
                    "extent_iou_with_label": {c: {"n": len(v), "mean": float(np.mean(v)) if v else None}
                                              for c, v in iou_by.items()}},
         "same_person": {"A": scores(y[same], pa[same]), "Y": scores(y[same], py[same]),
+                        "Y_all": scores(y[same], pya[same]),
+                        "A_minus_Y_all": paired(y[same], pa[same], pya[same]),
                         "A_minus_Y": paired(y[same], pa[same], py[same])},
+        "by_video": {v: {"A": scores(y[vid == v], pa[vid == v]), "Y": scores(y[vid == v], py[vid == v]),
+                         "Y_all": scores(y[vid == v], pya[vid == v]),
+                         "A_minus_Y_all": paired(y[vid == v], pa[vid == v], pya[vid == v])} for v in scored},
         "limits": ["held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
                    "the video-disjoint split may not be athlete-disjoint (O55)",
                    "YOLO keeps one person per frame; other-person clips are counted, and scored in all_seen"]})
+    print(f"SCORED: {'/'.join(scored)} of the held-out {'/'.join(held_out)}"
+          + (f"; EXCLUDED: {'/'.join(report['excluded_videos'])}" if report["excluded_videos"] else ""))
+    for v in scored:
+        b = report["by_video"][v]
+        g = b["A_minus_Y_all"].get("accuracy")
+        print(f"  {v}: A acc {b['A']['accuracy']:.3f}, Y_all acc {b['Y_all']['accuracy']:.3f}, "
+              f"old 0.3 rule {b['Y']['accuracy']:.3f}, on {b['A']['n']}"
+              + (f"; A - Y_all {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}]" if g else ""))
     for name, block in (("every clip YOLO saw", report["all_seen"]), ("same person only", report["same_person"])):
         print(f"{name}: " + ", ".join(f"{k} acc {block[k]['accuracy']:.3f} F1 {block[k]['macro_f1']:.3f}"
                                       for k in ("A", "Y", "Y_all") if k in block and block[k].get("n")))
-        g = block["A_minus_Y"].get("accuracy")
-        if g:
-            print(f"  A - Y accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] on {block['A_minus_Y']['n']}")
-    for key, name in (("Y_minus_Y_ext", "what the pipeline's cut costs (Y - Y_ext)"),
+        for key in ("A_minus_Y_all", "A_minus_Y"):
+            g = (block.get(key) or {}).get("accuracy")
+            if g:
+                print(f"  {key.replace('_minus_', ' - ')} accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, "
+                      f"{g['ci_high']:+.3f}] on {block[key]['n']}")
+    w_ = report["window"]
+    print("cut readings, every detected joint kept: " + ", ".join(
+        f"{k} acc {w_[k]['accuracy']:.3f}" for k in ("Y_all", "Y_ext", "Y_fix", "Y_long")) + f" on {w_['Y_all']['n']}")
+    for key, name in (("Y_all_minus_Y_ext", "what the pipeline's cut costs (Y_all - Y_ext)"),
                       ("Y_ext_minus_Y_fix", "what the extent buys over the fixed window (Y_ext - Y_fix)"),
                       ("Y_ext_minus_Y_long", "what following each punch's tempo buys over a longer window "
-                                             "(Y_ext - Y_long)")):
+                                             "(Y_ext - Y_long)"),
+                      ("Y_long_minus_Y_fix", "one window per video at its median extent, over the old window "
+                                             "(Y_long - Y_fix)")):
         g = report["window"][key].get("accuracy")
         if g:
             print(f"{name}: accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] "
