@@ -188,7 +188,15 @@ check("a sample time with no pose frame is a zero frame with validity 0, as the 
 check("... and the window says how many frames it saw", gw.observed == 9 - len(missing))
 c = np.ones((1200, N_JOINTS)); c[:, 15] = 0.1
 lw = classify.cut_window(body(1200, fps, conf=c), peak, GEOM, 100.0).keypoints
-check("a joint below the confidence floor is zeroed with validity 0", (lw[:, 15] == 0).all() and (lw[:, 14, 2] == 1).all())
+check("an unsure joint (confidence 0.1) is KEPT: the classifier was trained on whole skeletons",
+      (lw[:, 15, 2] == 1).all() and (lw[:, 15, :2] != 0).all())
+lw3 = classify.cut_window(body(1200, fps, conf=c), peak, GEOM, 100.0, min_conf=0.3).keypoints
+check("control: asked to, the old 0.3 rule still blanks that joint", (lw3[:, 15] == 0).all() and (lw3[:, 14, 2] == 1).all())
+c0 = np.ones((1200, N_JOINTS)); c0[:, 15] = 0.0
+lw0 = classify.cut_window(body(1200, fps, conf=c0), peak, GEOM, 100.0).keypoints
+check("a joint the pose model did not detect at all (confidence 0) is blanked, validity 0",
+      (lw0[:, 15] == 0).all() and (lw0[:, 14, 2] == 1).all())
+check("the pipeline's default is to keep every detected joint", classify.CLASSIFY_MIN_CONF == 0.0)
 far = classify.cut_window(tr, 5000, GEOM, 100.0)
 check("a window past the end of the pose is unclassifiable, with a reason",
       far.keypoints is None and "pose in only 0" in far.reason, far.reason)
@@ -563,7 +571,7 @@ raises("no stance -> refused (the tool does not guess one)",
        lambda: classify_punches.main(args), SystemExit)
 
 # The same clip with the hips unsure around the first punch: that punch cannot be centred, the others can.
-cf8 = cf.copy(); cf8[120:300, 11] = 0.1
+cf8 = cf.copy(); cf8[120:300, 11] = 0.0   # the left hip not detected at all there
 pose_yolo.PoseSequence(xy.astype(np.float32), cf8, np.ones(n, bool), fps, 1080, 1920, "IMG_8888.mov", "test").save(
     tmp / "IMG_8888.pose.npz")
 find_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o")])

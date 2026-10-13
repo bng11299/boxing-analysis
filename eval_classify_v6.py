@@ -56,7 +56,7 @@ TOL_S = 0.1   # the finder's matching tolerance on V6
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
 DEFAULT_EXTENT = Path("results/punch_extent.json")
 DEFAULT_OUT = Path("results/classify_v6.json")
-PAIRS = (("A", "B"), ("A", "D"), ("D", "B"), ("D", "F"), ("D", "E"), ("E", "C"))
+PAIRS = (("A", "B"), ("A", "D"), ("D", "B"), ("D", "F"), ("F", "B"), ("D", "E"), ("E", "C"))
 
 
 def corpus_clip(track, s) -> "np.ndarray | None":
