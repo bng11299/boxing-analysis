@@ -795,3 +795,13 @@ frames (a silent, plausible-looking number); a different person in frame scored 
 - **Residual, accepted:** two of three held-out videos; coaches' YouTube footage, not phone
   footage; V5 and V9 may share athletes with training videos (O55); the script's gates are
   exercised by the smoke test and the real run, not by unit tests.
+
+### Iteration 3 -- the per-clip cut, through the pipeline's own function (2026-10-13)
+- `Y_clip` now calls `classify.clip_cut` / `clip_window` (it was a hand-rolled control, `Y_long`).
+- **V5 + V9, 742 punches, every joint kept:** labelled span 0.889, per clip **0.826**, old fixed
+  window 0.806, per punch 0.774. Y_all - Y_clip +0.063 [+0.034, +0.094]; Y_clip - Y_fix +0.020
+  [-0.001, +0.043]; Y_ext - Y_clip **-0.053 [-0.075, -0.030]**; Y_ext - Y_fix -0.032 [-0.057,
+  -0.009]. Clip lengths 0.360 s (V5) and 0.468 s (V9); no punch left out of either median.
+- The earlier control gave 0.823 with the same lengths to within a frame.
+- **Limit added to the results file:** the per-clip cut was chosen looking at these numbers, so
+  they are no longer a clean test of it.

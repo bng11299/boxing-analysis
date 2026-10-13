@@ -207,7 +207,9 @@ def main(argv=None) -> int:
         "by_video": {v: {"A": scores(y[vid == v], pa[vid == v]), "Y": scores(y[vid == v], py[vid == v]),
                          "Y_all": scores(y[vid == v], pya[vid == v]),
                          "A_minus_Y_all": paired(y[vid == v], pa[vid == v], pya[vid == v])} for v in scored},
-        "limits": ["held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
+        "limits": ["the per-clip cut (Y_clip) was CHOSEN looking at these videos' numbers and at V6's second half "
+                   "(ADR-0014, 2026-10-13): this is no longer a clean test of it",
+                   "held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
                    "the video-disjoint split may not be athlete-disjoint (O55)",
                    "YOLO keeps one person per frame; other-person clips are counted, and scored in all_seen"]})
     print(f"SCORED: {'/'.join(scored)} of the held-out {'/'.join(held_out)}"
