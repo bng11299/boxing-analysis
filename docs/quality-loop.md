@@ -704,3 +704,45 @@ Found by `feat/pose-switch`, not by this branch's own gates.
   finder's default, reused. What caught it was a reading specified before the run for another
   reason (`Y_all`, "AlphaPose drops few").
 - **V6 control paired with the old window:** F - B +0.131 [+0.094, +0.167].
+
+### Iteration 7 -- one window per clip (2026-10-13, ADR-0014 amended by Brendan)
+Acceptance: (1) every punch in a clip is read over one length, the median of the clip's own
+punch extents; (2) the rule file's gate measures that cut as the pipeline runs it, and a file
+that gated another cut is refused; (3) the evaluations name which numbers the choice was made
+on; (4) own footage re-run; (5) suites green in a clean clone.
+- **Build:** `classify.clip_cut` / `clip_window`; `classify_punches.py` uses them and writes the
+  cut to the sidecar; `eval_classify_v6.py` readings F (median over labelled punches) and G
+  (median over every finder detection, windows at its matched detections: the pipeline as it
+  runs); `run_punch_extent.py` gates on G's form. 188 checks; 7 mutants, all caught.
+- **Review: FIX FIRST** (code sound). B1 a rule file from before this change carried the same
+  `beats_fixed_window` flag for the per-punch cut and passed. B2 the gate measured the cut with
+  a perfect finder (0.46 s), not as the pipeline runs (0.44 s from 1,084 detections). B3 the
+  docstrings overstated: "measured and lost" is true on V5/V9 and a tie on V6; 0.823 came from a
+  precursor estimator; the censoring rule is unmeasured; and the choice was made on the test
+  videos without saying so. B4 no negative tests for an empty CSV, the --labels refusal, an even
+  count, a tie, the fallback's length.
+- **Fix:** the rule file names the cut it gated (`gated_cut`), `read_extent` requires it; the
+  gate is `clip_cut` over all finder detections, windows at matched detections; wording
+  corrected and both evaluations' limits now say the per-clip cut was chosen on V5, V9 and V6's
+  second half; lengths in exact seconds (peak width x ratios), not rounded frame spans; whole
+  punches must be a strict majority to leave the censored ones out; under 5 punches the clip has
+  no tempo to read and gets the training clips' median window (`source: "training"`,
+  unmeasured); --labels with no punches refused before anything is written; a labelled punch
+  with no wrist speed is not scored "at its peak". 202 checks; 7 more mutants, one survivor
+  (the no-speed guard) given its own fixture.
+- **Real-world facts, V6 second half** (`results/classify_v6.json`): labelled span 0.754; per
+  clip 0.621 (F), per punch 0.608 (D), old window 0.500 (B). F - B **+0.121 [+0.081, +0.163]**;
+  D - F -0.012 [-0.044, +0.020]. As the pipeline runs: G 0.678, E per punch 0.684, C old window
+  0.598. G - C **+0.080 [+0.043, +0.120]**; E - G +0.007 [-0.023, +0.037]. Clip length 0.458 s
+  from the 685 labelled punches, 0.440 s from the finder's 1,084 (1 left out).
+- **Gate** (`results/punch_extent.json`): overlap with the labels at the finder's 301 matched
+  second-half detections, per clip 0.613 against old window 0.512, +0.101 [+0.097, +0.106]. YES.
+- **Own footage (orthodox, unlabelled):** clip length 0.41 s and 0.39 s (3 and 0 punches left
+  out of the median). IMG_4395: 16 jabs, 10 crosses, 6 lead hooks, 6 rear uppercuts, 4 lead
+  uppercuts; hand agreement 61.9% (per punch 71.4%; chance 49.4%). IMG_4406: 17 jabs, 7
+  crosses, 7 rear uppercuts, 6 lead hooks, 4 lead uppercuts; 80.5% (per punch 82.9%; chance
+  50.4%). The consistency check moved slightly AGAINST the change on both clips (4 and 1
+  punches). The benchmarks, with labels, favour it. Labels on these clips decide.
+- **Residual, accepted:** V5, V9 and V6's second half are no longer clean tests of this cut;
+  the censoring rule and the too-few fallback are unmeasured; intervals resample punches
+  independently.
