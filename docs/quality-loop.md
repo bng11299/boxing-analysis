@@ -682,3 +682,25 @@ overlap with the labelled span and in classifier accuracy; (2) a rule that did n
 - **Residual, accepted:** the IoU intervals resample punches independently (blocks would be
   wider); the same punch reads 5-12% wider at 24 fps than at 60; `read_extent` is not bound to
   a classifier hash (the ratios do not depend on its weights).
+
+### Iteration 6 -- the confidence rule (2026-10-12)
+Found by `feat/pose-switch`, not by this branch's own gates.
+- **Real-world facts, V5 and V9, 742 held-out punches, the same frames read two ways**
+  (`results/pose_switch.json`): AlphaPose 0.896; YOLO11-pose with every detected joint
+  **0.889** (-0.007 [-0.009, +0.024]); YOLO with joints under confidence 0.3 blanked, as
+  `classify._window` did, **0.348**. The rule blanked about 5% of the joints there (mostly a
+  hidden ear or eye), 7% and 20% on own footage.
+- **Fix:** `CLASSIFY_MIN_CONF = 0`: the classifier is shown every joint the pose model detected;
+  a joint with confidence 0 is still blanked. The finder keeps 0.3. 175 checks; both guards
+  reverted fail (keeping undetected joints: 5; back to 0.3: 2).
+- **Own footage, same finder and classifier:** IMG_4395 26 of 41 lead uppercuts -> 13 jabs, 12
+  crosses, 9 lead hooks, 6 rear uppercuts, 2 lead uppercuts; hand agreement 53.7% -> 71.4%
+  (chance 49.7%). IMG_4406 -> 16 jabs, 8 crosses, 7 rear uppercuts, 5 lead hooks, 5 lead
+  uppercuts; 48.8% -> 82.9% (chance 50.3%). Still unmeasured against labels.
+- **Why three iterations of gates missed it:** every synthetic fixture had confident joints;
+  V6 carries no joint confidence, so its evaluation could not see the rule; and the one check
+  on own footage, hand agreement at chance, was read as the window's fault (iteration 3) and
+  then as the pose model's (iteration 5). The rule itself was never a decision: it was the
+  finder's default, reused. What caught it was a reading specified before the run for another
+  reason (`Y_all`, "AlphaPose drops few").
+- **V6 control paired with the old window:** F - B +0.131 [+0.094, +0.167].
