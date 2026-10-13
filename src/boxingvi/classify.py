@@ -73,6 +73,15 @@ MIN_OBSERVED_SHARE = 0.5
 # prepare_input refuses coordinates beyond these; a window outside them is
 # reported as unclassifiable instead of failing the whole batch.
 COORD_LO, COORD_HI = -0.5, 1.5
+# The classifier is shown EVERY joint the pose model detected, however unsure. It was trained
+# on AlphaPose skeletons, which carry all 17 joints, and a skeleton with joints blanked out is
+# something it has never seen. Measured on the held-out punches of V5 and V9, the same frames
+# read by YOLO11-pose (results/pose_switch.json, 742 punches): AlphaPose 0.896; YOLO with every
+# detected joint 0.889 (-0.007 [-0.009, +0.024]); YOLO with joints under confidence 0.3 blanked,
+# as this module did until 2026-10-12, 0.348. That rule blanked about 5% of the joints there,
+# mostly a hidden ear or eye. The punch FINDER keeps its 0.3 rule: a guessed wrist that jumps
+# reads as a punch (punchfind.MIN_CONF). Only what the classifier is shown changed.
+CLASSIFY_MIN_CONF = 0.0
 
 assert LEAD_CLASSES | REAR_CLASSES == set(CLASSES) and not LEAD_CLASSES & REAR_CLASSES
 
@@ -236,9 +245,11 @@ class Window:
 def _window(track: Track, want: np.ndarray, geom: WindowGeometry, torso_px: float,
             min_conf: float) -> Window:
     """Video frames `want`, in order, as one clip in BoxingVI's normalised 1920x1080
-    space. A frame with no pose, and a joint below `min_conf`, become zeros with
-    validity 0 -- exactly how the corpus marks padding and dropped joints, so the
-    classifier's input preparation drops them the same way."""
+    space. A frame with no pose, and a joint the pose model did not detect at all
+    (confidence 0) or detected below `min_conf`, become zeros with validity 0 --
+    exactly how the corpus marks padding and dropped joints, so the classifier's
+    input preparation drops them the same way. `min_conf` is 0 in the pipeline:
+    see CLASSIFY_MIN_CONF for why blanking unsure joints is the wrong call."""
     if not (math.isfinite(torso_px) and torso_px > 1):
         raise ValueError(f"torso length must be a positive pixel length, got {torso_px!r}")
     n = len(want)
@@ -252,7 +263,8 @@ def _window(track: Track, want: np.ndarray, geom: WindowGeometry, torso_px: floa
     if track.conf is None:
         ok[present] = True
     else:
-        ok[present] = track.conf[pos_c[present]] >= min_conf
+        c = track.conf[pos_c[present]]
+        ok[present] = (c > 0) & (c >= min_conf)
     observed = int(ok.any(axis=1).sum())
     if observed < max(MIN_OBSERVED_FRAMES, math.ceil(MIN_OBSERVED_SHARE * n)):
         return Window(None, observed, f"pose in only {observed} of the window's {n} frames")
@@ -287,7 +299,7 @@ def _nearest_frames(track: Track, t0: float, n: int, geom: WindowGeometry) -> np
 
 
 def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: float,
-               min_conf: float = MIN_CONF) -> Window:
+               min_conf: float = CLASSIFY_MIN_CONF) -> Window:
     """A FIXED-length window (the training clips' median length and peak position)
     around the punch whose wrist-speed peak is at video frame `peak_frame`. Kept as
     the baseline `cut_span` is measured against: on V6 it cost 21 points of
@@ -297,7 +309,7 @@ def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: fl
 
 
 def cut_span(track: Track, start: int, end: int, geom: WindowGeometry, torso_px: float,
-             min_conf: float = MIN_CONF) -> Window:
+             min_conf: float = CLASSIFY_MIN_CONF) -> Window:
     """The punch from video frame `start` to `end` (inclusive), as the corpus cuts
     a labelled span: every frame of it, resampled to the training frame rate, and
     trimmed to the corpus's 25 frames if longer (the corpus trims the tail too)."""
