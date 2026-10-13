@@ -704,3 +704,52 @@ Found by `feat/pose-switch`, not by this branch's own gates.
   finder's default, reused. What caught it was a reading specified before the run for another
   reason (`Y_all`, "AlphaPose drops few").
 - **V6 control paired with the old window:** F - B +0.131 [+0.094, +0.167].
+
+## `feat/pose-switch` -- 2026-10-12
+
+How much the classifier loses reading YOLO11-pose instead of AlphaPose, on the held-out
+punches themselves. Stacked on `feat/classify-detected`. Acceptance: (1) the saved classifier
+reproduces 0.8145 / 0.7207 on the corpus clips before anything is scored; (2) each video's
+pose is the source at its native rate and covers every span; (3) spans align with YOLO's
+frame numbering, or the video is excluded and named; (4) A - Y with a paired interval;
+(5) suites green in a clean clone.
+
+Threat sketch. Assets: the honesty of one number the poster will carry. Entry points: pose
+npz from the laptop, corpus skeletons and annotation sheets, classifier manifest. Trust
+boundary: files synced between machines. Top threats: scoring skeletons against the wrong
+frames (a silent, plausible-looking number); a different person in frame scored as the boxer.
+
+### Iteration 1 (2026-10-09 to 10-11)
+- **Test:** 16 checks; 6 guards reverted, 5 caught (one after a slow-motion fixture with
+  two-model jitter), 1 equivalent (no shared joint is already NaN).
+- **Smoke test** with AlphaPose clips standing in for YOLO at their own frames: gate 1 0.8145,
+  offset 0 on all three videos, A == Y on 974 clips. Plumbing only.
+
+### Iteration 2 -- the real run (2026-10-12)
+- **GPU extraction** (laptop, RTX 3060): V2 32,611 frames, V5 15,519, V9 22,541 at native
+  rates; person found in 99.9%, 98.2%, 97.5%. Files arrived byte-identical in size.
+- **Gate 3 stopped the first run on V2** (best offset 7, sharpness 1.01), as built. Probing:
+  V5 and V9 sit exactly at their annotated frames (0.009 frame heights). V2 does not, at any
+  shift in -12,000..12,000 or frame-rate ratio (best 0.035), and an exhaustive search of the
+  video finds 0 of 12 clips (V9 control: 12 of 12). Same place, same size, different moment:
+  V2's skeletons are not from the video linked as V2 (vault ISSUES-LOG O61). Gate 3 now
+  excludes such a video by name and scores the rest; none aligned is still a hard stop.
+- **Real-world facts, V5 + V9, 742 punches** (`results/pose_switch.json`):
+
+  | reading | accuracy | macro F1 | hand |
+  |---|---|---|---|
+  | A AlphaPose | 0.896 | 0.819 | 0.987 |
+  | Y_all YOLO, every detected joint | 0.889 | 0.801 | 0.978 |
+  | Y YOLO, joints under 0.3 blanked | 0.348 | 0.291 | 0.535 |
+
+  A - Y_all **+0.007 [-0.009, +0.024]** (macro F1 +0.018 [-0.018, +0.054]); per video +0.007
+  both. A - Y +0.549 [+0.511, +0.582]. The pose switch costs nothing measurable; the
+  confidence rule cost 55 points (fixed in `classify`, that branch's iteration 6).
+- **Cut readings, every joint kept:** labelled span 0.889; old fixed window 0.806; per-punch
+  extent 0.774; one window per video at its median extent 0.823. Y_ext - Y_fix -0.032
+  [-0.057, -0.009]; Y_ext - Y_long -0.050 [-0.073, -0.027]; Y_long - Y_fix +0.018 [-0.005,
+  +0.039]. Extent overlap with the label by type: jab 0.49, cross 0.58, lead uppercut 0.51,
+  lead hook 0.65, rear hook 0.63, rear uppercut 0.67. 0 clips unseen by YOLO, 0 other-person.
+- **Residual, accepted:** two of three held-out videos; coaches' YouTube footage, not phone
+  footage; V5 and V9 may share athletes with training videos (O55); the script's gates are
+  exercised by the smoke test and the real run, not by unit tests.
