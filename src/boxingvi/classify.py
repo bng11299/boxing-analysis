@@ -13,12 +13,17 @@ look like one of those clips, in time and in space:
   training frame rate -- footage at 60 fps is converted explicitly, not passed
   through at twice the frames per punch (O54).
   Why per clip and not per punch (vault ADR-0014, amended 2026-10-13): sizing each
-  punch from its own peak width was measured and lost. V5 + V9, 742 punches: one
-  window per video 0.823, the old fixed 0.375 s window 0.806, per-punch 0.774
-  (per-punch minus per-video -0.050 [-0.073, -0.027]). V6 second half: 0.631,
-  0.500, 0.608. A boxer's tempo is steady within a clip; one punch's peak width
-  is a noisy reading of it. `cut_window`, the fixed-length window, stays as the
-  baseline these are measured against.
+  punch from its own peak width is worse on normal-tempo footage and no better on
+  slow footage. V5 + V9, 742 punches: per clip 0.826, the old fixed 0.375 s window
+  0.806, per punch 0.774 (per punch minus per clip -0.053 [-0.075, -0.030]). V6
+  second half: per clip 0.631, per punch 0.608, old window 0.500 (per punch minus
+  per clip -0.022 [-0.054, +0.010], a tie; at the finder's own detections 0.678
+  against 0.684, also a tie). A boxer's tempo is steady within a clip; one punch's
+  peak width is a noisy reading of it. `cut_window`, the fixed-length window,
+  stays as the baseline these are measured against.
+  THE CHOICE WAS MADE LOOKING AT THOSE NUMBERS: V5, V9 and V6's second half are no
+  longer clean tests of the per-clip cut. Its first clean test is labelled footage
+  it has not seen (own footage, once labelled).
 * space: BoxingVI coordinates are pixels of a 1920x1080 frame divided by the
   frame size. Phone footage is portrait, and the boxer is nearer or farther. The
   window is scaled so the torso is the training median length in 1080p pixels,
@@ -310,9 +315,10 @@ def _nearest_frames(track: Track, t0: float, n: int, geom: WindowGeometry) -> np
 def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: float,
                min_conf: float = CLASSIFY_MIN_CONF) -> Window:
     """A FIXED-length window (the training clips' median length and peak position)
-    around the punch whose wrist-speed peak is at video frame `peak_frame`. Kept as
-    the baseline `cut_span` is measured against: on V6 it cost 21 points of
-    accuracy, because that footage's punches run about twice the median clip."""
+    around the punch whose wrist-speed peak is at video frame `peak_frame`. The first
+    design, kept as the baseline the per-clip window is measured against: on V6 it
+    cost 21 points of accuracy, because that footage's punches run about twice the
+    median training clip."""
     t0 = _frame(peak_frame, "peak frame") / track.fps - geom.lead_in_s
     return _window(track, _nearest_frames(track, t0, geom.n_frames, geom), geom, torso_px, min_conf)
 
@@ -473,6 +479,10 @@ def hand_agreement(type_sides: "list[str]", finder_sides: "list[str]") -> dict:
 
 # ------------------------------------------------------------ extent rule ---
 
+# What run_punch_extent.py's `beats_fixed_window` certifies, written into the rule file and
+# required by read_extent. Change it whenever the pipeline's cut, or how the gate measures it, changes.
+GATED_CUT = "per clip, median over the finder's detections, windows at its matched detections"
+
 def max_span_s(geom: WindowGeometry) -> float:
     """The longest punch the classifier can be shown: the corpus's 25 frames at the training rate."""
     return (MAX_FRAMES - 1) / geom.fps
@@ -487,41 +497,63 @@ def punch_extent(track: Track, signal: np.ndarray, peak_frame: int, hand: int, r
                   max_s=max_span_s(geom))
 
 
+# A clip's tempo is read from its punches. With fewer than this many, the median of their own
+# extents is the per-punch design under another name (one punch: exactly that), so the window
+# falls back to the training clips' median length and peak position: the old fixed window.
+# Not measured: every clip scored so far has 41 punches or more.
+MIN_CLIP_PUNCHES = 5
+
+
 class ClipCut(NamedTuple):
     """How every punch in one clip is cut."""
 
     length_s: float     # first frame to last frame of the window, in seconds
     lead_share: float   # the share of it before the punch's wrist-speed peak
-    n_used: int         # punches whose own extent went into the median
+    n_used: int         # punches whose own extent went into the median (0 when it came from training)
     n_left_out: int     # punches left out of it: their speed peak ran into the edge of the hand's signal
     capped: bool        # the median was longer than the classifier can be shown, and was shortened
+    source: str         # "clip", or "training" when the clip had too few punches to read a tempo from
 
 
 def clip_cut(track: Track, signal: np.ndarray, peaks: "list[tuple[int, int]]", rule: dict,
              geom: WindowGeometry) -> "ClipCut | None":
-    """The clip's punch length: the median of its punches' own extents (uncapped),
-    over `peaks` = [(peak frame, hand), ...]. A punch whose speed peak was cut off
-    by the edge of its hand's signal has an unknown extent and is left out, unless
-    that would leave fewer than half of them, in which case all are used: a short
-    median from censored punches is still closer than no clip tempo at all. None
-    when the clip has no punch to measure.
+    """The clip's punch length: the median of its punches' own extents, over `peaks`
+    = [(peak frame, hand), ...]. Each extent is the rule's ratios times that punch's
+    peak width, in exact seconds (not rounded to frames, and not capped).
+
+    A punch whose speed peak was cut off by the edge of its hand's signal has an
+    unknown extent and is left out, as long as the whole ones are a strict majority;
+    otherwise all are used (a median that leans short is closer than a median of a
+    minority). That rule is UNMEASURED: it left out 0, 0 and 1 punches on V5, V9 and
+    V6. A peak whose hand has no speed there raises, as in `punchfind.peak_width`.
+
+    With fewer than MIN_CLIP_PUNCHES punches the clip's tempo cannot be read, and the
+    cut is the training clips' median window. None when the clip has no punch.
     """
-    whole, cut = [], []
-    for peak, hand in peaks:
-        e = extent(track, signal, peak, hand, rule["lead_widths"], rule["tail_widths"], rule["frac"])
-        (cut if e.censored else whole).append((e.end - e.start) / track.fps)
-    if not whole and not cut:
+    if not peaks:
         return None
-    use = whole if len(whole) >= len(cut) else whole + cut
+    per_width = rule["lead_widths"] + rule["tail_widths"]
+    whole, cut_off = [], []
+    for peak, hand in peaks:
+        w, censored = peak_width(track, signal, peak, hand, rule["frac"])
+        (cut_off if censored else whole).append(w * per_width)
+    if len(peaks) < MIN_CLIP_PUNCHES:
+        return ClipCut(geom.duration_s, geom.lead_in_s / geom.duration_s, 0, 0, False, "training")
+    use = whole if len(whole) > len(cut_off) else whole + cut_off
     length = float(np.median(use))
     cap = max_span_s(geom)
-    return ClipCut(min(length, cap), rule["lead_widths"] / (rule["lead_widths"] + rule["tail_widths"]),
-                   len(use), len(whole) + len(cut) - len(use), bool(length > cap))
+    return ClipCut(min(length, cap), rule["lead_widths"] / per_width, len(use),
+                   len(peaks) - len(use), bool(length > cap), "clip")
 
 
 def clip_window(peak_frame: int, cut: ClipCut, fps: float) -> "tuple[int, int]":
-    """(start, end) inclusive video frames of the clip's window around one punch's peak."""
+    """(start, end) inclusive video frames of the clip's window around one punch's
+    peak, at the frame rate `fps` of the track the peak is a frame of. The start can
+    fall before frame 0 near the beginning of a clip; the window cutter marks frames
+    with no pose empty."""
     peak_frame = _frame(peak_frame, "peak frame")
+    if not (math.isfinite(fps) and fps > 0):
+        raise ValueError(f"fps must be positive, got {fps!r}")
     start = int(math.floor(peak_frame - cut.lead_share * cut.length_s * fps + 0.5))
     end = int(math.floor(peak_frame + (1 - cut.lead_share) * cut.length_s * fps + 0.5))
     while (end - start) / fps > cut.length_s + 1e-9 and end > peak_frame:   # rounding both ends outward
@@ -532,9 +564,11 @@ def clip_window(peak_frame: int, cut: ClipCut, fps: float) -> "tuple[int, int]":
 def read_extent(path: Path, variant: str) -> dict:
     """The punch-extent rule run_punch_extent.py wrote: {frac, lead_widths,
     tail_widths}. Refused unless it is well formed, was measured with the same
-    wrist-speed `variant` as the classifier's window, and beat the fixed window
-    on the footage it was tested on -- a rule that did not earn its place is not
-    quietly used."""
+    wrist-speed `variant` as the classifier's window, and its file records that
+    THE PER-CLIP CUT, as the pipeline runs it, beat the old fixed window where it
+    was tested. A file from before the per-clip cut carries the same
+    `beats_fixed_window` flag for another cut (each punch's own extent), so the
+    flag alone is not accepted: the file must also say which cut it gated."""
     path = Path(path)
     with path.open("rb") as f:
         raw = f.read(4 * 1024 * 1024 + 1)
@@ -554,6 +588,9 @@ def read_extent(path: Path, variant: str) -> dict:
     if d.get("variant") != variant:
         raise ValueError(f"{path.name}: measured with wrist-speed variant {d.get('variant')!r}, "
                          f"not the classifier window's {variant!r}")
+    if d.get("gated_cut") != GATED_CUT:
+        raise ValueError(f"{path.name}: gated another cut than the pipeline's ({d.get('gated_cut')!r}); "
+                         "re-run run_punch_extent.py")
     if d.get("beats_fixed_window") is not True:
         raise ValueError(f"{path.name}: this extent rule did not beat the fixed window where it was tested")
     return out

@@ -24,8 +24,9 @@ same labelled punches, by the same saved classifier:
                           finder detected (V6's unlabelled jabs and crosses included),
                           and the window sits at the finder's matched detections
 
-F - B and G - C are what the per-clip window buys over the old one; D - F what
-sizing each punch on its own adds (it does not); A - F what cutting still costs;
+F - B and G - C are what the per-clip window buys over the old one; D - F and
+E - G what sizing each punch on its own adds (on V6, nothing measurable either
+way); A - F what cutting still costs;
 F - G the finder's timing and its unlabelled detections. Reported on all of V6 and
 on its second half alone, because the extent rule's width level and the choice of
 rule were made looking at the first half (run_punch_extent.py); the second half
@@ -59,7 +60,7 @@ TOL_S = 0.1   # the finder's matching tolerance on V6
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
 DEFAULT_EXTENT = Path("results/punch_extent.json")
 DEFAULT_OUT = Path("results/classify_v6.json")
-PAIRS = (("A", "B"), ("A", "F"), ("F", "B"), ("D", "F"), ("D", "B"), ("G", "C"), ("G", "E"), ("F", "G"))
+PAIRS = (("A", "B"), ("A", "F"), ("F", "B"), ("D", "F"), ("D", "B"), ("G", "C"), ("E", "G"), ("F", "G"))
 
 
 def corpus_clip(track, s) -> "np.ndarray | None":
@@ -172,6 +173,8 @@ def main(argv=None) -> int:
               "clip_cut_from_finder_detections": {**cut_finder._asdict(), "n_detections": int(len(det))},
               "all": block(preds, y, set(y)), "second_half": {"window": [lo, hi], **block(preds, y, second)},
               "limits": [
+                  "the per-clip cut (F, G) was CHOSEN looking at this file's second-half numbers and at V5/V9 "
+                  "(ADR-0014, 2026-10-13): they are no longer a clean test of it",
                   "V6 has hooks and uppercuts only: no jabs or crosses",
                   "one athlete, same channel as training video V1 (O55): may be optimistic",
                   "AlphaPose skeletons as in training: says nothing about the YOLO11-pose switch",

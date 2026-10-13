@@ -17,9 +17,12 @@ How a punch is cut (vault ADR-0014, amended 2026-10-13): every punch in a clip i
 read over ONE length, the median of the punches' own extents in that clip, placed
 around each punch's wrist-speed peak. Each extent comes from the width of the
 punch's speed peak (punchfind.extent, results/punch_extent.json from
-run_punch_extent.py). Sizing each punch from its own width was measured and lost
-to this (V5 + V9: 0.774 against 0.823); the old fixed 0.375 s window scored 0.806
-there and 0.500 on V6's slow punches, where this scores 0.631.
+run_punch_extent.py). A clip with fewer than five punches has no tempo to read
+and gets the training clips' median window. Sizing each punch from its own width
+was worse on normal-tempo footage (V5 + V9: 0.774 against 0.826) and no better on
+slow footage (V6: 0.608 against 0.631, a tie); the old fixed 0.375 s window
+scored 0.806 and 0.500. The cut was chosen looking at those numbers, so they are
+not a clean test of it: labelled footage it has not seen is.
 
 The classifier was trained on AlphaPose skeletons from YouTube footage at 24-30
 fps. On the benchmark's own held-out punches YOLO11-pose costs it nothing
@@ -149,6 +152,8 @@ def main(argv=None) -> int:
         raise ValueError(f"{a.punches.name} does not name the clip {clip}: classify the CSV "
                          "find_punches.py wrote for this pose")
     rows = read_punches(a.punches, len(pose), pose.fps)
+    if a.labels and not rows:   # before anything is written: a stale score file must not outlive this run
+        raise ValueError(f"{a.punches.name} holds no punch, so there is nothing to score against labels")
     model, man = classify.load_classifier(a.classifier)
     geom: classify.WindowGeometry = man["geometry"]
     # The window's lead-in was measured with one wrist-speed variant; a peak found
@@ -207,10 +212,13 @@ def main(argv=None) -> int:
 
     agree = classify.hand_agreement(type_sides, finder_sides)
     print(f"{clip}: {len(rows)} punches from the finder, {len(ok)} classified, {len(rows) - len(ok)} unclassified")
-    if cut is not None:
+    if cut is not None and cut.source == "clip":
         print(f"  every punch read over {cut.length_s:.2f} s, the clip's median punch length (from {cut.n_used} "
               f"punches; {cut.n_left_out} left out, their speed peak cut off by a wrist dropout"
               + ("; capped at what the classifier can be shown)" if cut.capped else ")"))
+    elif cut is not None:
+        print(f"  under {classify.MIN_CLIP_PUNCHES} punches: too few to read this clip's tempo, so every punch is "
+              f"read over {cut.length_s:.2f} s, the training clips' median")
     print("  " + ", ".join(f"{c} {n}" for c, n in counts.items()))
     if agree["n"]:
         print(f"  type and finder name the same hand on {agree['agree']:.1%} of {agree['n']} "
@@ -225,8 +233,6 @@ def main(argv=None) -> int:
     print(f"  -> {out} (+ .json provenance)")
 
     if a.labels:
-        if cut is None:
-            raise ValueError("the finder found no punch in this clip, so there is no cut to score against labels")
         spans = load_labels(a.labels, len(pose), pose.fps)
         named = [(j, s) for j, s in enumerate(spans) if s.label != UNCLEAR_LABEL]
         tol = int(round(TOL_S * pose.fps))
@@ -250,8 +256,14 @@ def main(argv=None) -> int:
         # Every labelled punch, two ways. From its labelled frames: perfect finder AND perfect start
         # and end. By the clip's window at its own wrist-speed peak: perfect finder, the pipeline's cut.
         by_label = [classify.cut_span(track, s.start, s.end, geom, torso) for _, s in named]
-        by_window = [classify.cut_span(track, *classify.clip_window(span_peak(track, sig, s.start, s.end), cut,
-                                                                    pose.fps), geom, torso) for _, s in named]
+        by_window = []
+        for _, s in named:
+            pk = span_peak(track, sig, s.start, s.end)
+            i = row_of.get(pk)
+            if i is None or not sig[i].max() > 0:   # span_peak fell back to the span's middle: there is no peak
+                by_window.append(classify.Window(None, 0, "no wrist speed inside the labelled punch"))
+            else:
+                by_window.append(classify.cut_span(track, *classify.clip_window(pk, cut, pose.fps), geom, torso))
         ious = [punchfind.span_iou(spans_read[di], (spans[si].start, spans[si].end)) for si, di in pairs]
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
         result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
