@@ -58,14 +58,13 @@ MAX_ROUNDS = 100
 MAX_JSON_BYTES = 4 * 1024 * 1024
 PLURAL = {"jab": "jabs", "cross": "crosses", "lead_hook": "lead hooks", "lead_uppercut": "lead uppercuts",
           "rear_hook": "rear hooks", "rear_uppercut": "rear uppercuts"}
-# The only notes classify_punches.py writes. An unnamed punch carries one REASON; a named
-# punch carries nothing, or one or both CAVEATS about where it starts and ends.
+# The only notes classify_punches.py writes: an unnamed punch carries one REASON, a named
+# punch carries none. (Per-punch caveats about a punch's start and end went away with the
+# per-clip cut, 2026-10-13: a punch's window no longer depends on its own peak width.)
 _REASONS = (re.compile(r"pose in only [0-9]+ of the window's [0-9]+ frames"),
             re.compile(r"no frame in the window shows both hips"),
             re.compile(r"joints fall far outside the frame after scaling"),
             re.compile(r"the punch is shorter than two frames at the training frame rate"))
-CAVEATS = ("the wrist's pose drops out beside the peak: the punch may run longer than read",
-           "longer than the classifier can be shown: shortened around the peak")
 _INT = re.compile(r"-?[0-9]+")   # a punch's estimated start can fall before the clip's first frame
 _DIGITS = re.compile(r"[0-9]+")
 _DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -142,9 +141,8 @@ def read_classified(path: Path, duration_s: float) -> "list[dict]":
                     raise ValueError(f"{where}: an unclassified punch carries a reading or lacks a known reason")
                 conf = None
             elif d["punch_type"] in CLASSES:
-                notes = d["note"].split("; ") if d["note"] else []
-                if len(set(notes)) != len(notes) or any(x not in CAVEATS for x in notes):
-                    raise ValueError(f"{where}: note is not a caveat classify_punches.py writes")
+                if d["note"]:
+                    raise ValueError(f"{where}: a named punch carries a note; classify_punches.py writes none")
                 if not _DECIMAL.fullmatch(d["confidence"]):
                     raise ValueError(f"{where}: confidence {d['confidence']!r} is not a number")
                 conf = _prob(float(d["confidence"]), f"{where}: confidence")
@@ -314,8 +312,7 @@ def compute_facts(rows, rounds, duration_s: float) -> dict:
             "round_minutes": minutes,
             "types": {c: sum(r["punch_type"] == c for r in named) for c in CLASSES},
             "n_type_lead": sum(r["type_hand"] == "lead" for r in named),
-            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named),
-            "n_extent_unsure": sum(bool(r["note"]) for r in named)}
+            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named)}
 
 
 def shares(counts: "dict[str, int]") -> "dict[str, int]":
@@ -406,10 +403,6 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
                 k = facts["n_hands_disagree"]
                 w.say(f"For {w.count(k)} {_punches(k)} the punch type and the wrist that moved point to "
                       f"different hands; one of the two readings is wrong there.")
-        if facts["n_named"] and facts["n_extent_unsure"]:
-            k = facts["n_extent_unsure"]
-            w.say(f"For {w.count(k)} named {_punches(k)} the start and end are unsure: the wrist left view "
-                  f"beside the peak, or the punch ran longer than the tool can read.")
         if facts["n_unnamed"]:
             w.say(f"{w.count(facts['n_unnamed'])} it could not name: the pose was too incomplete to read.")
         first, last = rounds[0], rounds[-1]
@@ -474,8 +467,28 @@ def _cell(v):
     return v
 
 
+def cut_line(sidecar: dict) -> str:
+    """One sentence for the About sheet on how this clip's punches were cut, from the sidecar
+    classify_punches.py wrote. Checked field by field: the sidecar is a file on disk."""
+    c = sidecar.get("cut")
+    if c is None:
+        return "No punch was found in this clip, so nothing was cut."
+    if not isinstance(c, dict) or c.get("per") != "clip":
+        raise ValueError("the sidecar does not describe a per-clip cut: re-run classify_punches.py")
+    length = c.get("length_s")
+    if isinstance(length, bool) or not isinstance(length, (int, float)) or not 0 < length <= 5:
+        raise ValueError(f"sidecar cut length {length!r} is not a punch length in seconds")
+    used, left = _count(c.get("n_used"), "cut n_used"), _count(c.get("n_left_out"), "cut n_left_out")
+    if not isinstance(c.get("capped"), bool):
+        raise ValueError("sidecar cut 'capped' must be true or false")
+    return (f"Every punch was read over {length:.2f} s around its wrist-speed peak: the median punch length in "
+            f"this clip, from {used} {_punches(used)}"
+            + (f" ({left} left out: the wrist left view beside the peak)" if left else "")
+            + ("; capped at the longest the tool can read." if c["capped"] else "."))
+
+
 def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict, text: str,
-                   fps: float) -> None:
+                   fps: float, how_cut: str = "") -> None:
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -510,7 +523,7 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
                    None if t.precision is None else round(t.precision, 3), round(t.f1, 3),
                    "yes" if t.recall < LOW_RECALL else ""])
     ws = wb.create_sheet("About")
-    for line in (f"clip: {clip}", "", "summary:", text, "",
+    for line in (f"clip: {clip}", "", "summary:", text, "", how_cut,
                  f"'named least reliably' = named correctly under {100 * LOW_RECALL:.0f}% of the time on held-out "
                  f"benchmark footage; type counts reported when more than {100 * COUNT_BIAS:.0f}% off; a change in "
                  f"punch rate reported only beyond {CHANCE_SE:.0f} standard errors of a Poisson count.",
