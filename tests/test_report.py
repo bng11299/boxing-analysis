@@ -13,9 +13,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import sys
 import tempfile
 from collections import Counter
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +26,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from boxingvi import classify, pose_yolo, report  # noqa: E402
+from boxingvi import classify, pose_yolo, report, stats  # noqa: E402
 from boxingvi.data import CLASSES, N_JOINTS  # noqa: E402
 
 PASS = FAIL = 0
@@ -299,6 +301,133 @@ tz = variant(facts, {"n": 0, "unclassifiable": 0}, name="labelled, nothing match
 check("labelled but nothing matched: not 'label a clip'", "You labelled this clip, but no labelled punch" in tz
       and "label a clip" not in tz, tz)
 
+print("the hand check: one-sided exact binomial, worked by hand")
+B = stats.binomial_greater_p
+for (k_, n_, p_), want, why in (((4, 4, 0.5), 1 / 16, "4 of 4 at 1/2"), ((5, 5, 0.5), 1 / 32, "5 of 5 at 1/2"),
+                               ((8, 10, 0.5), 56 / 1024, "8 of 10 at 1/2: (45 + 10 + 1) / 1024"),
+                               ((9, 10, 0.5), 11 / 1024, "9 of 10 at 1/2: (10 + 1) / 1024"),
+                               ((2, 3, 0.2), 0.104, "2 of 3 at 0.2: 3(0.04)(0.8) + 0.008"),
+                               ((1, 2, 0.3), 0.51, "1 of 2 at 0.3: 1 - 0.7^2"),
+                               ((0, 7, 0.4), 1.0, "0 of anything: certain"),
+                               ((3, 3, 1.0), 1.0, "p = 1: certain"), ((1, 3, 0.0), 0.0, "p = 0, k > 0: impossible"),
+                               ((0, 0, 0.5), 1.0, "0 of 0")):
+    check(f"binomial P(X >= k): {why} = {want:.6f}", abs(B(k_, n_, p_) - want) < 1e-12, f"{B(k_, n_, p_)!r}")
+big_p = B(50_000, 100_000, 0.5)   # 1/2 + half the central term, sqrt(2 / (pi * 100000)) / 2 = 0.00126
+check("large n does not overflow: 50,000 of 100,000 at 1/2 = 0.50126", abs(big_p - 0.501262) < 1e-5, f"{big_p!r}")
+for args_, why in (((5, 4, 0.5), "k > n"), ((-1, 4, 0.5), "negative k"), ((1, 4, 1.5), "p above 1"),
+                   ((1, 4, float("nan")), "NaN p"), ((True, 4, 0.5), "a boolean k"), ((1.0, 4, 0.5), "a float k")):
+    raises(f"binomial refuses {why}", lambda args_=args_: B(*args_))
+
+
+def exact_tail(k_, n_, c):
+    """The same tail with exact fractions and integer binomial coefficients: an oracle that shares no code."""
+    c = Fraction(c)
+    return float(sum(math.comb(n_, i) * c ** i * (1 - c) ** (n_ - i) for i in range(k_, n_ + 1)))
+
+
+hc = facts["hand_check"]
+# The 13 named punches above: type says lead for 10 (9 jabs, 1 lead hook), the wrist for 9 (one jab came from the
+# right). Chance = (10*9 + 3*4) / 13^2 = 102/169 = 0.604; 12 of 13 agree.
+check("hand check on the main fixture: 12 of 13 agree, chance 102/169",
+      hc["n"] == 13 and hc["k"] == 12 and abs(hc["chance"] - 102 / 169) < 1e-12, str(hc))
+check("p = 13 c^12 (1 - c) + c^13 = 0.0134 at c = 102/169: above chance, no warning",
+      abs(hc["p"] - exact_tail(12, 13, Fraction(102, 169))) < 1e-12 and abs(hc["p"] - 0.01345) < 5e-5
+      and not hc["warn"], str(hc))
+check("no warning in a summary whose check passes", "Warning" not in text, text)
+
+
+def hand_rows(ll, lr, rl, rr):
+    """Named punches by (type's hand, wrist's hand): lead-lead, lead-rear, rear-lead, rear-rear. Orthodox: a jab is
+    the lead (left) hand's type, a cross the rear (right) hand's."""
+    kinds = [("jab", "left")] * ll + [("jab", "right")] * lr + [("cross", "left")] * rl + [("cross", "right")] * rr
+    return [row(1 + 0.5 * i, t_, h_) for i, (t_, h_) in enumerate(kinds)]
+
+
+def warned(name, rows_):
+    f_ = facts_of(rows_, None)
+    return f_, variant(f_, name=name)
+
+
+print("the hand check: real-world facts (counts from the real clips; the clips themselves are not in the repo)")
+# As stated in the brief, before classify's confidence fix: both must warn.
+for name, k_, n_, c in (("IMG_4395, old 0.3 rule, as recorded", 22, 41, 0.482),
+                        ("IMG_4406, old 0.3 rule, as recorded", 20, 41, 0.509)):
+    check(f"{name}: {k_} of {n_} against {c}: p = {B(k_, n_, c):.3f}, warns",
+          not B(k_, n_, c) < report.HAND_ALPHA and abs(B(k_, n_, c) - exact_tail(k_, n_, c)) < 1e-12)
+# Joint tables with those agreements and chances, through the CSV -> facts -> summary path. The old clips' own
+# tables were not kept; these reproduce the recorded n, agreement and chance. 48.2% is not reachable with 22 of 41
+# agreeing (nearest 48.3%); iteration 3 recorded it with 42 punches (23 of 42, 54.8%), and both are run.
+for name, table, n_, k_, c in (("old IMG_4395, 41 punches", (15, 15, 4, 7), 41, 22,
+                                Fraction(30 * 19 + 11 * 22, 41 ** 2)),
+                               ("old IMG_4395, 42 punches (iteration 3)", (19, 18, 1, 4), 42, 23,
+                                Fraction(37 * 20 + 5 * 22, 42 ** 2)),
+                               ("old IMG_4406", (18, 18, 3, 2), 41, 20, Fraction(36 * 21 + 5 * 20, 41 ** 2))):
+    f_, tx = warned(name, hand_rows(*table))
+    h_ = f_["hand_check"]
+    check(f"{name}: {k_} of {n_}, chance {float(c):.4f}, p = {h_['p']:.3f}: the summary LEADS with the warning",
+          h_["k"] == k_ and h_["n"] == n_ and abs(h_["chance"] - c) < 1e-12 and h_["warn"]
+          and tx.startswith("Warning: the punch types in this summary may be wrong for this clip."), tx)
+# Today's classified CSVs: their joint tables, read from results/punches/IMG_44*.classified.csv of 2026-10-13.
+f95, t95 = warned("IMG_4395 today", hand_rows(15, 11, 5, 11))
+h95 = f95["hand_check"]
+check("IMG_4395 today: 26 of 42 (61.9%) against 49.4%: p = 0.0715, STILL WARNS",
+      h95["k"] == 26 and h95["n"] == 42 and abs(h95["agree"] - 26 / 42) < 1e-12
+      and abs(h95["chance"] - Fraction(26 * 20 + 16 * 22, 42 ** 2)) < 1e-12
+      and abs(h95["p"] - exact_tail(26, 42, Fraction(872, 1764))) < 1e-12 and abs(h95["p"] - 0.0715) < 5e-4
+      and h95["warn"] and t95.startswith("Warning:"), f"{h95} {t95[:300]}")
+check("IMG_4395 today, the sentence as written",
+      t95.startswith("Warning: the punch types in this summary may be wrong for this clip. For 26 of 42 named "
+                     "punches the hand the punch type implies is the wrist that moved (62%), against 49% expected "
+                     "by chance from how often each reading says lead hand; a one-sided exact binomial test gives "
+                     "p = 0.071, not under 0.05, so that agreement is not shown to be better than chance. In one "
+                     "round"), t95[:420])
+f06, t06 = warned("IMG_4406 today", hand_rows(20, 7, 1, 13))
+h06 = f06["hand_check"]
+check("IMG_4406 today: 33 of 41 (80.5%) against 50.4%: p = 0.0001, no warning",
+      h06["k"] == 33 and h06["n"] == 41
+      and abs(h06["p"] - exact_tail(33, 41, Fraction(27 * 21 + 14 * 20, 41 ** 2))) < 1e-12
+      and h06["p"] < 0.001 and not h06["warn"] and "Warning" not in t06, f"{h06}")
+
+print("the hand check: the test is the only rule")
+# Five jabs and five crosses: chance is 1/2 whatever the wrists say. 8 of 10 agree -> p = 56/1024 = 0.055, warns;
+# 9 of 10 -> 11/1024 = 0.011, does not. Nothing but the test separates them.
+f8, t8 = warned("8 of 10 at 1/2", hand_rows(4, 1, 1, 4))
+f9, t9 = warned("9 of 10 at 1/2", hand_rows(5, 0, 1, 4))
+check("8 of 10 at chance 1/2: p = 0.055, warns, printed so it does not read as a tie with 0.05",
+      f8["hand_check"]["warn"] and "p = 0.055, not under 0.05" in t8,
+      t8[:400])
+check("9 of 10 at chance 1/2: p = 0.011, no warning", not f9["hand_check"]["warn"] and "Warning" not in t9)
+check("the warning is the summary's first sentence and appears once",
+      t8.startswith("Warning:") and t8.count("Warning") == 1)
+
+print("the hand check: edge cases")
+f0, t0n = warned("no named punch", [row(1 + i, "unclassified") for i in range(3)])
+check("0 named punches: no agreement, no p, no warning (no punch type is stated)",
+      f0["hand_check"] == {"n": 0, "agree": None, "chance": None, "k": 0, "p": None, "warn": False}
+      and "Warning" not in t0n and "could name" not in t0n, str(f0["hand_check"]))
+check("no punches at all: no warning", not report.compute_facts([], ROUNDS, DUR)["hand_check"]["warn"])
+fa, ta = warned("all one side, agreeing", hand_rows(12, 0, 0, 0))
+check("all lead by type AND by wrist: 100% agreement is exactly chance (100%), p = 1, warns",
+      fa["hand_check"]["agree"] == 1.0 and fa["hand_check"]["chance"] == 1.0 and fa["hand_check"]["p"] == 1.0
+      and "(100%), against 100% expected" in ta and "p = 1, not under" in ta, ta[:400])
+fz, tz_ = warned("all one side, disagreeing", hand_rows(0, 9, 0, 0))
+check("all lead by type, all rear by wrist: 0 of 9, chance 0, p = 1, warns",
+      fz["hand_check"]["k"] == 0 and fz["hand_check"]["chance"] == 0.0 and fz["hand_check"]["warn"]
+      and "For 0 of 9 named punches" in tz_, tz_[:300])
+fm, tm = warned("one type hand, mixed wrists", hand_rows(7, 3, 0, 0))
+check("types all lead, wrists 7 lead / 3 rear: agreement 70% = chance 70%, warns",
+      abs(fm["hand_check"]["chance"] - 0.7) < 1e-12 and fm["hand_check"]["warn"], str(fm["hand_check"]))
+f1_, t1_ = warned("one named punch", hand_rows(1, 0, 0, 0))
+check("one named punch: singular, and it warns (1 of 1 at chance 1)",
+      "For 1 of 1 named punch the hand" in t1_ and f1_["hand_check"]["warn"], t1_[:200])
+fs, ts = warned("southpaw", [row(1 + 0.5 * i, "jab", "right", lead="right") for i in range(10)]
+                + [row(10 + 0.5 * i, "cross", "left", lead="right") for i in range(10)])
+check("southpaw: lead and rear follow the stance, 20 of 20 agree at chance 1/2, no warning",
+      fs["hand_check"]["k"] == 20 and abs(fs["hand_check"]["chance"] - 0.5) < 1e-12 and not fs["hand_check"]["warn"])
+check("p-values never round to 0.00 or 1.00 unless exact",
+      [report._Writer().pval(x) for x in (1.0, 0.9999, 0.0001, 0.0, 0.2934, 0.0547, 0.0715)]
+      == ["p = 1", "p over 0.99", "p under 0.001", "p = 0.000", "p = 0.29", "p = 0.055", "p = 0.071"])
+
 print("provenance")
 side = tmp / "IMG_1.classified.json"
 
@@ -370,10 +499,27 @@ rr = list(wb["Rounds"].iter_rows(values_only=True))
 check("Rounds: per round and total counts equal the facts", [r[3] for r in rr[1:]] == [10, 4, 14] and rr[-1][0] == "all")
 rel = list(wb["Reliability"].iter_rows(values_only=True))
 check("Reliability: one row per type, flagged by the rule",
-      len(rel) == 7 and [r[0] for r in rel[1:] if r[7] == "yes"] == ["lead uppercuts", "rear hooks"])
+      [r[0] for r in rel[1:7]] == [report.PLURAL[c] for c in CLASSES]
+      and [r[0] for r in rel[1:7] if r[7] == "yes"] == ["lead uppercuts", "rear hooks"])
+check("Reliability: then this clip's hand check, with the agreement, chance and p-value (12 of 13, 102/169)",
+      len(rel) == 10 and all(v is None for v in rel[7]) and rel[8][3] == "agreement" and rel[8][5].startswith("p ")
+      and rel[9][1:7] == (13, 12, 0.923, 0.604, 0.0135, "no"), str(rel[7:]))
+for name, f_, want in (("a warned clip", f95, (42, 26, 0.619, 0.494, 0.0715, "yes")),
+                       ("a clip far above chance: p = 6.83e-05 is not shown as 0", f06,
+                        (41, 33, 0.805, 0.504, 6.83e-05, "no")),
+                       ("a clip with no named punch", f0, (0, 0, None, None, None, "no: no named punch"))):
+    p_ = tmp / "hc.xlsx"
+    report.write_workbook(p_, "IMG_1", [], ROUNDS, f_, bench, "x", FPS, HOW)
+    got = list(load_workbook(p_)["Reliability"].iter_rows(values_only=True))[9][1:7]
+    check(f"Reliability hand-check row for {name}: {want}", got == want, str(got))
 about = [r[0] for r in wb["About"].iter_rows(values_only=True)]
 check("About holds the summary, how the clip was cut, and the held-out videos from the reference",
       text in about and HOW in about and any("V2/V5/V9" in (a or "") for a in about))
+check("About states the warning's rule: the one-sided exact binomial test at 0.05",
+      any("one-sided exact binomial test" in (a or "") and "at 0.05" in a for a in about))
+check("About does not say a warned clip agrees 'no more often than chance' (IMG_4395: 62% vs 49%, warned)",
+      any("not significantly more often than chance" in (a or "") for a in about)
+      and not any("no more often than chance" in (a or "") for a in about))
 check("no cell is a formula", all(c.data_type != "f" for ws in wb for r in ws.iter_rows() for c in r))
 raises("a value that starts like a formula is refused at write time", lambda: report._cell("=1+1"))
 

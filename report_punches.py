@@ -11,7 +11,9 @@ About) and <clip>.summary.txt. Refuses unless the CSV is unchanged since
 classify_punches.py wrote it and was named by the classifier --classifier describes
 (the <clip>.classified.json beside it records both hashes). The summary is fixed templates filled with the
 counts; its reliability warnings come from measured numbers (see boxingvi.report),
-and it says so when nothing has been measured on your own footage.
+and it says so when nothing has been measured on your own footage. It leads with a
+warning when the hand each punch type implies matches the wrist that moved not
+significantly more often than chance (one-sided exact binomial test, 0.05).
 """
 
 from __future__ import annotations

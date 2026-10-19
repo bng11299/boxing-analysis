@@ -29,6 +29,15 @@ Fixed rules, stated in the report: a punch type the classifier names correctly
 under LOW_RECALL of the time is "named least reliably"; a count more than
 COUNT_BIAS off on the benchmark is reported as running high or low; a change in
 punch rate counts only beyond two standard errors of a Poisson count.
+
+The one label-free check on THIS clip's punch types: how often the hand a punch
+type implies is the wrist that moved, against the agreement two independent
+readings with the same proportions would reach by chance (classify.hand_agreement).
+The summary leads with a warning whenever that agreement is not above chance by a
+one-sided exact binomial test at HAND_ALPHA. The test is the only rule; there is
+no tuned threshold. Without it, a broken classify step (2026-10-12: 63% and 41%
+lead uppercuts) produced reports that were faithful to the broken input and said
+nothing about it.
 """
 
 from __future__ import annotations
@@ -43,8 +52,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .classify import class_side, read_manifest
+from .classify import class_side, hand_agreement, read_manifest
 from .data import CLASSES, HELD_OUT_VIDEOS
+from .stats import binomial_greater_p
 
 CLASSIFIED_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_interpolated_frame",
                      "lead_rear", "punch_type", "confidence", "type_hand", "hands_agree",
@@ -53,6 +63,7 @@ UNCLASSIFIED = "unclassified"
 LOW_RECALL = 0.70
 COUNT_BIAS = 0.20
 CHANCE_SE = 2.0
+HAND_ALPHA = 0.05
 MAX_ROWS = 100_000
 MAX_ROUNDS = 100
 MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -293,6 +304,19 @@ def round_of(t: float, rounds) -> "int | None":
     return None
 
 
+def hand_check(named) -> dict:
+    """Type-implied hand against the wrist that moved, over the named punches: the
+    agreement, the chance agreement for those proportions, and the one-sided exact
+    binomial p that the agreement is above chance. `warn` is the test's verdict and
+    nothing else. With no named punch there is no punch type to warn about."""
+    ag = hand_agreement([r["type_hand"] for r in named], [r["lead_rear"] for r in named])
+    if not ag["n"]:
+        return {**ag, "k": 0, "p": None, "warn": False}
+    k = sum(r["type_hand"] == r["lead_rear"] for r in named)
+    p = binomial_greater_p(k, ag["n"], ag["chance"])
+    return {**ag, "k": k, "p": p, "warn": not p < HAND_ALPHA}
+
+
 def compute_facts(rows, rounds, duration_s: float) -> dict:
     """Every number the report states, computed once."""
     which = [round_of(r["time_s"], rounds) for r in rows]
@@ -312,7 +336,8 @@ def compute_facts(rows, rounds, duration_s: float) -> dict:
             "round_minutes": minutes,
             "types": {c: sum(r["punch_type"] == c for r in named) for c in CLASSES},
             "n_type_lead": sum(r["type_hand"] == "lead" for r in named),
-            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named)}
+            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named),
+            "hand_check": hand_check(named)}
 
 
 def shares(counts: "dict[str, int]") -> "dict[str, int]":
@@ -361,6 +386,17 @@ class _Writer:
     def rate(self, x: float) -> str:
         return self.num(f"{x:.1f}" if x < 10 else f"{x:.0f}")
 
+    def pval(self, p: float) -> str:
+        """'p = 0.29'; three decimals under 0.1, so a p just above 0.05 never prints as 0.05;
+        never 'p = 0.000' or 'p = 1.00' unless exact."""
+        if p == 1:
+            return "p = " + self.num("1")
+        if p >= 0.995:
+            return "p over " + self.num("0.99")
+        if 0 < p < 0.0005:
+            return "p under " + self.num("0.001")
+        return "p = " + self.num(f"{p:.3f}" if p < 0.1 else f"{p:.2f}")
+
     def mmss(self, s: float) -> str:
         s = int(round(s))
         return self.num(f"{s // 60}:{s % 60:02d}")
@@ -382,6 +418,13 @@ def _join(items: "list[str]") -> str:
 def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tuple[str, list[str]]":
     """(text, the numbers it states). Fixed templates only."""
     w = _Writer()
+    hc = facts["hand_check"]
+    if hc["warn"]:
+        w.say(f"Warning: the punch types in this summary may be wrong for this clip. For {w.count(hc['k'])} of "
+              f"{w.count(hc['n'])} named {_punches(hc['n'])} the hand the punch type implies is the wrist that "
+              f"moved ({w.pct(hc['agree'])}), against {w.pct(hc['chance'])} expected by chance from how often each "
+              f"reading says lead hand; a one-sided exact binomial test gives {w.pval(hc['p'])}, not under "
+              f"{w.num(f'{HAND_ALPHA:.2f}')}, so that agreement is not shown to be better than chance.")
     rounds = facts["rounds"]
     nr = len(rounds)
     where = "one round" if nr == 1 else f"{w.count(nr)} rounds"
@@ -527,11 +570,24 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
         ws.append([PLURAL[t.cls], t.true, t.predicted, f"{100 * (t.count_ratio - 1):+.0f}%", round(t.recall, 3),
                    None if t.precision is None else round(t.precision, 3), round(t.f1, 3),
                    "yes" if t.recall < LOW_RECALL else ""])
+    hc = facts["hand_check"]
+    ws.append([])
+    ws.append(["this clip's check", "named punches", "type hand = wrist", "agreement", "chance agreement",
+               "p (one-sided exact binomial)", "warning in summary"])
+    ws.append(["punch type's hand vs the wrist that moved", hc["n"], hc["k"],
+               None if hc["agree"] is None else round(hc["agree"], 3),
+               None if hc["chance"] is None else round(hc["chance"], 3),
+               None if hc["p"] is None else float(f"{hc['p']:.3g}"),   # never 0 unless exact
+               "yes" if hc["warn"] else ("no: no named punch" if not hc["n"] else "no")])
     ws = wb.create_sheet("About")
     for line in (f"clip: {clip}", "", "summary:", text, "", how_cut,
                  f"'named least reliably' = named correctly under {100 * LOW_RECALL:.0f}% of the time on held-out "
                  f"benchmark footage; type counts reported when more than {100 * COUNT_BIAS:.0f}% off; a change in "
                  f"punch rate reported only beyond {CHANCE_SE:.0f} standard errors of a Poisson count.",
+                 f"A warning leads the summary when the hand each punch type implies matches the wrist that moved "
+                 f"not significantly more often than chance: a one-sided exact binomial test of the agreement "
+                 f"against the chance agreement for the two readings' proportions, at {HAND_ALPHA:.2f}. That test "
+                 f"is the only rule.",
                  f"Benchmark = BoxingVI, held-out videos {'/'.join(bench['videos'])}; skeletons from AlphaPose, "
                  "not the YOLO11-pose used on your footage. Counts are estimates."):
         ws.append([_cell(line)])

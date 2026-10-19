@@ -822,3 +822,40 @@ the figures the project plan states.
   24% crosses, 14% lead hooks, 14% rear uppercuts, 10% lead uppercuts. IMG_4406 read over
   0.39 s (41 punches), 41 punches: 41% jabs, 17% crosses, 17% rear uppercuts, 15% lead hooks,
   10% lead uppercuts. Unmeasured against labels.
+
+### Iteration 5 -- the summary leads with a warning (2026-10-19)
+Closes iteration 3's open residual. Acceptance: (1) the summary's first sentence is a fixed-template
+warning whenever type-hand vs wrist agreement is not above the chance agreement for those proportions
+(`classify.hand_agreement`) by a one-sided exact binomial test at 0.05, and that test is the only rule;
+(2) every number in it goes through `_Writer`, and the provenance check passes on every variant; (3) the
+Reliability sheet carries the agreement, chance and p; (4) the old broken inputs warn, and today's two
+clips are reported as they fall; (5) suites green in a clean clone.
+- **Build:** `stats.binomial_greater_p` (exact tail, summed in log space so n up to the row cap does not
+  overflow); `report.hand_check` in the facts; the warning template; a "this clip's check" block under
+  the per-type rows of the Reliability sheet; the rule stated on the About sheet. With no named punch
+  there is no punch type to warn about, so no warning.
+- **Test:** 186 checks. Hand-worked tails (1/16, 1/32, 56/1024, 11/1024, 0.104, 0.51), an exact
+  Fraction oracle sharing no code, 3,000 random cases against scipy (worst 3e-13, scratch); 8 of 10
+  at chance 1/2 warns (p 0.055), 9 of 10 does not (0.011); edges: no named punch, all one side agreeing
+  (100% vs 100%, p 1) and disagreeing (0 of 9, chance 0), one constant reading, one punch, southpaw.
+  13 mutants (a tuned threshold, a tuned margin, chance fixed at 1/2, the warning last, P(X > k),
+  two-sided, numbers not recorded...), all caught.
+- **Review: FIX FIRST.** B1 the About sheet said the warning fires when agreement is "no more often
+  than chance"; IMG_4395 agrees 62% against 49% and warns, so About contradicted the clip in front of
+  it. Fixed ("not significantly more often") with a test. Also taken: p under 0.1 printed to three
+  decimals (0.055 had read "p = 0.05, not under 0.05"); the sheet keeps three significant figures, so
+  6.83e-05 is not shown as 0. 188 checks; 14 mutants, all caught.
+- **Security:** no new input; the binomial validates k, n and p (negative tests); its loop is bounded
+  by MAX_ROWS; no cell is a formula. No findings.
+- **Real-world facts.** Old 0.3 confidence rule, as recorded: IMG_4395 22 of 41 against 0.482, p 0.293;
+  IMG_4406 20 of 41 against 0.509, p 0.666. **Both warn.** (0.482 is not reachable with 22 of 41
+  agreeing, nearest 0.483; it is iteration 3's figure for 23 of 42, p 0.243, which also warns.) Today
+  (`results/punches`, 2026-10-13): IMG_4395 26 of 42 (61.9%) against 49.4%, p **0.071: still warns**;
+  IMG_4406 33 of 41 (80.5%) against 50.4%, p 0.00007: no warning. Both reports regenerated; after the
+  warning, each summary is identical to the one before.
+- **Residual, accepted:** chance is plugged in from the same clip's proportions. Conditioning on both
+  margins, the exact test is one-sided Fisher; the binomial is mostly the more cautious of the two
+  but can pass a balanced table Fisher would not (n = 42, (16, 9, 6, 11): binomial 0.0500, Fisher
+  0.065). Neither real clip changes (Fisher 0.088 and 0.00005). When one reading is constant the check
+  cannot tell good from bad and always warns; over hundreds of punches a modest excess over chance
+  passes. Both follow from the test being the only rule.
