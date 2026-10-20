@@ -26,7 +26,10 @@ Look at sampled frames of every clip before it goes to the annotator. The code
 cannot catch two detector failures: a person never detected at all, and a box
 that consistently leaves out the head (torso and legs only) with no confident
 face points. Every person's box patch is blurred and face keypoints only add to
-it, so a detected head is covered; an undetected one is not.
+it, so a detected head is covered; an undetected one is not. Feed the camera's
+own file: a clip with black bars baked in (a re-export or a download) has its
+picture edge inside the frame, and close-up crops there get only the mid-frame
+floor.
 """
 
 from __future__ import annotations

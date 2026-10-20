@@ -220,10 +220,37 @@ p = faceblur.plan_frame((np.array([[100, 100, 200, 300]]), np.full((1, N_JOINTS,
                          np.zeros((1, N_JOINTS))), bw_, bh_)
 out = faceblur.apply_plan(big2, p)
 m = faceblur.blurred_mask(p, bh_, bw_)
-check("box-wide head in a 2:1 box, no face points: the whole head is under the floor (was 96%)",
+check("(the H1 and P3 crops touch the frame's bottom edge, as a close-up crop does)",
+      faceblur._touches_edge((100, 100, 200, 300), bw_, bh_))
+check("box-wide head in a 2:1 crop at the frame edge, no face points: whole head under the floor (was 96%)",
       p.mode == "box" and bool(m[100:225, 100:200].all())
       and hf(out[100:225, 100:200]) < 0.2 * hf(big2[100:225, 100:200]),
       f"{m[100:225, 100:200].mean():.1%} {p}")
+# Option (c): away from the frame edge a whole boxer's floor is the top third (plus
+# padding), not 1.5 box widths -- the guard and torso stay visible for feint labels.
+mid = person(*A)[0]  # (50, 40, 110, 210) in a 320x240 frame: touches no edge
+fx0, fy0, fx1, fy1 = faceblur.top_third_region(mid, W, H)
+check("mid-frame whole boxer: the floor stops at the top third + padding (guard and torso visible)",
+      not faceblur._touches_edge(mid, W, H)
+      and fy1 <= np.ceil(mid[1] + (mid[3] - mid[1]) * (1 / 3 + faceblur.TOP_THIRD_PAD)),
+      f"floor ends at y={fy1}, box {mid}")
+edge = mid.copy()
+edge[3] = H  # the same boxer, feet cut off by the frame's bottom edge
+ex0, ey0, ex1, ey1 = faceblur.top_third_region(edge, W, H)
+check("... and the same box touching the frame edge reaches 1.5 box widths",
+      ey1 >= edge[1] + 1.5 * (edge[2] - edge[0]), f"floor ends at y={ey1}, box {edge}")
+# Review of option (c): the model places edges to ~1 model pixel (imgsz 640), so a
+# crop's box can stop a few frame pixels short of the border. With a fixed 2 px band
+# a crop 3 px short lost the extension (70% of the head covered).
+for fw, fh, short in ((1080, 1920, 3), (1920, 1080, 3), (3840, 2160, 6), (2160, 3840, 6)):
+    hx0, hy0 = fw // 2 - 50, fh - 200 - short  # box-wide head in a 2:1 crop, bottom edge
+    crop = np.array([[hx0, hy0, hx0 + 100, fh - short]], float)
+    pc = faceblur.plan_frame((crop, np.full((1, N_JOINTS, 2), 1.0) * crop[0, :2],
+                              np.zeros((1, N_JOINTS))), fw, fh)
+    mc = faceblur.blurred_mask(pc, fh, fw)
+    head = mc[hy0:hy0 + 125, hx0:hx0 + 100]
+    check(f"{fw}x{fh}: a crop stopping {short} px short of the edge still gets the whole head",
+          bool(head.all()), f"{head.mean():.1%} {pc}")
 rng_f = np.random.default_rng(7)
 floor_bad = []
 for t in range(500):

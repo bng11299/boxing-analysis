@@ -7,8 +7,9 @@ names. Every decision below fails toward MORE blur, never less:
 - Every person YOLO11-pose finds in a frame is blurred, not only the tracked boxer
   (`pose_yolo.extract` keeps one person; this does not).
 - The BOX is the floor: every person's box patch is blurred, always -- the top
-  third of the box when it is body-shaped (at least twice as tall as wide), else
-  the whole box (a box cut off by the frame, or a deep crouch, can be mostly head).
+  third of the box when it is body-shaped (at least twice as tall as wide; 1.5 box
+  widths if it touches the frame edge, where close-up crops come from), else the
+  whole box (a crop, or a deep crouch, can be mostly head).
   Keypoints only ADD blur, never replace it: four review rounds each found a new
   way a confidently wrong skeleton moved a face patch off a head, and no list of
   guards closes that space (docs/quality-loop.md, blocker report, option 1).
@@ -85,6 +86,12 @@ LEG_SPAN = 0.4  # a knee or ankle this far (x box height) below the shoulders: a
 FACE_IN_BOX_SLACK = 0.25  # a face this far (x box size) outside its own box is not trusted
 TOP_THIRD_PAD = 0.10   # the box-only patch: top third of the box, widened by 10% a side ...
 FULL_BODY_ASPECT = 2.0  # ... when the box is at least twice as tall as wide; else all of it
+# A box this close to the frame edge may be a crop (see top_third_region): 1% of the
+# long side, ~6 model pixels at imgsz 640. A fixed 2 px was finer than the model can
+# place an edge (one model pixel is ~3 px at 1080p), and a crop 3 px short lost the
+# extension: 70% of the head covered (review of option c).
+EDGE_FRAC = 0.01
+EDGE_PX = 2            # ... and never less than this
 FACE_CELLS = 3         # mosaic cells per side of a face patch
 FULL_CELLS = 16        # cells along the longer side of a fully blurred frame
 NEIGHBOUR_S = 0.25     # a person seen within this many seconds must be found here too
@@ -234,18 +241,29 @@ def face_patch(box, kxy, kc, width, height) -> "_Face | None":
     return _Face((cx, cy), half, r, "" if r else "empty_region")
 
 
+def _touches_edge(box, width, height) -> bool:
+    """Is the (frame-clipped) box within the edge band (EDGE_FRAC of the frame's long
+    side, at least EDGE_PX) of any frame edge?"""
+    x0, y0, x1, y1 = box
+    e = max(EDGE_PX, EDGE_FRAC * max(width, height))
+    return x0 <= e or y0 <= e or x1 >= width - e or y1 >= height - e
+
+
 def top_third_region(box, width, height):
-    """The box patch, every person's floor: the top third of a whole body (or 1.5
-    box widths down from the top, if more). A box that is not body-shaped (cut off
-    by the frame, or a deep crouch) may be mostly head, and its top third misses the
-    chin, so the WHOLE box is blurred instead."""
+    """The box patch, every person's floor: the top third of a whole body. A box that
+    is not body-shaped (a deep crouch, or a crop) may be mostly head, and its top
+    third misses the chin, so the WHOLE box is blurred instead. A body-shaped box
+    touching the frame edge may be a close-up crop: 1.5 box widths from the top."""
     x0, y0, x1, y1 = box
     bw, bh = x1 - x0, y1 - y0
-    # Never less than 1.5 box widths down from the top, either: a head is no wider
-    # than its box and ~1.25x as tall as wide, so a head-to-chest crop that passes the
-    # 2:1 test still has its chin inside (review P3: 96% covered with a third alone;
-    # H1: one box width still left a chin strip of a box-wide head at exactly 2:1).
-    top = max(bh / 3, 1.5 * bw)
+    top = bh / 3
+    if _touches_edge(box, width, height):
+        # A head is no wider than its box and ~1.25x as tall as wide, so a
+        # head-to-chest crop that passes the 2:1 test still has its chin inside
+        # 1.5 widths (review P3 96%, H1 96% with a third alone). Only at the frame
+        # edge, where real close-up crops come from: on a whole boxer in guard
+        # (~0.4x as wide as tall) it would mosaic head to hips (Brendan, option c).
+        top = max(top, 1.5 * bw)
     bottom = y0 + top + TOP_THIRD_PAD * bh if bh >= FULL_BODY_ASPECT * bw else y1
     return _clip_region(x0 - TOP_THIRD_PAD * bw, y0 - TOP_THIRD_PAD * bh,
                         x1 + TOP_THIRD_PAD * bw, bottom, width, height)
@@ -656,7 +674,8 @@ def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
             "params": {"face_min_conf": FACE_MIN_CONF, "pad": PAD, "face_cells": FACE_CELLS,
                        "full_cells": FULL_CELLS, "neighbour_frames": window,
                        "match_iou": MATCH_IOU, "match_top": MATCH_TOP,
-                       "box_floor": True, "expect_persons": expect_persons},
+                       "box_floor": True, "edge_frac": EDGE_FRAC,
+                       "expect_persons": expect_persons},
             "audio": "none", "metadata": "stripped",
         }
         tmp_report.write_text(json.dumps(report, indent=1), encoding="utf-8")
