@@ -11,8 +11,6 @@ Never unpickles: neither function has an `allow_pickle` path at all.
 
 from __future__ import annotations
 
-import tokenize
-
 import numpy as np
 
 # The most a header may take: 8 bytes of magic and version, a 4-byte length, and
@@ -47,21 +45,28 @@ def read_header(stream, what: str):
             return np.lib.format.read_array_header_2_0(capped)
         # 3.0 exists only for structured dtypes with non-latin-1 names, refused anyway
         raise ValueError(f"{what} uses .npy format {version}, not 1.0 or 2.0")
-    except (tokenize.TokenError, SyntaxError) as e:  # numpy re-tokenizes a header it can't eval
+    except ValueError:
+        raise
+    except Exception as e:
+        # numpy's header parser lets other errors out of a malformed header: TokenError
+        # (unterminated, or 300 nested parentheses), IndexError (`'descr': ()`),
+        # RecursionError (`1+1+...+1`) and MemoryError (a parser stack overflow on
+        # ~9,000 minus signs -- nothing large is allocated). The header is capped at
+        # NPY_HEADER_MAX bytes, so each is a malformed file, not the machine failing.
         raise ValueError(f"{what} has an unparseable .npy header") from e
 
 
 def read_data(stream, shape, fortran: bool, dtype, what: str) -> np.ndarray:
     """Read exactly the bytes the (already validated) header promises, straight into
-    one buffer of that size. Short data is refused; trailing bytes are ignored, as
-    `np.load` ignores them."""
+    one buffer of that size (`readinto`: a plain file fills it with no second copy; a
+    zip member goes through at most one READ_CHUNK of its own). Short data is refused;
+    trailing bytes are ignored, as `np.load` ignores them."""
     arr = np.empty(shape[::-1] if fortran else shape, dtype=dtype)
-    buf = arr.reshape(-1).view(np.uint8)  # C-contiguous, so a view, not a copy
+    view = memoryview(arr.reshape(-1).view(np.uint8))  # C-contiguous: a view, not a copy
     pos = 0
-    while pos < buf.size:
-        chunk = stream.read(min(READ_CHUNK, buf.size - pos))
-        if not chunk:
-            raise ValueError(f"{what} is truncated ({pos} of {buf.size} bytes)")
-        buf[pos:pos + len(chunk)] = np.frombuffer(chunk, np.uint8)
-        pos += len(chunk)
+    while pos < len(view):
+        n = stream.readinto(view[pos:pos + READ_CHUNK])
+        if not n:
+            raise ValueError(f"{what} is truncated ({pos} of {len(view)} bytes)")
+        pos += n
     return arr.T if fortran else arr

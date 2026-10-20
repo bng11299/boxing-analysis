@@ -1283,11 +1283,19 @@ with tempfile.TemporaryDirectory() as _d:
     _v1.write_bytes(b"\x93NUMPY\x02\x00" + struct.pack("<I", 0xFFFFFFF0) + b" " * 100)
     refused_small("a header claiming a 4 GB length is read through the byte cap",
                   lambda: _read(_v1), "EOF: reading array header")
-    _h = b"{'descr': '<f8', 'fortran_order': False, 'shape': " + b"(" * 300 + b"}"
-    _h += b" " * (63 - (10 + len(_h)) % 64) + b"\n"
-    _v1.write_bytes(b"\x93NUMPY\x01\x00" + struct.pack("<H", len(_h)) + _h)
-    refuses("an unparseable header (np.load: tokenize.TokenError) is a ValueError",
-            lambda: _read(_v1), "unparseable .npy header")
+    # Malformed headers on which numpy's parser raises something other than
+    # ValueError; each must still be the loader's ValueError.
+    for _body, _np_raises in ((b"'shape': " + b"(" * 300, "tokenize.TokenError"),
+                              (b"'shape': ()", "IndexError, from 'descr': ()"),
+                              (b"'shape': " + b"+".join([b"1"] * 4000) + b",",
+                               "RecursionError"),
+                              (b"'shape': " + b"-" * 9000 + b"1,", "MemoryError")):
+        _descr = b"()" if _np_raises.startswith("IndexError") else b"'<f8'"
+        _h = b"{'descr': " + _descr + b", 'fortran_order': False, " + _body + b"}"
+        _h += b" " * (63 - (10 + len(_h)) % 64) + b"\n"
+        _v1.write_bytes(b"\x93NUMPY\x01\x00" + struct.pack("<H", len(_h)) + _h)
+        refuses(f"an unparseable header (numpy: {_np_raises}) is a ValueError",
+                lambda: _read(_v1), "unparseable .npy header")
     _v1.write_bytes(b"not a numpy file at all, just some bytes")
     refuses("a file without the .npy magic is a ValueError",
             lambda: _read(_v1), "magic string")
@@ -1361,10 +1369,12 @@ with tempfile.TemporaryDirectory() as _d:
         check(f"loads {_what} identical to np.load",
               _got.shape == _ref.shape and _got.dtype == _ref.dtype
               and np.array_equal(_got, _ref) and np.array_equal(_got, _arr))
-    np.save(_v1, _full)
+    _big = _rng.random((1000, MAX_FRAMES, N_JOINTS, 2))  # 6.8 MB; V1 is 1,866 clips
+    np.save(_v1, _big)
     _mb = peak_mb(lambda: _read(_v1))
     check("a real-shaped load allocates the array once, not twice",
-          _mb < 1.5 * _full.nbytes / 1e6 + 0.5, f"peak {_mb:.2f} MB for {_full.nbytes / 1e6:.2f} MB")
+          _mb < 1.25 * _big.nbytes / 1e6, f"peak {_mb:.2f} MB for {_big.nbytes / 1e6:.2f} MB")
+    np.save(_v1, _full)
     with open(_v1, "ab") as _fh:
         _fh.write(b"trailing")
     check("trailing bytes are ignored, as np.load ignores them",

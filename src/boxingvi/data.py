@@ -181,6 +181,11 @@ def load_corpus_npy(path: Path, layouts: "tuple[str, ...]") -> np.ndarray:
     bytes no more than the file holds after its header -- and only then is one
     buffer of exactly that size filled. A file that cannot be opened raises OSError;
     anything wrong inside it, ValueError.
+
+    Any float of at most 8 bytes is accepted (float16 too: it is a coordinate, just
+    coarse). The byte order is the file's, as with `np.load`; every consumer converts
+    (`to_arrays`, `_with_validity_channel`, `load_v6_track`), which is what makes the
+    downstream arrays native.
     """
     p = Path(path)
     with open(p, "rb") as fh:
