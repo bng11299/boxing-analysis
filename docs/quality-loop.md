@@ -953,3 +953,26 @@ no remaining hole, but they only sample the failure shapes we already thought of
 3. **Another review round with a raised cap** (`--max-iterations 5`), specifically on
    P3 and on sampled frames from the first real sparring clip. That is real data with
    two boxers, which no test here has.
+
+### Real check -- own footage only, final code (2026-10-19)
+
+Run with `--allow-outside-participant-root` (own footage, scratchpad output), YOLO11m-pose
+on CPU, weights pinned by sha256, `YOLO_OFFLINE=1`.
+
+| Clip | Frames | Face patch | Box patch | Whole frame | People per frame |
+|---|---|---|---|---|---|
+| IMG_4395 | 2659 | 1828 | 117 | 714 (26.9%): 603 missing vs neighbours, 52 nobody, 33 overlap, 26 ambiguous | 0:52, 1:2511, 2:85, 3:10, 4:1 |
+| IMG_4406 | 2353 | 1877 | 90 | 386 (16.4%): 376 missing vs neighbours, 10 overlap | 1:2265, 2:88 |
+
+Twelve frames were extracted from the blurred output into `results/face-blur-check/`
+(gitignored): per clip, the three fastest-motion frames (measured on the original in
+memory), one box-patch frame and one whole-frame blur, plus the two fastest
+face-patch frames of IMG_4395. Looked at one by one: **no face is recognisable in any
+of them.** Patch frames show a 3x3 mosaic covering the head with a wide margin
+(shoulders and guard included). Whole-frame blurs leave a close-up face as at most a
+few flat 120-px cells. Pending Brendan's own look.
+
+Observed costs, not leaks: the solo clips have 2-4 "people" in 96 and 88 frames (false
+detections at DET_CONF 0.10, e.g. furniture at the frame edge). Each one blurs about
++/-15 frames whole through the neighbour rule. Patches are large (about 3 head widths),
+so the guard is mosaicked whenever the face is.
