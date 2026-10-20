@@ -890,6 +890,9 @@ with `-`.
 - **All suites:** analyse 96, pipeline 260, ingest 109, classify 202, report 130, hands 38,
   labels 50, env 36.
 
+- **Gate reproduce:** clean clone of `7710557`: analyse 96, pipeline 260, ingest 109, classify
+  202, report 130, hands 38, labels 50, env 36 -- the working tree's numbers.
+
 ### Residual risk, accepted
 - `--skip-ingest` matches the pose model by its weights' file name; the pose file records no
   hash. A same-named, different checkpoint passes.
