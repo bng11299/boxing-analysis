@@ -664,6 +664,23 @@ stray = punches.read_text(encoding="utf-8") + f"600,{600 / fps:.3f},left,9.000,n
 raises("a CSV row that is not a speed peak of that hand in this pose is refused, not classified",
        lambda: classify_punches.main(args8))
 find_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o")])
+# A row above the threshold but on the rising slope, not at the peak: the per-hand finder could never report it.
+p8 = tmp / "o" / "IMG_8888.punches.csv"
+good8 = p8.read_text(encoding="utf-8")
+r8 = list(csv.DictReader(p8.open(encoding="utf-8")))[1]
+tr8 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_8888.pose.npz").to_track(usable_only=False), 3)
+sg8 = punchfind.wrist_signal(tr8, "relative")
+h8, k8 = ("left", "right").index(r8["hand"]), int(np.flatnonzero(tr8.frame_ids == int(r8["frame"]))[0])
+slope = [k for k in range(k8 - 10, k8) if sg8[k, h8] >= 1.0 and sg8[k + 1, h8] > sg8[k, h8]]
+check("control: the second punch's speed is above the threshold and still rising before its peak", bool(slope))
+f8 = int(tr8.frame_ids[slope[-1]])
+lines8 = good8.splitlines()
+lines8[2] = f"{f8},{f8 / fps:.3f},{r8['hand']},{r8['peak_speed_bl_per_s']},{r8['peak_on_interpolated_frame']}"
+p8.write_text("\n".join(lines8) + "\n", encoding="utf-8")
+raises("a CSV row above the threshold but on the rising slope (not a local peak of that hand) is refused",
+       lambda: classify_punches.main(args8))
+p8.write_text(good8, encoding="utf-8")
+check("control: the untouched CSV is accepted", classify_punches.main(args8) == 0)
 radial = tmp / "radial.json"
 radial.write_text(json.dumps({"chosen": {"variant": "radial", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
 raises("a finder rule with another wrist-speed variant than the window's is refused",
@@ -877,9 +894,10 @@ classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-pun
 s50 = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
 check("point labels: the finder found 2 of the 2 punches, and 2 of its 3 detections were real",
       s50["finder"] == {"labelled_punches": 2, "detections": 3, "matched": 2, "recall": 1.0, "precision": 2 / 3}
-      and s50["point_labels"] == 3 and s50["unclear_means"] == "not-a-punch", str(s50["finder"]))
+      and s50["point_labels"] == 2 and s50["unclear_means"] == "not-a-punch", str(s50["finder"]))
 check("the framing mark that drew a detection is reported, with what the classifier called it",
-      s50["framing"]["marks"] == 1 and s50["framing"]["flagged_as_punches"] == 1
+      s50["framing"]["marks"] == 1 and s50["framing"]["flagged_as_punches_at_least"] == 1
+      and s50["framing"]["flagged_as_punches_at_most"] == 1
       and sum(s50["framing"]["named_as"].values()) == 1
       and set(s50["framing"]["named_as"]) <= set(CLASSES) | {"unclassified"}, str(s50["framing"]))
 check("point labels have no start and end, so the 'from labelled frames' reading is empty, and no length is claimed",
@@ -908,6 +926,35 @@ classify_punches.main(args_ph + ["--labels", str(lab50)])
 s50p = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
 check("with 'unclear' as a punch (the default), all 3 are punches and there is no framing report",
       s50p["finder"]["labelled_punches"] == 3 and s50p["finder"]["matched"] == 3 and "framing" not in s50p, str(s50p["finder"]))
+# Mixed labels: a drag 15 frames long, a click, and a framing click. The length is the drag's alone.
+f0 = int(ph_rows[0]["frame"])
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": f0 - 5, "end": f0 + 10, "label": "jab"}, {"start": clicks[1][0], "end": clicks[1][0], "label": "cross"},
+    {"start": clicks[2][0], "end": clicks[2][0], "label": "unclear"}]}), encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+smix = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("mixed labels: the labelled length is the drags' median (15 frames), the clicks are not zero-length punches",
+      smix["labelled_length_s_median"] is not None and abs(smix["labelled_length_s_median"] - 15 / fps) < 1e-9
+      and smix["point_labels"] == 1, str(smix["labelled_length_s_median"]))
+# Every label a framing mark: nothing to score as a punch, and no crash.
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": f_, "end": f_ + 10, "label": "unclear"} for f_, _ in clicks]}), encoding="utf-8")
+check("every label a framing mark: scored without a crash",
+      classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"]) == 0)
+sall = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("... with no punch to find, no length claimed, and all 3 marks reported",
+      sall["finder"]["labelled_punches"] == 0 and sall["finder"]["recall"] is None
+      and sall["labelled_length_s_median"] is None and sall["framing"]["marks"] == 3, str(sall))
+# A framing click beside the lone jab's click: the jab takes the one detection there, so the mark is 0 to 1.
+f2 = int(ph_rows[2]["frame"])
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": f2 + 2, "end": f2 + 2, "label": "jab"}, {"start": f2 + 4, "end": f2 + 4, "label": "unclear"}]}),
+    encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+snear = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))["framing"]
+check("a framing mark whose only detection a punch took is reported as 0 to 1, with nothing named",
+      snear["flagged_as_punches_at_least"] == 0 and snear["flagged_as_punches_at_most"] == 1
+      and snear["named_as"] == {}, str(snear))
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

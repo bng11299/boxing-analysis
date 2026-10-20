@@ -130,16 +130,21 @@ def main(argv=None) -> int:
         # Framing marks, when 'unclear' means not a punch, are scored apart: a detection on one is a false positive.
         not_punch = [s_ for s_ in labelled if a.unclear == "not-a-punch" and s_.label == UNCLEAR_LABEL]
         spans = punchfind.for_matching([s_ for s_ in labelled if s_ not in not_punch], tol, point_tol)
-        n_points = sum(s_.start == s_.end for s_ in labelled)
+        n_points = sum(s_.start == s_.end for s_ in labelled if s_ not in not_punch)   # among the punches
         s = punchfind.score(det, spans, tol, whole)
         result = {"clip": clip, "rule": rule, "per_hand": a.per_hand, "tolerance_frames": tol,
                   "point_labels": n_points, "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
                   "score": s}
         if not_punch:
+            # Two counts, because punches are matched first and may take a detection a framing mark
+            # could also have had: a LOWER bound (marks matched to detections no punch took) and an
+            # UPPER bound (marks with any detection within tolerance). The truth lies between.
+            fspans = punchfind.for_matching(not_punch, tol, point_tol)
             matched = {di for _, di in punchfind.match(det, spans, tol)}
             rest = [i for i in range(len(det)) if i not in matched]
-            on_framing = punchfind.match(det[rest], punchfind.for_matching(not_punch, tol, point_tol), tol)
-            result["framing"] = {"marks": len(not_punch), "flagged_as_punches": len(on_framing),
+            on_framing = punchfind.match(det[rest], fspans, tol)
+            result["framing"] = {"marks": len(not_punch), "flagged_as_punches_at_least": len(on_framing),
+                                 "flagged_as_punches_at_most": len(punchfind.match(det, fspans, tol)),
                                  "frames": [int(det[rest][di]) for _, di in on_framing]}
         min_shift = int(round(MIN_SHIFT_S * pose.fps))
         if len(pose) >= 2 * min_shift + 2:
@@ -153,8 +158,9 @@ def main(argv=None) -> int:
               f"recall {s['recall']:.3f} F1 {s['f1']:.3f}; {floor}")
         if "framing" in result:
             fr = result["framing"]
-            print(f"  {fr['flagged_as_punches']} of {fr['marks']} framing marks were flagged as punches "
-                  "(counted as false positives above)")
+            lo_, hi_ = fr["flagged_as_punches_at_least"], fr["flagged_as_punches_at_most"]
+            print(f"  {lo_ if lo_ == hi_ else f'{lo_} to {hi_}'} of {fr['marks']} framing marks were flagged as "
+                  "punches (detections no punch took count as false positives above)")
         (a.out_dir / f"{clip}.score.json").write_text(json.dumps(result, indent=1, allow_nan=False),
                                                       encoding="utf-8")
     return 0

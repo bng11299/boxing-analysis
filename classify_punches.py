@@ -247,7 +247,8 @@ def main(argv=None) -> int:
         # label is either an unnamed punch or, with --unclear not-a-punch, framing or a feint.
         framing = [x for x in labelled if a.unclear == "not-a-punch" and x.label == UNCLEAR_LABEL]
         spans = [x for x in labelled if x not in framing]
-        n_points = sum(x.start == x.end for x in labelled)
+        n_points = sum(x.start == x.end for x in spans)       # point labels among the punches
+        drags = [x for x in spans if x.start != x.end]
         named = [(j, x) for j, x in enumerate(spans) if x.label != UNCLEAR_LABEL]
         pairs = punchfind.match([d["frame"] for d in rows], punchfind.for_matching(spans, tol, point_tol), tol)
         yt, yp, matched_unclassified = [], [], 0
@@ -260,13 +261,14 @@ def main(argv=None) -> int:
             yt.append(spans[si].label)
             yp.append(int(np.argmax(pred[di])))
         # Detections that matched no punch but sit on a framing mark: what the classifier called them.
-        on_framing = []
-        if framing:
+        on_framing, framing_at_most = [], 0
+        if framing:   # a lower and an upper bound, as in find_punches.py: punches are matched first
+            fspans = punchfind.for_matching(framing, tol, point_tol)
             taken = {di for _, di in pairs}
             rest = [k for k in range(len(rows)) if k not in taken]
-            for _, k in punchfind.match([rows[r]["frame"] for r in rest],
-                                        punchfind.for_matching(framing, tol, point_tol), tol):
+            for _, k in punchfind.match([rows[r]["frame"] for r in rest], fspans, tol):
                 on_framing.append(rest[k])
+            framing_at_most = len(punchfind.match([d["frame"] for d in rows], fspans, tol))
 
         def scored(windows) -> "tuple[dict, int]":
             keep = [k for k, w_ in enumerate(windows) if w_.keypoints is not None]
@@ -309,11 +311,12 @@ def main(argv=None) -> int:
                   "labelled_punch_from_labelled_frames": label_scores,
                   "labelled_punch_from_labelled_frames_unclassifiable": label_unc,
                   "window_iou_with_labels": {"n": len(ious), "mean": float(np.mean(ious)) if ious else None},
-                  "labelled_length_s_median": (float(np.median([(x.end - x.start) / pose.fps for x in spans]))
-                                               if n_points < len(labelled) else None)}
+                  "labelled_length_s_median": (float(np.median([(x.end - x.start) / pose.fps for x in drags]))
+                                               if drags else None)}
         if framing:
             types = [CLASSES[int(np.argmax(pred[k]))] if k in pred else "unclassified" for k in on_framing]
-            result["framing"] = {"marks": len(framing), "flagged_as_punches": len(on_framing),
+            result["framing"] = {"marks": len(framing), "flagged_as_punches_at_least": len(on_framing),
+                                 "flagged_as_punches_at_most": framing_at_most,
                                  "named_as": {t: types.count(t) for t in sorted(set(types))}}
         print(f"  vs labels: the finder found {found} of {len(spans)} labelled punches, and {found} of its "
               f"{len(rows)} detections were real" + (f" ({n_points} point labels, matched within +-{point_tol} frames)"
@@ -327,7 +330,9 @@ def main(argv=None) -> int:
                       f"hand right {sc['side_accuracy']:.3f}")
         if framing:
             fr = result["framing"]
-            print(f"  framing marks: {fr['flagged_as_punches']} of {fr['marks']} were flagged as punches, named "
+            lo_, hi_ = fr["flagged_as_punches_at_least"], fr["flagged_as_punches_at_most"]
+            print(f"  framing marks: {lo_ if lo_ == hi_ else f'{lo_} to {hi_}'} of {fr['marks']} were flagged as "
+                  "punches; those no punch took were named "
                   + (", ".join(f"{t} {n}" for t, n in fr["named_as"].items()) or "nothing"))
         if result["labelled_length_s_median"] is not None:
             print(f"  the clip's window is {cut.length_s:.2f} s; your labelled punches are a median "

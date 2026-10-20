@@ -235,7 +235,7 @@ def detect(track: Track, signal: np.ndarray, threshold: float,
 # peak, which can sit anywhere in the same punch, so a point label matches a detection
 # within half a punch. Half of 0.4 s: the training clips' median punch is 0.375 s, and the
 # per-clip windows on Brendan's clips are 0.39 and 0.41 s. Chosen 2026-10-19 after the
-# scores at 0.1 s and 0.2 s had been seen on those clips; both are reported.
+# scores at 0.1 s and 0.2 s had been seen on those clips; both are in docs/quality-loop.md.
 POINT_TOL_S = 0.2
 
 

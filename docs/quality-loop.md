@@ -764,7 +764,8 @@ per-hand finder option, measured against the pooled rule on own footage AND V6; 
   unchanged). classify_punches now accepts a row that is its hand's speed peak above the rule's
   threshold, rather than requiring that hand to be the faster one.
 - **The 0.2 s point tolerance was chosen after seeing the scores at 0.1 s and 0.2 s**; both are
-  reported. A click marks one instant in a ~0.4 s punch, and the finder reports the speed peak.
+  below (iteration 2). A click marks one instant in a ~0.4 s punch, and the finder reports the speed
+  peak.
 - **Test:** hands 51, classify 211; 8 mutants, one survivor (a click read as a one-frame span)
   given a fixture: a click on a still frame within 0.2 s of a punch's peak.
 - **Real-world facts, own footage (orthodox; framing as not-a-punch; point rule):**
@@ -783,4 +784,36 @@ per-hand finder option, measured against the pooled rule on own footage AND V6; 
   **Pooled stays the default.** A cross-hand duplicate rule would be a new parameter; it must be
   tuned on data that is not these clips.
 - **Framing:** 2 of 7 framing marks drew a detection, named cross and jab, as Brendan expected; most
-  false positives come from elsewhere (6 and 7 on the pooled finder, 1 each on framing).
+  false positives come from elsewhere (6 and 7 on the pooled finder, 1 of each on framing). (This
+  count was only a lower bound when written; see iteration 2. Here it is exact.)
+
+### Iteration 2 (review: FIX FIRST, 3 blocking)
+- **B1, framing count was a lower bound shown as a count.** Punches are matched first and may take
+  the one detection a framing mark also had. Both scripts now report `flagged_as_punches_at_least`
+  (marks on detections no punch took) and `_at_most` (marks with any detection in reach), and print
+  "a to b" when they differ. On Brendan's clips they agree everywhere (pooled 1/1 and 1/1, per hand
+  1/1 and 1/1), so "2 of 7" stands as exact.
+- **B2, `labelled_length_s_median` counted clicks as zero-length punches** and was NaN (a crash in
+  `json.dumps(allow_nan=False)`) when every label was framing. Now the median of start-to-end
+  labels only, None when there are none; `point_labels` counts punch labels only, in both scripts.
+- **B3, the 0.1 s scores were claimed and absent.** Re-scored (framing as not-a-punch, pooled):
+
+  | | IMG_4406 +-0.1 s | IMG_4406 +-0.2 s | IMG_4395 +-0.1 s | IMG_4395 +-0.2 s |
+  |---|---|---|---|---|
+  | punches found (recall) | 28/47 0.596 | 35/47 0.745 | 27/40 0.675 | 35/40 0.875 |
+  | detections real (precision) | 28/41 0.683 | 35/41 0.854 | 27/42 0.643 | 35/42 0.833 |
+  | type right on matched (floor) | 0.821 of 28 (0.321) | 0.886 of 35 (0.343) | 0.667 of 27 (0.444) | 0.600 of 35 (0.371) |
+  | framing marks flagged | 1 of 5 | 1 of 5 | 0 of 2 | 1 of 2 |
+
+  The +-0.2 s column reproduces iteration 1 exactly. The wider tolerance is generous by design: it
+  credits a detection anywhere in the punch a click sits in, so it is an upper reading of recall
+  for point labels; the 0.1 s column is the strict one. Type accuracy barely moves (0.82 to 0.89,
+  0.67 to 0.60): the extra matches are not easier punches.
+- **Also from the review:** a negative test for the provenance check's local-maximum clause (a row
+  above the threshold on the rising slope is refused); a control that `min_gap_s=0` sees more peaks
+  in a fast combination than 0.4 s does.
+- **Test:** hands 53, classify 218; 6 new mutants, 6 killed (one survivor on the first run, the
+  classifier's upper bound, given a fixture where the bounds differ).
+- **Deferred (not blocking):** recording `per_hand` in the punches CSV / classified sidecar (a CSV
+  format change that the output branch reads); a hand-specific local peak for the point perfect-
+  finder reading.

@@ -281,6 +281,8 @@ check("per hand, each hand's punch is found inside its own punch (left 3.0-3.25 
 check("per hand, the gap still applies within a hand: one punch per hand here, not two",
       list(punchfind.detect(combo, csig, 1.0, 0.4, per_hand=True)[1]).count(0) == 1)
 check("default is the pooled rule (V6-tuned)", np.array_equal(punchfind.detect(combo, csig, 1.0, 0.4)[0], pf))
+check("control: with no minimum gap the pooled finder sees more than one peak in the combination",
+      len(punchfind.detect(combo, csig, 1.0, 0.0)[0]) > len(pf))
 
 print("find_punches: point labels and framing marks")
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
@@ -298,9 +300,20 @@ sf = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))
 check("'unclear' as framing: 2 punches to find, the detection on the framing mark is a false positive",
       sf["score"]["n_labelled"] == 2 and sf["score"]["tp"] == 2 and sf["score"]["n_detected"] == 3
       and abs(sf["score"]["precision"] - 2 / 3) < 1e-12, str(sf["score"]))
-check("... and the framing mark is reported as flagged, at its frame",
-      sf["framing"]["marks"] == 1 and sf["framing"]["flagged_as_punches"] == 1
+check("... and the framing mark is reported as flagged, at its frame (both bounds 1: no punch near it)",
+      sf["framing"]["marks"] == 1 and sf["framing"]["flagged_as_punches_at_least"] == 1
+      and sf["framing"]["flagged_as_punches_at_most"] == 1 and sf["point_labels"] == 2
       and abs(sf["framing"]["frames"][0] - 9.0 * fps) < 0.3 * fps, str(sf["framing"]))
+# A framing mark next to a punch: the punch takes the one detection there, so the mark's count is 0 to 1.
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": int(3.08 * fps), "end": int(3.08 * fps), "label": "jab"},
+    {"start": int(3.2 * fps), "end": int(3.2 * fps), "label": "unclear"},    # framing, inside the same detection's reach
+    {"start": int(9.1 * fps), "end": int(9.1 * fps), "label": "unclear"},
+    {"start": int(14.05 * fps), "end": int(14.05 * fps), "label": "cross"}]}), encoding="utf-8")
+find_punches.main(base + ["--unclear", "not-a-punch"])
+sb = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))["framing"]
+check("a framing mark whose only detection a punch took: reported as 1 to 2 of 2, not as a count of 1",
+      sb["marks"] == 2 and sb["flagged_as_punches_at_least"] == 1 and sb["flagged_as_punches_at_most"] == 2, str(sb))
 find_punches.main(base + ["--per-hand"])
 check("the per-hand choice is recorded with the score",
       json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))["per_hand"] is True)
