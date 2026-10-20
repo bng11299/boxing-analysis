@@ -201,15 +201,21 @@ def publish(staging: Path, out_dir: Path, clip: str, produced: "list[str]", keep
     is undone: --out-dir is never left holding two runs mixed."""
     aside = staging / "previous"
     aside.mkdir()
-    names = [f"{clip}.{suffix}" for suffix, _ in OUTPUTS if suffix not in keep]
-    moves = ([(out_dir / n, aside / n) for n in names if (out_dir / n).exists() or (out_dir / n).is_symlink()]
+    old = [out_dir / f"{clip}.{suffix}" for suffix, _ in OUTPUTS if suffix not in keep]
+    old = [p for p in old if p.exists() or p.is_symlink()]
+    for p in old:
+        if not (p.is_file() or p.is_symlink()):   # a folder with an output's name is not ours to move
+            raise PublishFailed(f"publish: {p} is not a file; move it out of the way and run again",
+                                "it was not changed", keep=False)
+    moves = ([(p, aside / p.name) for p in old]
              + [(staging / f"{clip}.{suffix}", out_dir / f"{clip}.{suffix}") for suffix in produced])
     done = []
     for src, dst in moves:
         try:
             os.replace(src, dst)
-        except OSError as e:
-            why = f"could not move {src.name} ({e.strerror or e}): is it open in another program?"
+        except BaseException as e:   # Ctrl+C too: never leave the old set in a folder about to be deleted
+            why = (f"could not move {src.name} ({e.strerror or e}): is it open in another program?"
+                   if isinstance(e, OSError) else f"interrupted ({type(e).__name__})")
             try:
                 for s_, d_ in reversed(done):
                     os.replace(d_, s_)
@@ -217,6 +223,8 @@ def publish(staging: Path, out_dir: Path, clip: str, produced: "list[str]", keep
                 raise PublishFailed(f"publish: {why} Undoing the moves failed too",
                                     f"it holds part of this run and part of the previous one; the rest of both "
                                     f"is in {staging}, which is kept", keep=True) from None
+            if not isinstance(e, OSError):
+                raise
             raise PublishFailed(f"publish: {why} Close it and run again", "it was not changed", keep=False) from None
         done.append((src, dst))
 
@@ -328,10 +336,13 @@ def main(argv=None, predict=None) -> int:
         keep_staging = getattr(e, "keep", False)
         if fresh_pose and not keep_staging:
             # The pose model's output passed its check and may have taken hours: keep it, alone.
-            for p in staging.iterdir():
-                if p.name != f"{clip}.pose.npz":
-                    shutil.rmtree(p) if p.is_dir() else p.unlink()
             keep_staging = True
+            try:
+                for p in staging.iterdir():
+                    if p.name != f"{clip}.pose.npz":
+                        shutil.rmtree(p) if p.is_dir() else p.unlink()
+            except OSError as e2:
+                print(f"(could not tidy {staging}: {e2}; everything in it is kept)", file=sys.stderr)
             print(f"This run's pose is kept: {staged('pose.npz')}. To reuse it, move it into {out_dir} "
                   "and run again with --skip-ingest.", file=sys.stderr)
         return 1

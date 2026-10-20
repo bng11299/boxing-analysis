@@ -481,13 +481,15 @@ if os.name == "nt":   # Windows refuses to rename a file another program holds o
     check("a report held open elsewhere: exit 1, named, and out-dir exactly as it was",
           rc == 1 and "could not move IMG_9001.report.xlsx" in se and "was not changed" in se
           and state(out) == before and not any(p.name.startswith(".") for p in out.iterdir()), se[-500:])
+else:
+    print("  SKIP  a report held open elsewhere (only Windows refuses to rename an open file)")
 real_replace = os.replace
 
 
-def replace_failing(on, also_undo=False):
+def replace_failing(on, also_undo=False, exc=PermissionError(13, "Access is denied")):
     def rep_(src, dst):
         if Path(src).name == on and Path(src).parent.name.startswith(".IMG_9001."):   # moving this run's file in
-            raise PermissionError(13, "Access is denied")
+            raise exc
         if also_undo and Path(src).parent.name == "previous":   # ... and putting the old set back
             raise PermissionError(13, "Access is denied")
         return real_replace(src, dst)
@@ -510,6 +512,43 @@ for k in kept:
 rc, _, _ = run(args(out, "--skip-ingest"))
 check("and the next run publishes a whole set again", rc == 0 and all((out / f"IMG_9001.{n}").is_file()
                                                                       for n in NAMES))
+before = state(out)
+interrupted = False
+with patched(os, "replace", replace_failing("IMG_9001.summary.txt", exc=KeyboardInterrupt())):
+    try:
+        run(args(out, "--skip-ingest"))
+    except KeyboardInterrupt:
+        interrupted = True
+check("Ctrl+C half way through publishing: the moves are undone, then the interrupt goes on",
+      interrupted and state(out) == before and not any(p.name.startswith(".") for p in out.iterdir()))
+(out / "IMG_9001.report.xlsx").rename(tmp / "report.keep")
+(out / "IMG_9001.report.xlsx").mkdir()
+(out / "IMG_9001.report.xlsx" / "mine.txt").write_text("not an output", encoding="utf-8")
+before = state(out)
+rc, _, se = run(args(out, "--skip-ingest"))
+check("a folder with an output's name is refused, not moved and deleted: out-dir exactly as it was",
+      rc == 1 and "is not a file" in se and state(out) == before
+      and not any(p.name.startswith(".") for p in out.iterdir()), se[-500:])
+shutil.rmtree(out / "IMG_9001.report.xlsx")
+(tmp / "report.keep").rename(out / "IMG_9001.report.xlsx")
+real_unlink = Path.unlink
+
+
+def unlink_failing(self, *a_, **k):
+    if self.name == "IMG_9001.punches.csv":
+        raise PermissionError(13, "Access is denied")
+    return real_unlink(self, *a_, **k)
+
+
+before = top(out)
+with patched(classify_punches, "main", boom), patched(Path, "unlink", unlink_failing):
+    rc, _, se = run(args(out))   # a full run failing after ingest, whose tidy-up then fails
+kept = [p for p in out.iterdir() if p.name.startswith(".")]
+check("if tidying the kept pose's folder fails, the pose is still kept and the run ends with a message",
+      rc == 1 and len(kept) == 1 and (kept[0] / "IMG_9001.pose.npz").is_file() and "could not tidy" in se
+      and top(out) == before, se[-500:])
+for k in kept:
+    shutil.rmtree(k)
 
 print("the clip name contract with the stages")
 check("every stage names outputs from the text before the first dot, so the clip name has none",
