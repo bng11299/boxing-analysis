@@ -976,3 +976,29 @@ Observed costs, not leaks: the solo clips have 2-4 "people" in 96 and 88 frames 
 detections at DET_CONF 0.10, e.g. furniture at the frame edge). Each one blurs about
 +/-15 frames whole through the neighbour rule. Patches are large (about 3 head widths),
 so the guard is mosaicked whenever the face is.
+
+### Iteration 5 -- option 1, the box is the floor (Brendan's choice, 2026-10-20)
+
+- **Change:** every person's box patch is always blurred; the face patch is added on
+  top, so keypoints only add blur. All whole-frame rules unchanged.
+- **Test:** the floor at a third missed P3 (96%). The floor became max(1/3 of the box,
+  1 box width), then 1.5 box widths after review H1 (a box-wide head at exactly 2:1,
+  no face points: 96%). New tests: every person's box patch is blurred in every
+  non-full plan (500 noisy-skeleton scenes); face points confidently on the chest
+  still leave the head covered; the random test also scatters face points confidently
+  anywhere in the box. 114 checks; 15,000 extra scenes with 0 faces left; every other
+  suite green; a clean clone of `b7a6e88` gives the same counts.
+- **Review: SHIP.** All eight earlier leak probes (B1-B3, N1, N2, P1-P3) closed. The
+  reviewer found no guard rule dominated, so all are kept. Residuals, now in the
+  operator notes: a person never detected, and a box that consistently leaves out the
+  head with no confident face points.
+- **Security:** the change is blur geometry only, with no new input, path or I/O
+  handling. The iteration-1-4 findings stand.
+- **Real check (own footage, final code):** modes and whole-frame counts are as before
+  (26.9% and 16.4%); the floor changes regions, not frames. The 12 frames in
+  `results/face-blur-check/` were re-extracted and looked at again: **no face
+  recognisable.** **Cost seen:** a boxer's box in guard is ~0.4x as wide as tall, so
+  1.5 box widths is ~60% of the box. The floor mosaics head to hips (IMG_4406 frame
+  209), or to the knees (frame 2204): the guard, the torso and most of the arms. That
+  is far more than the "top third" option 1 described, driven by P3 and H1, which are
+  synthetic close-up crops. Open decision for Brendan.
