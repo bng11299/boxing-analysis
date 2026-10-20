@@ -10,9 +10,13 @@ Run:  python tests/test_ingest.py
 
 from __future__ import annotations
 
+import io
+import struct
 import subprocess
 import sys
 import tempfile
+import tracemalloc
+import zipfile
 from fractions import Fraction
 from pathlib import Path
 
@@ -346,6 +350,227 @@ pickled = tmp / "evil.npz"
 np.savez(pickled, xy=np.array([{"a": 1}], dtype=object))
 raises("a pickled array in a pose file is refused (allow_pickle off)",
        lambda: PoseSequence.load(pickled))
+
+
+print("PoseSequence.load (the pose file is untrusted: headers checked before allocation)")
+
+
+def refuses(name: str, fn, needle: str) -> None:
+    """ValueError whose message names `needle`, so the intended check is what fired."""
+    try:
+        fn()
+    except ValueError as e:
+        check(name, needle in str(e), f"wrong check fired: {e}")
+    except Exception as e:
+        check(name, False, f"raised {type(e).__name__}: {e}")
+    else:
+        check(name, False, "did not raise")
+
+
+def npy_bytes(v) -> bytes:
+    b = io.BytesIO()
+    np.save(b, np.asarray(v))
+    return b.getvalue()
+
+
+def npy_header_only(shape, descr: str) -> bytes:
+    """A .npy that is all header: it claims `shape` and carries no data at all."""
+    b = io.BytesIO()
+    np.lib.format.write_array_header_1_0(b, {"descr": descr, "fortran_order": False,
+                                            "shape": shape})
+    return b.getvalue()
+
+
+def pose_npz(path, drop=(), xy_method=zipfile.ZIP_STORED, **over) -> Path:
+    """A pose file built member by member: `ps`'s arrays, minus `drop`, with `over`
+    replacing members (an array is saved as .npy; bytes are written as they are).
+    `xy` is compressed with `xy_method`; the rest are stored."""
+    members = dict(xy=ps.xy, conf=ps.conf, detected=ps.detected, fps=60.0, width=W,
+                   height=H, source="clip.mp4", model="fake")
+    members.update(over)
+    with zipfile.ZipFile(path, "w") as zf:
+        for k, v in members.items():
+            if k not in drop:
+                zf.writestr(k + ".npy", v if isinstance(v, bytes) else npy_bytes(v),
+                            compress_type=xy_method if k == "xy" else zipfile.ZIP_STORED)
+    return Path(path)
+
+
+def peak_mb(fn) -> float:
+    """Peak traced allocation while `fn` runs; numpy reports its buffers to tracemalloc."""
+    tracemalloc.start()
+    try:
+        fn()
+    except Exception:
+        pass
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return peak / 1e6
+
+
+def bomb(path, frames: int) -> Path:
+    """The ~2 KB file from the 2026-10-19 review: headers claim `frames`, no data."""
+    return pose_npz(path, xy=npy_header_only((frames, N_JOINTS, 2), "<f4"),
+                    conf=npy_header_only((frames, N_JOINTS), "<f4"),
+                    detected=npy_header_only((frames,), "|b1"))
+
+
+hb = bomb(tmp / "bomb.npz", 10 ** 12)
+check("the header bomb is ~2 KB on disk", hb.stat().st_size < 4096, str(hb.stat().st_size))
+refuses("a 10^12-frame header bomb is a ValueError naming the cap (it was a MemoryError)",
+        lambda: PoseSequence.load(hb), "the cap is")
+mb = peak_mb(lambda: PoseSequence.load(hb))
+check("... refused before anything large is allocated", mb < 5, f"peak {mb:.1f} MB")
+big = bomb(tmp / "big.npz", pose_yolo.MAX_POSE_FRAMES + 1)
+mb = peak_mb(lambda: PoseSequence.load(big))
+check("one frame over the cap: refused with nothing allocated (it took ~272 MB before)",
+      mb < 5, f"peak {mb:.1f} MB")
+refuses("... and the refusal is the cap, not the missing data",
+        lambda: PoseSequence.load(big), "the cap is")
+check("the cap is ~9 h at 60 fps, the video timing scan's bound",
+      pose_yolo.MAX_POSE_FRAMES == video.MAX_TIMING_PACKETS
+      and 9 * 3600 * 60 <= pose_yolo.MAX_POSE_FRAMES < 10 * 3600 * 60)
+saved_cap = pose_yolo.MAX_POSE_FRAMES
+try:
+    pose_yolo.MAX_POSE_FRAMES = N - 1
+    refuses("a real file one frame over a lowered cap is refused",
+            lambda: PoseSequence.load(f), "the cap is")
+    pose_yolo.MAX_POSE_FRAMES = N
+    check("... and exactly at the cap it loads", len(PoseSequence.load(f)) == N)
+finally:
+    pose_yolo.MAX_POSE_FRAMES = saved_cap
+
+for key in ("xy", "conf", "detected", "fps", "width", "height", "source", "model"):
+    refuses(f"a pose file missing '{key}' is refused, naming it",
+            lambda key=key: PoseSequence.load(pose_npz(tmp / f"no_{key}.npz", drop=(key,))),
+            f"missing {key}")
+refuses("the pickled-xy file is refused for its missing keys before xy is touched",
+        lambda: PoseSequence.load(pickled), "missing conf")
+refuses("conf one frame shorter than detected is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "s1.npz", conf=ps.conf[:-1])), "conf has shape")
+refuses("xy with the wrong joint count is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "s2.npz", xy=ps.xy[:, :16])), "xy has shape")
+refuses("xy longer than detected is refused, even when xy and conf agree",
+        lambda: PoseSequence.load(pose_npz(tmp / "s3.npz", xy=np.zeros((N + 1, N_JOINTS, 2)),
+                                           conf=np.zeros((N + 1, N_JOINTS)))), "has shape")
+refuses("a 2-D detected is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "s4.npz", detected=np.ones((N, 1), bool))),
+        "detected has shape")
+refuses("a bool frame count in a header ('shape': (True,)) is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "s5.npz",
+                                           detected=npy_header_only((True,), "|b1"))),
+        "detected has shape")
+refuses("an fps that is an array, not a scalar, is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "s6.npz", fps=np.array([60.0, 30.0]))),
+        "fps has shape")
+objxy = np.empty(ps.xy.shape, dtype=object)
+objxy[...] = 0.0
+refuses("an object-dtype xy is refused from its header (it is a pickle)",
+        lambda: PoseSequence.load(pose_npz(tmp / "o1.npz", xy=objxy)), "dtype")
+refuses("an object-dtype scalar (source) is refused too",
+        lambda: PoseSequence.load(pose_npz(tmp / "o2.npz", source=np.array("x", dtype=object))),
+        "dtype")
+refuses("integer coordinates are refused (a gap is NaN, so xy is float)",
+        lambda: PoseSequence.load(pose_npz(tmp / "d1.npz", xy=ps.xy.astype(np.int32))), "dtype")
+refuses("a non-bool detected is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "d2.npz", detected=ps.detected.astype(np.uint8))),
+        "dtype")
+refuses("a structured dtype is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "d3.npz", fps=np.zeros((), [("a", "<f8")]))),
+        "dtype")
+refuses("a float width is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "d4.npz", width=96.5)), "dtype")
+refuses("a 10^8-character source claimed in a header is refused before allocation",
+        lambda: PoseSequence.load(pose_npz(tmp / "d5.npz",
+                                           source=npy_header_only((), "<U100000000"))), "dtype")
+mb = peak_mb(lambda: PoseSequence.load(tmp / "d5.npz"))
+check("... with nothing large allocated (it is 400 MB of text)", mb < 5, f"peak {mb:.1f} MB")
+# Decompression: a valid magic, then 64 MB of zeros. zipfile decompresses bz2 and
+# lzma with no output limit, so even reading the 8-byte magic expanded all of it.
+zeros = b"\x93NUMPY\x01\x00" + bytes(64 * 2**20)
+for label, method in (("bz2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA)):
+    zb = pose_npz(tmp / f"z_{label}.npz", xy=zeros, xy_method=method)
+    refuses(f"a {label}-compressed member is refused by its method (np.savez never writes one)",
+            lambda zb=zb: PoseSequence.load(zb), "compression method")
+    mb = peak_mb(lambda zb=zb: PoseSequence.load(zb))
+    check(f"... before any of its {zb.stat().st_size / 1e3:.0f} KB is decompressed "
+          f"(64 MB inside)", mb < 5, f"peak {mb:.1f} MB")
+# Format 2.0 gives a header a 4-byte length; numpy reads the length it is told before
+# checking its own 10,000-byte limit, so a deflated run of zeros became the "header".
+hl = pose_npz(tmp / "hdrlen.npz", xy=b"\x93NUMPY\x02\x00" + struct.pack("<I", 0xFFFFFFFF)
+              + bytes(64 * 2**20), xy_method=zipfile.ZIP_DEFLATED)
+refuses("a v2.0 header claiming a 4 GB length is refused (EOF at the cap)",
+        lambda: PoseSequence.load(hl), "reading array header")
+mb = peak_mb(lambda: PoseSequence.load(hl))
+check(f"... after reading at most ~10 KB of it, not the 64 MB a {hl.stat().st_size / 1e3:.0f} KB "
+      f"deflated member holds", mb < 5, f"peak {mb:.1f} MB")
+
+
+def raw_npy(header_text: str) -> bytes:
+    """A v1.0 .npy whose header is `header_text` verbatim, padded as numpy pads it."""
+    h = header_text.encode("latin1")
+    h += b" " * ((64 - (10 + len(h) + 1) % 64) % 64) + b"\n"
+    return b"\x93NUMPY\x01\x00" + struct.pack("<H", len(h)) + h
+
+
+# A header that literal_eval can't read makes numpy re-tokenize it, and tokenize's
+# error is neither ValueError nor OSError (2026-10-20 review, B1).
+refuses("an unterminated header is a ValueError, not tokenize.TokenError",
+        lambda: PoseSequence.load(pose_npz(tmp / "tok1.npz", xy=raw_npy(
+            "{'descr': '<f4', 'fortran_order': False, 'shape': ("))), "unparseable")
+refuses("a header of 300 nested parentheses is a ValueError too",
+        lambda: PoseSequence.load(pose_npz(tmp / "tok2.npz", xy=raw_npy("(" * 300))),
+        "unparseable")
+# Exactly at the frame cap, so the cap passes it; the data is simply not there.
+atcap = pose_npz(tmp / "atcap.npz",
+                 xy=npy_header_only((pose_yolo.MAX_POSE_FRAMES, N_JOINTS, 2), "<f8"),
+                 conf=npy_header_only((pose_yolo.MAX_POSE_FRAMES, N_JOINTS), "<f8"),
+                 detected=npy_header_only((pose_yolo.MAX_POSE_FRAMES,), "|b1"))
+refuses("headers at the cap whose zip entries can't hold the data are refused",
+        lambda: PoseSequence.load(atcap), "can hold at most")
+mb = peak_mb(lambda: PoseSequence.load(atcap))
+check(f"... before allocating (a {atcap.stat().st_size / 1e3:.1f} KB file committed 544 MB)",
+      mb < 5, f"peak {mb:.1f} MB")
+xy_cap = npy_header_only((pose_yolo.MAX_POSE_FRAMES, N_JOINTS, 2), "<f4") + bytes(2**20)
+dz = pose_npz(tmp / "atcap_defl.npz", xy=xy_cap, xy_method=zipfile.ZIP_DEFLATED,
+              conf=npy_header_only((pose_yolo.MAX_POSE_FRAMES, N_JOINTS), "<f4"),
+              detected=npy_header_only((pose_yolo.MAX_POSE_FRAMES,), "|b1"))
+refuses("a deflated entry promising more than 1032x its size is refused (272 MB from ~1 KB)",
+        lambda: PoseSequence.load(dz), "can hold at most")
+check("a deflated pose file (what save writes) still loads",
+      len(PoseSequence.load(pose_npz(tmp / "defl.npz", xy_method=zipfile.ZIP_DEFLATED))) == N)
+trunc = npy_bytes(ps.xy)[:-8]
+refuses("an xy with its last 8 bytes missing is refused as truncated",
+        lambda: PoseSequence.load(pose_npz(tmp / "t1.npz", xy=trunc)), "truncated")
+junk = tmp / "junk.npz"
+junk.write_bytes(b"PK\x03\x04 not really a zip" * 10)
+refuses("a file that is not a zip is a ValueError, not a zipfile error",
+        lambda: PoseSequence.load(junk), "not a readable pose file")
+bare = tmp / "bare.npy"
+np.save(bare, ps.xy)
+refuses("a bare .npy (np.load would hand back an array) is refused",
+        lambda: PoseSequence.load(bare), "not a readable pose file")
+raises("a missing pose file is still FileNotFoundError",
+       lambda: PoseSequence.load(tmp / "absent.pose.npz"), FileNotFoundError)
+
+rt_ = PoseSequence.load(pose_npz(tmp / "rt_be.npz", xy=ps.xy.astype(">f8"),
+                                 conf=np.asfortranarray(ps.conf), width=np.uint16(W)))
+check("big-endian, Fortran-order and unsigned members load to the same values",
+      np.array_equal(rt_.xy, ps.xy, equal_nan=True) and np.array_equal(rt_.conf, ps.conf)
+      and rt_.width == W)
+ps.save(f)
+back = PoseSequence.load(f)
+check("round-trip of a real save: every field equal, NaN gaps kept, dtypes kept",
+      np.array_equal(back.xy, ps.xy, equal_nan=True) and back.xy.dtype == ps.xy.dtype
+      and np.array_equal(back.conf, ps.conf) and back.conf.dtype == ps.conf.dtype
+      and np.array_equal(back.detected, ps.detected) and back.detected.dtype == bool
+      and (back.fps, back.width, back.height, back.source, back.model)
+      == (ps.fps, ps.width, ps.height, ps.source, ps.model)
+      and np.isnan(back.xy[~ps.detected]).all())
+with np.load(f, allow_pickle=False) as z:
+    check("... and identical to what np.load reads from the same file",
+          all(np.array_equal(getattr(back, k), z[k], equal_nan=True)
+              for k in ("xy", "conf", "detected")))
 none = tmp / "none.mp4"
 none.write_bytes(b"")
 raises("extract on an unreadable video fails loudly", lambda: pose_yolo.extract(none, predict_all))
