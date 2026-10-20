@@ -143,8 +143,8 @@ two = scene([A, B])
 print("keypoint patches")
 p = faceblur.plan_frame(pred_of([person(*A), person(*B)]), W, H)
 out = faceblur.apply_plan(two, p)
-check("two separate people with faces -> keypoint mode, both counted",
-      p.mode == "keypoints" and p.persons == 2 and len(p.regions) == 2, str(p))
+check("two separate people with faces -> keypoint mode, both counted, box floor + face patch each",
+      p.mode == "keypoints" and p.persons == 2 and len(p.regions) == 4, str(p))
 check("both planted faces lie wholly inside the blur", covered(p, *A) and covered(p, *B))
 check("both faces' texture is destroyed in the pixels",
       destroyed(two, out, *A) and destroyed(two, out, *B),
@@ -188,6 +188,61 @@ check("head-and-shoulders box, nose only: the whole 65x80 head is covered (was 3
 x0, y0, x1, y1 = faceblur.plan_frame(pred_of([person(*A)]), W, H).regions[0]
 check("the patch is generous: at least 2.5 head widths across",
       min(x1 - x0, y1 - y0) >= 2.5 * 2 * FACE, f"{x1 - x0}x{y1 - y0}")
+
+print("the box is the floor: keypoints only add blur (blocker report, option 1)")
+chest = person(*A)  # confident face points, all on the chest: the skeleton is wrong
+chest[1][list(faceblur.FACE_JOINTS)] = (A[0], A[1] + 70)
+p = faceblur.plan_frame(pred_of([chest]), W, H)
+out = faceblur.apply_plan(scene([A]), p)
+check("face keypoints confidently on the chest: the head is still covered (by the box floor)",
+      p.mode == "keypoints" and covered(p, *A) and destroyed(scene([A]), out, *A), str(p))
+# Review P3: a tall crop (passes the 2:1 test), nose only, bladed shoulders, hips and
+# a knee imagined inside the box. Three layers of wrong joints left 80% covered.
+tall_k, tall_c = np.zeros((N_JOINTS, 2)), np.zeros(N_JOINTS)
+tall_k[:] = (150, 150)
+tall_c[faceblur.NOSE] = 0.9
+tall_k[[5, 6]] = [(148, 200), (152, 200)]
+tall_c[[5, 6]] = 0.5
+tall_k[[11, 12]] = [(149, 240), (151, 240)]
+tall_c[[11, 12]] = 0.35
+tall_k[13] = (150, 290)
+tall_c[13] = 0.35
+p = faceblur.plan_frame((np.array([[100, 100, 200, 300]]), tall_k[None], tall_c[None]), bw_, bh_)
+m = faceblur.blurred_mask(p, bh_, bw_)
+check("tall crop with three layers of wrong joints: the whole head is covered (was 80%)",
+      bool(m[110:190, 117:182].all()), f"{m[110:190, 117:182].mean():.0%} {p}")
+# Review H1: a head-and-neck close-up at exactly 2:1, head as wide as the box
+# (100x125), no confident face points (turned away). One box width left 96%.
+big2 = np.full((bh_, bw_, 3), 100, np.uint8)
+yy2, xx2 = np.mgrid[0:bh_, 0:bw_]
+big2[100:225, 100:200] = ((((yy2 // 2) + (xx2 // 2)) % 2) * 255).astype(np.uint8)[100:225, 100:200, None]
+p = faceblur.plan_frame((np.array([[100, 100, 200, 300]]), np.full((1, N_JOINTS, 2), 150.0),
+                         np.zeros((1, N_JOINTS))), bw_, bh_)
+out = faceblur.apply_plan(big2, p)
+m = faceblur.blurred_mask(p, bh_, bw_)
+check("box-wide head in a 2:1 box, no face points: the whole head is under the floor (was 96%)",
+      p.mode == "box" and bool(m[100:225, 100:200].all())
+      and hf(out[100:225, 100:200]) < 0.2 * hf(big2[100:225, 100:200]),
+      f"{m[100:225, 100:200].mean():.1%} {p}")
+rng_f = np.random.default_rng(7)
+floor_bad = []
+for t in range(500):
+    people = []
+    for i in range(int(rng_f.integers(1, 4))):
+        b, k, _ = person(60 + 100 * i, int(40 + rng_f.integers(0, 30)),
+                         cut=rng_f.choice([None, "shoulders", "head"]))
+        k = k + rng_f.normal(0, 25, k.shape)  # any skeleton, however wrong
+        people.append((b, k, rng_f.uniform(0, 1, N_JOINTS)))
+    p = faceblur.plan_frame(pred_of(people), W, H)
+    if p.mode == "full":
+        continue
+    m = faceblur.blurred_mask(p, H, W)
+    for b, _, _ in people:
+        x0, y0, x1, y1 = faceblur.top_third_region(b, W, H)
+        if not m[y0:y1, x0:x1].all():
+            floor_bad.append(t)
+check("keypoints only add: every person's box patch is blurred in every non-full plan (500 scenes)",
+      not floor_bad, str(floor_bad[:5]))
 
 print("box fallback (no confident face keypoints)")
 noface = person(*A)
@@ -388,7 +443,11 @@ for t in range(1000):
         if cut is not None and rng.random() < 0.6:  # the model imagines hips and legs in or below the crop
             lo = b[3] if rng.random() < 0.5 else b[3] + 80 * s
             kx[11:] = np.column_stack([rng.uniform(b[0], b[2], 6), rng.uniform(c[1] + 10 * s, lo, 6)])
-        people.append((b, kx, rng.uniform(0, 1, N_JOINTS)))  # any subset may drop out
+        conf = rng.uniform(0, 1, N_JOINTS)  # any subset may drop out
+        if rng.random() < 0.3:  # ... and the face may be confidently WRONG, anywhere in the box
+            kx[:5] = np.column_stack([rng.uniform(b[0], b[2], 5), rng.uniform(b[1], b[3], 5)])
+            conf[:5] = rng.uniform(0.5, 1, 5)
+        people.append((b, kx, conf))
     r = int(round(FACE * s))
     p = faceblur.plan_frame(pred_of(people), W, H, int(rng.integers(0, 4)),
                             bool(rng.random() < 0.1))

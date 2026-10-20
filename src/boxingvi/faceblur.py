@@ -6,14 +6,16 @@ names. Every decision below fails toward MORE blur, never less:
 
 - Every person YOLO11-pose finds in a frame is blurred, not only the tracked boxer
   (`pose_yolo.extract` keeps one person; this does not).
-- A person with confident face keypoints (nose, eyes, ears) gets a patch centred
-  on them, sized from the LARGEST of several body measures (shoulder width, torso
-  length, face-keypoint spread, box height, and the box itself when the torso is
-  not measurable) so a bladed stance, where shoulder width collapses, or a body
-  cut off by the frame edge, cannot shrink it.
-- A person with a box but no confident face keypoints: the top third of the box
-  when it is body-shaped (at least twice as tall as wide), else the whole box -- a
-  box cut off by the frame or a deep crouch can be mostly head.
+- The BOX is the floor: every person's box patch is blurred, always -- the top
+  third of the box when it is body-shaped (at least twice as tall as wide), else
+  the whole box (a box cut off by the frame, or a deep crouch, can be mostly head).
+  Keypoints only ADD blur, never replace it: four review rounds each found a new
+  way a confidently wrong skeleton moved a face patch off a head, and no list of
+  guards closes that space (docs/quality-loop.md, blocker report, option 1).
+- A person with confident face keypoints (nose, eyes, ears) also gets a patch
+  centred on them, sized from the LARGEST of several body measures (shoulder
+  width, torso length, face-keypoint spread, box height, and the box itself unless
+  the skeleton reaches the legs inside it), for a head that leaves the top third.
 - The whole frame is blurred when the frame cannot be trusted: the predictor
   raised or returned malformed output; nobody was found; a person seen in a
   neighbouring frame has no counterpart here (a detector miss in a fast-motion
@@ -111,7 +113,9 @@ class UnsafeOutput(ValueError):
 @dataclass(frozen=True)
 class FramePlan:
     """What happens to one frame. `regions` are clipped pixel boxes (x0, y0, x1, y1),
-    half-open; empty for mode "full", which blurs everything."""
+    half-open; empty for mode "full", which blurs everything. Per person, the box
+    patch comes first, then the face patch if any. Mode "keypoints": every person
+    also had a face patch; "box": at least one had only the box patch."""
     mode: str
     regions: "tuple[tuple[int, int, int, int], ...]"
     persons: int
@@ -231,12 +235,18 @@ def face_patch(box, kxy, kc, width, height) -> "_Face | None":
 
 
 def top_third_region(box, width, height):
-    """The box-only patch: the top third of a whole body. A box that is not
-    body-shaped (cut off by the frame, or a deep crouch) may be mostly head, and its
-    top third misses the chin, so the WHOLE box is blurred instead."""
+    """The box patch, every person's floor: the top third of a whole body (or 1.5
+    box widths down from the top, if more). A box that is not body-shaped (cut off
+    by the frame, or a deep crouch) may be mostly head, and its top third misses the
+    chin, so the WHOLE box is blurred instead."""
     x0, y0, x1, y1 = box
     bw, bh = x1 - x0, y1 - y0
-    bottom = y0 + bh / 3 + TOP_THIRD_PAD * bh if bh >= FULL_BODY_ASPECT * bw else y1
+    # Never less than 1.5 box widths down from the top, either: a head is no wider
+    # than its box and ~1.25x as tall as wide, so a head-to-chest crop that passes the
+    # 2:1 test still has its chin inside (review P3: 96% covered with a third alone;
+    # H1: one box width still left a chin strip of a box-wide head at exactly 2:1).
+    top = max(bh / 3, 1.5 * bw)
+    bottom = y0 + top + TOP_THIRD_PAD * bh if bh >= FULL_BODY_ASPECT * bw else y1
     return _clip_region(x0 - TOP_THIRD_PAD * bw, y0 - TOP_THIRD_PAD * bh,
                         x1 + TOP_THIRD_PAD * bw, bottom, width, height)
 
@@ -313,15 +323,18 @@ def _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_miss
             if (math.dist(fi.centre, fj.centre) <= max(fi.half, fj.half)
                     or _inside(fi.centre, boxes[j]) or _inside(fj.centre, boxes[i])):
                 return _full(n, "ambiguous_faces")
+    # The box patch is the FLOOR for every person; a face patch is added on top. No
+    # keypoint can shrink what the box alone would blur, so a confidently wrong
+    # skeleton costs extra blur, never a bare head (blocker report, option 1).
     regions, any_box = [], False
     for i in range(n):
+        r = top_third_region(boxes[i], width, height)
+        if r is None:  # cannot happen for a validated box; fail closed regardless
+            return _full(n, "empty_region")
+        regions.append(r)
         if faces[i] is not None:
             regions.append(faces[i].region)
         else:
-            r = top_third_region(boxes[i], width, height)
-            if r is None:  # cannot happen for a validated box; fail closed regardless
-                return _full(n, "empty_region")
-            regions.append(r)
             any_box = True
     return FramePlan("box" if any_box else "keypoints", tuple(regions), n)
 
@@ -626,7 +639,7 @@ def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
         full_idx = [i for i, p in enumerate(plans) if p.mode == "full"]
         report = {
             **(report_extra or {}),  # first, so it can never overwrite a core field
-            "tool": "blur_faces", "report_version": 2,
+            "tool": "blur_faces", "report_version": 3,
             "source_sha256": source_sha, "output_sha256": sha256_file(tmp),
             "model": model_name, "width": w, "height": h, "fps": info.fps,
             "variable_frame_rate": info.vfr,
@@ -643,7 +656,7 @@ def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
             "params": {"face_min_conf": FACE_MIN_CONF, "pad": PAD, "face_cells": FACE_CELLS,
                        "full_cells": FULL_CELLS, "neighbour_frames": window,
                        "match_iou": MATCH_IOU, "match_top": MATCH_TOP,
-                       "expect_persons": expect_persons},
+                       "box_floor": True, "expect_persons": expect_persons},
             "audio": "none", "metadata": "stripped",
         }
         tmp_report.write_text(json.dumps(report, indent=1), encoding="utf-8")

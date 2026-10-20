@@ -21,6 +21,12 @@ Read the report (<name>.blur.json) before handing a clip on:
 unsure, `persons_per_frame` how many people it found. For sparring footage pass
 --expect-persons 2: a boxer the detector misses for longer than its neighbour
 window is otherwise caught only by a human look.
+
+Look at sampled frames of every clip before it goes to the annotator. The code
+cannot catch two detector failures: a person never detected at all, and a box
+that consistently leaves out the head (torso and legs only) with no confident
+face points. Every person's box patch is blurred and face keypoints only add to
+it, so a detected head is covered; an undetected one is not.
 """
 
 from __future__ import annotations
