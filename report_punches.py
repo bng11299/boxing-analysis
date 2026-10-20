@@ -12,8 +12,10 @@ classify_punches.py wrote it and was named by the classifier --classifier descri
 (the <clip>.classified.json beside it records both hashes). The summary is fixed templates filled with the
 counts; its reliability warnings come from measured numbers (see boxingvi.report),
 and it says so when nothing has been measured on your own footage. It leads with a
-warning when the hand each punch type implies matches the wrist that moved not
-significantly more often than chance (one-sided exact binomial test, 0.05).
+warning when the hand each punch type implies matches the wrist that moved less
+often than the report requires (report.HAND_FLOOR), or not significantly more
+often than chance (one-sided exact binomial and Fisher tests, 0.05), and with a
+caution when the check cannot confirm the types at all.
 """
 
 from __future__ import annotations

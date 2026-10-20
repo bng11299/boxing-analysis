@@ -301,8 +301,8 @@ tz = variant(facts, {"n": 0, "unclassifiable": 0}, name="labelled, nothing match
 check("labelled but nothing matched: not 'label a clip'", "You labelled this clip, but no labelled punch" in tz
       and "label a clip" not in tz, tz)
 
-print("the hand check: one-sided exact binomial, worked by hand")
-B = stats.binomial_greater_p
+print("the hand check: one-sided exact tests, worked by hand")
+B, F = stats.binomial_greater_p, stats.fisher_greater_p
 for (k_, n_, p_), want, why in (((4, 4, 0.5), 1 / 16, "4 of 4 at 1/2"), ((5, 5, 0.5), 1 / 32, "5 of 5 at 1/2"),
                                ((8, 10, 0.5), 56 / 1024, "8 of 10 at 1/2: (45 + 10 + 1) / 1024"),
                                ((9, 10, 0.5), 11 / 1024, "9 of 10 at 1/2: (10 + 1) / 1024"),
@@ -320,20 +320,46 @@ for args_, why in (((5, 4, 0.5), "k > n"), ((-1, 4, 0.5), "negative k"), ((1, 4,
 
 
 def exact_tail(k_, n_, c):
-    """The same tail with exact fractions and integer binomial coefficients: an oracle that shares no code."""
+    """The binomial tail with exact fractions and integer binomial coefficients: an oracle that shares no code."""
     c = Fraction(c)
     return float(sum(math.comb(n_, i) * c ** i * (1 - c) ** (n_ - i) for i in range(k_, n_ + 1)))
 
 
+def exact_fisher(a, b, c, d):
+    """Fisher's one-sided tail as a hypergeometric sum of integer binomial coefficients: shares no code with scipy."""
+    r1, c1, n_ = a + b, a + c, a + b + c + d
+    return float(sum(Fraction(math.comb(c1, x) * math.comb(n_ - c1, r1 - x), math.comb(n_, r1))
+                     for x in range(a, min(r1, c1) + 1)))
+
+
+for table, want, why in (((3, 0, 0, 2), 1 / 10, "[[3,0],[0,2]]: 1 / C(5,3)"),
+                         ((4, 1, 1, 4), 26 / 252, "[[4,1],[1,4]]: (C(5,4) C(5,1) + 1) / C(10,5)"),
+                         ((9, 1, 0, 3), 4 / 286, "[[9,1],[0,3]]: C(4,1) / C(13,10)"),
+                         ((3, 0, 1, 4), 4 / 56, "[[3,0],[1,4]]: C(4,3) / C(8,3)"),
+                         ((2, 0, 1, 9), 3 / 66, "[[2,0],[1,9]]: C(3,2) / C(12,2)"),
+                         ((15, 11, 5, 11), exact_fisher(15, 11, 5, 11), "IMG_4395 today, against the oracle"),
+                         ((12, 0, 0, 0), 1.0, "an empty row and column: no evidence"),
+                         ((0, 9, 0, 0), 1.0, "everything off the diagonal in one row: no evidence")):
+    check(f"Fisher P: {why} = {want:.6f}", abs(F(*table) - want) < 1e-12, f"{F(*table)!r}")
+for args_, why in (((-1, 0, 0, 0), "a negative cell"), ((1.0, 0, 0, 0), "a float cell"),
+                   ((True, 0, 0, 0), "a boolean cell")):
+    raises(f"Fisher refuses {why}", lambda args_=args_: F(*args_))
+
 hc = facts["hand_check"]
-# The 13 named punches above: type says lead for 10 (9 jabs, 1 lead hook), the wrist for 9 (one jab came from the
-# right). Chance = (10*9 + 3*4) / 13^2 = 102/169 = 0.604; 12 of 13 agree.
-check("hand check on the main fixture: 12 of 13 agree, chance 102/169",
-      hc["n"] == 13 and hc["k"] == 12 and abs(hc["chance"] - 102 / 169) < 1e-12, str(hc))
-check("p = 13 c^12 (1 - c) + c^13 = 0.0134 at c = 102/169: above chance, no warning",
-      abs(hc["p"] - exact_tail(12, 13, Fraction(102, 169))) < 1e-12 and abs(hc["p"] - 0.01345) < 5e-5
-      and not hc["warn"], str(hc))
-check("no warning in a summary whose check passes", "Warning" not in text, text)
+# The 13 named punches above, (type's hand, wrist): 9 lead-lead, 1 lead-rear (the jab from the right), 0 rear-lead,
+# 3 rear-rear. Chance = (10*9 + 3*4) / 13^2 = 102/169 = 0.604; 12 of 13 agree (92%).
+check("hand check on the main fixture: table (9, 1, 0, 3), 12 of 13 agree, chance 102/169",
+      hc["table"] == (9, 1, 0, 3) and hc["n"] == 13 and hc["k"] == 12 and abs(hc["chance"] - 102 / 169) < 1e-12,
+      str(hc))
+check("binomial 13 c^12 (1 - c) + c^13 = 0.0135, Fisher 4/286 = 0.0140, 92% >= 70%: passes",
+      abs(hc["p_binomial"] - exact_tail(12, 13, Fraction(102, 169))) < 1e-12 and abs(hc["p_fisher"] - 4 / 286) < 1e-12
+      and hc["verdict"] == "pass" and not hc["warn"] and not hc["below_floor"], str(hc))
+check("a passing clip: no warning or caution, and a sentence after the hand sentences with both p and the hand-only "
+      "limit", "Warning" not in text and "Caution" not in text
+      and "one of the two readings is wrong there. Across the clip the hand each punch type implies is the wrist "
+          "that moved for 12 of 13 (92%) against 60% by chance (p = 0.013 binomial, p = 0.014 Fisher), and at least "
+          "the 70% this report requires. That checks the hand only: it cannot tell a jab from a lead hook or "
+          "uppercut, or a cross from a rear hook or uppercut." in text, text)
 
 
 def hand_rows(ll, lr, rl, rr):
@@ -348,12 +374,14 @@ def warned(name, rows_):
     return f_, variant(f_, name=name)
 
 
+WARN = "Warning: the punch types in this summary may be wrong for this clip."
 print("the hand check: real-world facts (counts from the real clips; the clips themselves are not in the repo)")
-# As stated in the brief, before classify's confidence fix: both must warn.
+# As stated in the brief, before classify's confidence fix: both must warn (only n, agreement and chance were kept).
 for name, k_, n_, c in (("IMG_4395, old 0.3 rule, as recorded", 22, 41, 0.482),
                         ("IMG_4406, old 0.3 rule, as recorded", 20, 41, 0.509)):
-    check(f"{name}: {k_} of {n_} against {c}: p = {B(k_, n_, c):.3f}, warns",
-          not B(k_, n_, c) < report.HAND_ALPHA and abs(B(k_, n_, c) - exact_tail(k_, n_, c)) < 1e-12)
+    check(f"{name}: {k_} of {n_} against {c}: binomial p = {B(k_, n_, c):.3f}, and under 70% agreement: warns",
+          not B(k_, n_, c) < report.HAND_ALPHA and k_ / n_ < report.HAND_FLOOR
+          and abs(B(k_, n_, c) - exact_tail(k_, n_, c)) < 1e-12)
 # Joint tables with those agreements and chances, through the CSV -> facts -> summary path. The old clips' own
 # tables were not kept; these reproduce the recorded n, agreement and chance. 48.2% is not reachable with 22 of 41
 # agreeing (nearest 48.3%); iteration 3 recorded it with 42 punches (23 of 42, 54.8%), and both are run.
@@ -364,66 +392,140 @@ for name, table, n_, k_, c in (("old IMG_4395, 41 punches", (15, 15, 4, 7), 41, 
                                ("old IMG_4406", (18, 18, 3, 2), 41, 20, Fraction(36 * 21 + 5 * 20, 41 ** 2))):
     f_, tx = warned(name, hand_rows(*table))
     h_ = f_["hand_check"]
-    check(f"{name}: {k_} of {n_}, chance {float(c):.4f}, p = {h_['p']:.3f}: the summary LEADS with the warning",
-          h_["k"] == k_ and h_["n"] == n_ and abs(h_["chance"] - c) < 1e-12 and h_["warn"]
-          and tx.startswith("Warning: the punch types in this summary may be wrong for this clip."), tx)
+    check(f"{name}: {k_} of {n_}, chance {float(c):.4f}, p = {h_['p_binomial']:.3f} / {h_['p_fisher']:.3f}: the "
+          f"summary LEADS with the warning", h_["k"] == k_ and h_["n"] == n_ and abs(h_["chance"] - c) < 1e-12
+          and h_["warn"] and h_["below_floor"] and abs(h_["p_fisher"] - exact_fisher(*table)) < 1e-12
+          and tx.startswith(WARN), tx)
 # Today's classified CSVs: their joint tables, read from results/punches/IMG_44*.classified.csv of 2026-10-13.
 f95, t95 = warned("IMG_4395 today", hand_rows(15, 11, 5, 11))
 h95 = f95["hand_check"]
-check("IMG_4395 today: 26 of 42 (61.9%) against 49.4%: p = 0.0715, STILL WARNS",
+check("IMG_4395 today: 26 of 42 (61.9%) against 49.4%: binomial 0.0715, Fisher 0.0883, under 70%: STILL WARNS",
       h95["k"] == 26 and h95["n"] == 42 and abs(h95["agree"] - 26 / 42) < 1e-12
       and abs(h95["chance"] - Fraction(26 * 20 + 16 * 22, 42 ** 2)) < 1e-12
-      and abs(h95["p"] - exact_tail(26, 42, Fraction(872, 1764))) < 1e-12 and abs(h95["p"] - 0.0715) < 5e-4
-      and h95["warn"] and t95.startswith("Warning:"), f"{h95} {t95[:300]}")
-check("IMG_4395 today, the sentence as written",
-      t95.startswith("Warning: the punch types in this summary may be wrong for this clip. For 26 of 42 named "
-                     "punches the hand the punch type implies is the wrist that moved (62%), against 49% expected "
-                     "by chance from how often each reading says lead hand; a one-sided exact binomial test gives "
-                     "p = 0.071, not under 0.05, so that agreement is not shown to be better than chance. In one "
-                     "round"), t95[:420])
+      and abs(h95["p_binomial"] - exact_tail(26, 42, Fraction(872, 1764))) < 1e-12
+      and abs(h95["p_binomial"] - 0.0715) < 5e-4 and abs(h95["p_fisher"] - 0.0883) < 5e-4
+      and h95["below_floor"] and h95["warn"], f"{h95} {t95[:300]}")
+check("IMG_4395 today, the sentences as written",
+      t95.startswith(WARN + " For 26 of 42 named punches the hand the punch type implies is the wrist that moved "
+                     "(62%), against 49% expected by chance from how often each reading says lead hand. One-sided "
+                     "exact tests of whether that is above chance give p = 0.071 (binomial) and p = 0.088 (Fisher), "
+                     "neither under 0.05, so that agreement is not shown to be better than chance. The 62% agreement "
+                     "is under the 70% this report requires. In one round"), t95[:600])
 f06, t06 = warned("IMG_4406 today", hand_rows(20, 7, 1, 13))
 h06 = f06["hand_check"]
-check("IMG_4406 today: 33 of 41 (80.5%) against 50.4%: p = 0.0001, no warning",
-      h06["k"] == 33 and h06["n"] == 41
-      and abs(h06["p"] - exact_tail(33, 41, Fraction(27 * 21 + 14 * 20, 41 ** 2))) < 1e-12
-      and h06["p"] < 0.001 and not h06["warn"] and "Warning" not in t06, f"{h06}")
+check("IMG_4406 today: 33 of 41 (80.5%) against 50.4%: binomial and Fisher under 0.001, at least 70%: passes",
+      h06["k"] == 33 and h06["n"] == 41 and h06["verdict"] == "pass"
+      and abs(h06["p_binomial"] - exact_tail(33, 41, Fraction(27 * 21 + 14 * 20, 41 ** 2))) < 1e-12
+      and abs(h06["p_fisher"] - exact_fisher(20, 7, 1, 13)) < 1e-12 and h06["p_fisher"] < 0.001
+      and "Warning" not in t06 and "for 33 of 41 (80%) against 50% by chance (p under 0.001 binomial, p under 0.001 "
+                                  "Fisher), and at least the 70%" in t06, f"{h06}")
+keep_floor = report.HAND_FLOOR
+try:
+    report.HAND_FLOOR = 0.80
+    f80, _ = warned("IMG_4406 at the 80% target", hand_rows(20, 7, 1, 13))
+    f80b, t80b = warned("IMG_4406 with one punch fewer agreeing, at 80%", hand_rows(19, 8, 1, 13))
+finally:
+    report.HAND_FLOOR = keep_floor
+check("at the 80% target IMG_4406 still passes (33 of 41 = 80.5%), by one punch: 32 of 41 (78%) warns",
+      f80["hand_check"]["verdict"] == "pass" and f80b["hand_check"]["below_floor"] and f80b["hand_check"]["warn"]
+      and "The 78% agreement is under the 80% this report requires." in t80b, t80b[:600])
 
-print("the hand check: the test is the only rule")
-# Five jabs and five crosses: chance is 1/2 whatever the wrists say. 8 of 10 agree -> p = 56/1024 = 0.055, warns;
-# 9 of 10 -> 11/1024 = 0.011, does not. Nothing but the test separates them.
+print("the hand check: what decides")
+# Five jabs and five crosses: chance is 1/2 whatever the wrists say. 8 of 10 agree (80%, over the floor) ->
+# binomial 56/1024 = 0.055, Fisher 26/252 = 0.103: warns. 9 of 10 -> 11/1024 and 6/252: passes.
 f8, t8 = warned("8 of 10 at 1/2", hand_rows(4, 1, 1, 4))
 f9, t9 = warned("9 of 10 at 1/2", hand_rows(5, 0, 1, 4))
-check("8 of 10 at chance 1/2: p = 0.055, warns, printed so it does not read as a tie with 0.05",
-      f8["hand_check"]["warn"] and "p = 0.055, not under 0.05" in t8,
-      t8[:400])
-check("9 of 10 at chance 1/2: p = 0.011, no warning", not f9["hand_check"]["warn"] and "Warning" not in t9)
-check("the warning is the summary's first sentence and appears once",
-      t8.startswith("Warning:") and t8.count("Warning") == 1)
+check("8 of 10 at chance 1/2: both tests fail, warns, p printed so 0.055 does not read as a tie with 0.05",
+      f8["hand_check"]["warn"] and not f8["hand_check"]["below_floor"]
+      and "give p = 0.055 (binomial) and p = 0.10 (Fisher), neither under 0.05" in t8
+      and "requires" not in t8.split("In one round")[0], t8[:500])
+check("9 of 10 at chance 1/2: both tests pass, no warning", f9["hand_check"]["verdict"] == "pass" and "Warning" not in t9)
+check("the warning is the summary's first sentence and appears once", t8.startswith(WARN) and t8.count("Warning") == 1)
+fb, tb_ = warned("binomial passes, Fisher fails", hand_rows(3, 0, 1, 4))
+check("7 of 8, chance 1/2: binomial 9/256 = 0.035 passes, Fisher 4/56 = 0.071 does not: warns, and says which passed",
+      fb["hand_check"]["warn"] and abs(fb["hand_check"]["p_binomial"] - 9 / 256) < 1e-12
+      and "give p = 0.035 (binomial) and p = 0.071 (Fisher); only the binomial test is under 0.05" in tb_, tb_[:500])
+ff, tf = warned("Fisher passes, binomial fails", hand_rows(2, 0, 1, 9))
+check("11 of 12, chance 2/3: binomial 28672/531441 = 0.054 fails, Fisher 3/66 = 0.045 passes: warns",
+      ff["hand_check"]["warn"] and abs(ff["hand_check"]["p_binomial"] - 28672 / 531441) < 1e-12
+      and "give p = 0.054 (binomial) and p = 0.045 (Fisher); only the Fisher test is under 0.05" in tf, tf[:500])
+fl, tl_ = warned("68 of 100 at 1/2", hand_rows(34, 16, 16, 34))
+check("68 of 100 at 1/2: both tests far under 0.05, but under 70%: warns on the floor alone",
+      fl["hand_check"]["p_binomial"] < 0.001 and fl["hand_check"]["p_fisher"] < 0.001 and fl["hand_check"]["warn"]
+      and "(Fisher). The 68% agreement is under the 70% this report requires." in tl_
+      and "wrong stance" not in tl_, tl_[:600])
+fe, te = warned("70 of 100 at 1/2", hand_rows(35, 15, 15, 35))
+check("70 of 100 is not under 70%: passes", not fe["hand_check"]["below_floor"] and fe["hand_check"]["verdict"] == "pass")
+keep_floor = report.HAND_FLOOR
+try:
+    report.HAND_FLOOR = 0.68   # 0.68 * 75 = 51.00000000000001 in floats
+    f68, _ = warned("51 of 75 at a 0.68 floor", hand_rows(26, 12, 12, 25))
+finally:
+    report.HAND_FLOOR = keep_floor
+check("the floor is compared exactly: 51 of 75 is not under 0.68, though 0.68 * 75 in floats is just over 51",
+      not f68["hand_check"]["below_floor"], str(f68["hand_check"]))
+fq, tq = warned("Fisher exactly at alpha", hand_rows(12, 2, 0, 2))
+check("Fisher's exact p of 1/20 (scipy: 0.04999999999999999) counts as NOT under 0.05; never '0.050 ... under'",
+      abs(fq["hand_check"]["p_fisher"] - 0.05) < 1e-12 and fq["hand_check"]["warn"]
+      and "p = 0.050 (Fisher), neither under 0.05" in tq and "only the Fisher test" not in tq, tq[:500])
+check("a p under alpha that would print as 0.050 says 'just under'",
+      report._Writer().pval(0.0497) == "p just under 0.05" and report._Writer().pval(0.05) == "p = 0.050"
+      and report._Writer().pval(0.04999999999999999) == "p = 0.050")
 
-print("the hand check: edge cases")
-f0, t0n = warned("no named punch", [row(1 + i, "unclassified") for i in range(3)])
-check("0 named punches: no agreement, no p, no warning (no punch type is stated)",
-      f0["hand_check"] == {"n": 0, "agree": None, "chance": None, "k": 0, "p": None, "warn": False}
-      and "Warning" not in t0n and "could name" not in t0n, str(f0["hand_check"]))
-check("no punches at all: no warning", not report.compute_facts([], ROUNDS, DUR)["hand_check"]["warn"])
+print("the hand check: when it cannot confirm the types")
 fa, ta = warned("all one side, agreeing", hand_rows(12, 0, 0, 0))
-check("all lead by type AND by wrist: 100% agreement is exactly chance (100%), p = 1, warns",
-      fa["hand_check"]["agree"] == 1.0 and fa["hand_check"]["chance"] == 1.0 and fa["hand_check"]["p"] == 1.0
-      and "(100%), against 100% expected" in ta and "p = 1, not under" in ta, ta[:400])
+check("12 jabs, all from the lead wrist: 100% agreement is chance itself; a caution, not a warning, and first",
+      fa["hand_check"]["verdict"] == "concentrated" and not fa["hand_check"]["warn"] and fa["hand_check"]["p_binomial"] == 1.0
+      and ta.startswith("Caution: there appears to be an extreme concentration of lead-hand punch types: 100% of the "
+                        "12 named punches, most often jabs (12). On a split like this the hand check cannot "
+                        "confirm the types even if every punch agreed with the wrist that moved. If this is not "
+                        "expected, checking the footage is recommended.") and "Warning" not in ta, ta[:400])
+f91, t91 = warned("9 lead, 1 rear, all agreeing", hand_rows(9, 0, 0, 1))
+check("90/10 over 10 punches, all agreeing: full agreement cannot pass (0.82^10 = 0.137): concentrated",
+      f91["hand_check"]["verdict"] == "concentrated" and "90% of the 10 named punches" in t91, t91[:300])
+f92, _ = warned("18 lead, 2 rear, all agreeing", hand_rows(18, 0, 0, 2))
+check("90/10 over 20 punches can be checked (0.82^20 = 0.019, Fisher 1/190): passes",
+      f92["hand_check"]["verdict"] == "pass")
+fm, tm = warned("types all lead, wrists mixed", hand_rows(7, 3, 0, 0))
+check("types all lead, wrists 7 lead / 3 rear: agreement 70% = chance 70%: concentrated",
+      abs(fm["hand_check"]["chance"] - 0.7) < 1e-12 and fm["hand_check"]["verdict"] == "concentrated", str(fm["hand_check"]))
+fr, tr2 = warned("all rear", [row(1 + 0.5 * i, "cross", "right") for i in range(6)]
+                 + [row(5 + 0.5 * i, "rear_uppercut", "right") for i in range(4)])
+check("a rear-hand concentration names the rear hand and its commonest type",
+      fr["hand_check"]["verdict"] == "concentrated"
+      and "rear-hand punch types: 100% of the 10 named punches, most often crosses (6)" in tr2, tr2[:300])
+ft, tt = warned("a tie", [row(1 + 0.5 * i, "jab") for i in range(6)] + [row(5 + 0.5 * i, "lead_hook") for i in range(6)])
+check("tied types are all named, not the first in the alphabet: 'most often jabs and lead hooks (6 each)'",
+      ft["hand_check"]["verdict"] == "concentrated" and "most often jabs and lead hooks (6 each)" in tt, tt[:300])
 fz, tz_ = warned("all one side, disagreeing", hand_rows(0, 9, 0, 0))
-check("all lead by type, all rear by wrist: 0 of 9, chance 0, p = 1, warns",
-      fz["hand_check"]["k"] == 0 and fz["hand_check"]["chance"] == 0.0 and fz["hand_check"]["warn"]
-      and "For 0 of 9 named punches" in tz_, tz_[:300])
-fm, tm = warned("one type hand, mixed wrists", hand_rows(7, 3, 0, 0))
-check("types all lead, wrists 7 lead / 3 rear: agreement 70% = chance 70%, warns",
-      abs(fm["hand_check"]["chance"] - 0.7) < 1e-12 and fm["hand_check"]["warn"], str(fm["hand_check"]))
+check("all jabs, all from the rear wrist: 0 of 9 is under 70%, so a WARNING (a wrong stance looks like this)",
+      fz["hand_check"]["warn"] and fz["hand_check"]["below_floor"]
+      and tz_.startswith(WARN + " For 0 of 9 named punches") and "p = 1 (binomial) and p = 1 (Fisher), neither" in tz_
+      and "can also mean the clip was read with the wrong stance (orthodox or southpaw)" in tz_, tz_[:700])
+check("agreement above chance never mentions stance", "stance" not in t95 and "stance" not in t8)
 f1_, t1_ = warned("one named punch", hand_rows(1, 0, 0, 0))
-check("one named punch: singular, and it warns (1 of 1 at chance 1)",
-      "For 1 of 1 named punch the hand" in t1_ and f1_["hand_check"]["warn"], t1_[:200])
+check("one named punch: too few to check, singular", f1_["hand_check"]["verdict"] == "too_few"
+      and t1_.startswith("Caution: only 1 named punch, too few to check the punch types against the wrist that "
+                         "moved."), t1_[:200])
+f4, t4 = warned("4 balanced, all agreeing", hand_rows(2, 0, 0, 2))
+check("4 punches, 2/2, all agreeing: even a 50/50 split this small cannot pass (0.5^4, 1/6): too few",
+      f4["hand_check"]["verdict"] == "too_few" and t4.startswith("Caution: only 4 named punches"), t4[:200])
+f5, t5 = warned("5 punches, 3/2, all agreeing", hand_rows(3, 0, 0, 2))
+check("5 punches, 3/2, all agreeing: full agreement passes the binomial ((13/25)^5 = 0.038) but not Fisher (1/10), "
+      "so the check cannot pass: too few, not a warning",
+      abs(f5["hand_check"]["p_binomial"] - (13 / 25) ** 5) < 1e-12 and abs(f5["hand_check"]["p_fisher"] - 0.1) < 1e-12
+      and f5["hand_check"]["verdict"] == "too_few" and t5.startswith("Caution: only 5 named punches"), t5[:200])
+f0, t0n = warned("no named punch", [row(1 + i, "unclassified") for i in range(3)])
+check("0 named punches: no agreement, no p, no warning or caution (no punch type is stated)",
+      f0["hand_check"]["verdict"] == "none" and f0["hand_check"]["p_binomial"] is None
+      and f0["hand_check"]["p_fisher"] is None and not f0["hand_check"]["warn"]
+      and "Warning" not in t0n and "Caution" not in t0n and "could name" not in t0n, str(f0["hand_check"]))
+check("no punches at all: nothing said", report.compute_facts([], ROUNDS, DUR)["hand_check"]["verdict"] == "none")
 fs, ts = warned("southpaw", [row(1 + 0.5 * i, "jab", "right", lead="right") for i in range(10)]
                 + [row(10 + 0.5 * i, "cross", "left", lead="right") for i in range(10)])
-check("southpaw: lead and rear follow the stance, 20 of 20 agree at chance 1/2, no warning",
-      fs["hand_check"]["k"] == 20 and abs(fs["hand_check"]["chance"] - 0.5) < 1e-12 and not fs["hand_check"]["warn"])
+check("southpaw: lead and rear follow the stance, 20 of 20 agree at chance 1/2: passes",
+      fs["hand_check"]["k"] == 20 and abs(fs["hand_check"]["chance"] - 0.5) < 1e-12
+      and fs["hand_check"]["verdict"] == "pass")
 check("p-values never round to 0.00 or 1.00 unless exact",
       [report._Writer().pval(x) for x in (1.0, 0.9999, 0.0001, 0.0, 0.2934, 0.0547, 0.0715)]
       == ["p = 1", "p over 0.99", "p under 0.001", "p = 0.000", "p = 0.29", "p = 0.055", "p = 0.071"])
@@ -501,22 +603,37 @@ rel = list(wb["Reliability"].iter_rows(values_only=True))
 check("Reliability: one row per type, flagged by the rule",
       [r[0] for r in rel[1:7]] == [report.PLURAL[c] for c in CLASSES]
       and [r[0] for r in rel[1:7] if r[7] == "yes"] == ["lead uppercuts", "rear hooks"])
-check("Reliability: then this clip's hand check, with the agreement, chance and p-value (12 of 13, 102/169)",
-      len(rel) == 10 and all(v is None for v in rel[7]) and rel[8][3] == "agreement" and rel[8][5].startswith("p ")
-      and rel[9][1:7] == (13, 12, 0.923, 0.604, 0.0135, "no"), str(rel[7:]))
-for name, f_, want in (("a warned clip", f95, (42, 26, 0.619, 0.494, 0.0715, "yes")),
-                       ("a clip far above chance: p = 6.83e-05 is not shown as 0", f06,
-                        (41, 33, 0.805, 0.504, 6.83e-05, "no")),
-                       ("a clip with no named punch", f0, (0, 0, None, None, None, "no: no named punch"))):
+check("Reliability: then this clip's hand check, both p-values, the floor and the result (12 of 13, 102/169)",
+      len(rel) == 10 and all(v is None for v in rel[7]) and rel[8][3] == "agreement"
+      and rel[8][5].startswith("p, binomial") and rel[8][6].startswith("p, Fisher") and rel[8][8] == "result"
+      and rel[9][1:9] == (13, 12, 0.923, 0.604, 0.0135, 0.014, 0.7, "passed"), str(rel[7:]))
+for name, f_, want in (("a warned clip", f95, (42, 26, 0.619, 0.494, 0.0715, 0.0883, 0.7,
+                                               "warning: under 70%; binomial not under 0.05; Fisher not under 0.05")),
+                       ("a clip far above chance: tiny p is not shown as 0", f06,
+                        (41, 33, 0.805, 0.504, 6.83e-05, float(f"{h06['p_fisher']:.3g}"), 0.7, "passed")),
+                       ("a split verdict", fb, (8, 7, 0.875, 0.5, 0.0352, 0.0714, 0.7,
+                                                "warning: Fisher not under 0.05")),
+                       ("a concentrated clip", fa, (12, 12, 1.0, 1.0, 1.0, 1.0, 0.7,
+                                                    "cannot check: types concentrated on one hand")),
+                       ("too few", f4, (4, 4, 1.0, 0.5, 0.0625, 0.167, 0.7, "cannot check: too few named punches")),
+                       ("both tests pass, under the floor", fl, (100, 68, 0.68, 0.5, float(f"{fl['hand_check']['p_binomial']:.3g}"),
+                                                                 float(f"{fl['hand_check']['p_fisher']:.3g}"), 0.7,
+                                                                 "warning: under 70%")),
+                       ("Fisher exactly at alpha", fq, (16, 14, 0.875, 0.688, float(f"{exact_tail(14, 16, Fraction(176, 256)):.3g}"), 0.05, 0.7,
+                                                        "warning: binomial not under 0.05; Fisher not under 0.05")),
+                       ("a clip with no named punch", f0, (0, 0, None, None, None, None, 0.7, "no named punch"))):
     p_ = tmp / "hc.xlsx"
     report.write_workbook(p_, "IMG_1", [], ROUNDS, f_, bench, "x", FPS, HOW)
-    got = list(load_workbook(p_)["Reliability"].iter_rows(values_only=True))[9][1:7]
+    got = list(load_workbook(p_)["Reliability"].iter_rows(values_only=True))[9][1:9]
     check(f"Reliability hand-check row for {name}: {want}", got == want, str(got))
 about = [r[0] for r in wb["About"].iter_rows(values_only=True)]
 check("About holds the summary, how the clip was cut, and the held-out videos from the reference",
       text in about and HOW in about and any("V2/V5/V9" in (a or "") for a in about))
-check("About states the warning's rule: the one-sided exact binomial test at 0.05",
-      any("one-sided exact binomial test" in (a or "") and "at 0.05" in a for a in about))
+check("About states the warning's rule: under 70%, or either one-sided exact test (binomial, Fisher) at 0.05",
+      any("under 70% of the time" in (a or "") and "either of two one-sided exact tests at 0.05" in a
+          and "Fisher" in a and "cannot confirm them" in a for a in about))
+check("About says the check sees the hand only, and how stance enters",
+      any("cannot tell a jab from a lead hook" in (a or "") and "wrong stance swaps them" in a for a in about))
 check("About does not say a warned clip agrees 'no more often than chance' (IMG_4395: 62% vs 49%, warned)",
       any("not significantly more often than chance" in (a or "") for a in about)
       and not any("no more often than chance" in (a or "") for a in about))

@@ -859,3 +859,37 @@ clips are reported as they fall; (5) suites green in a clean clone.
   0.065). Neither real clip changes (Fisher 0.088 and 0.00005). When one reading is constant the check
   cannot tell good from bad and always warns; over hundreds of punches a modest excess over chance
   passes. Both follow from the test being the only rule.
+
+### Iteration 6 -- a floor, both tests, and when the check cannot confirm anything (2026-10-20, vault ADR-0015)
+Brendan, on iteration 5's caveats: add an agreement floor ("start 70%, want to work up to 80"); show both tests
+("use both tests to output both results and see"); for a clip concentrated on one hand, say so ("there appears
+to be an extreme concentration ... if this is not expected, checking the footage is recommended") instead of
+"may be wrong"; say the check sees the hand only. Acceptance: (1) agreement under `HAND_FLOOR` (0.70) warns
+whatever the tests say; (2) the binomial and Fisher one-sided exact p are both stated, and the clip passes only
+if both are under 0.05; (3) when full agreement on the clip's type split could not pass both tests, the summary
+leads with a caution (concentrated, or too few punches); (4) the passing summary states both p-values and that
+a jab read as a lead hook passes the check; (5) suites green in a clean clone.
+- **Build:** `stats.fisher_greater_p` (scipy's `fisher_exact`, one-sided); `hand_check` verdicts in order:
+  under the floor -> warn; both tests pass -> pass; full agreement could pass -> warn; otherwise concentrated,
+  or too_few (under 7 punches at 0.05). The Reliability row carries both p, the floor and a one-cell result.
+- **Test:** 222 checks. Fisher worked by hand (1/10, 26/252, 4/286, 4/56, 3/66) and against an integer
+  hypergeometric oracle; the two tests disagreeing in both directions (7 of 8: binomial 9/256 passes, Fisher
+  4/56 fails; 11 of 12: binomial 0.054 fails, Fisher 3/66 passes); 68 of 100 failing on the floor alone; IMG_4406
+  at an 80% floor passing by one punch. 26 mutants, 2 survived: the float floor (`k < HAND_FLOOR * n`) and a
+  binomial-only "could pass". The second got a 5-punch fixture; the first I judged equivalent.
+- **Review: FIX FIRST.** B1 scipy returns Fisher's exact 1/20 as 0.04999999999999999: on (12, 2, 0, 2) the
+  summary said "p = 0.050 (Fisher); only the Fisher test is under 0.05". B2 "the commonest jabs (6)" picked a
+  tie by alphabet. Also: the float floor is not equivalent in general (0.68 at 51 of 75); the "70 of 100"
+  test could not see floats; stance went unmentioned where it matters; "That is under..." had no clear subject.
+- **Fix:** every comparison with alpha goes through `_under_alpha` (a p within a billionth of alpha is not
+  under it); a p under alpha that would print as 0.050 prints "just under 0.05"; every tied type is named
+  ("most often jabs and lead hooks (6 each)"); agreement no higher than chance adds that a wrong stance swaps
+  lead and rear; "The 62% agreement is under the 70% ..."; floor patches in tests restored in `finally`. 234
+  checks; 30 mutants, all caught.
+- **Security:** no new input; Fisher validates its cells (negative tests); no cell is a formula. No findings.
+- **Real-world facts.** IMG_4395: 26 of 42 (62%) against 49.4%; binomial 0.071, Fisher 0.088; under 70%:
+  warns on all three. IMG_4406: 33 of 41 (80.5%) against 50.4%; binomial 0.00007, Fisher 0.00005; passes, and
+  still passes at 80% by one punch (32 of 41 would warn). Old 0.3-rule inputs: all under 70%, all warn. Both
+  reports regenerated.
+- **Residual, accepted:** the floor is chosen, not measured. The check is blind within a hand (jab vs lead
+  hook); a within-hand cue needs its own test against labels.

@@ -114,6 +114,17 @@ def binomial_greater_p(k: int, n: int, p: float) -> float:
     return float(min(1.0, tail))
 
 
+def fisher_greater_p(a: int, b: int, c: int, d: int) -> float:
+    """One-sided Fisher exact test on the 2x2 table [[a, b], [c, d]]: the chance, with
+    both row and column totals held fixed, of a diagonal at least this heavy (`a` this
+    large). A table with an empty row or column carries no evidence: p = 1."""
+    from scipy.stats import fisher_exact
+    for name, v in (("a", a), ("b", b), ("c", c), ("d", d)):
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise ValueError(f"cell {name} must be a whole number >= 0, got {v!r}")
+    return float(fisher_exact([[a, b], [c, d]], alternative="greater").pvalue)
+
+
 def per_group_gaps(y_true, pred_a, pred_b, groups, score) -> dict:
     """score(a) - score(b) inside each group, with a sign test across groups.
 
