@@ -185,9 +185,39 @@ p = faceblur.plan_frame((np.array([[100, 100, 200, 220]]), kxy[None], kc[None]),
 m = faceblur.blurred_mask(p, bh_, bw_)
 check("head-and-shoulders box, nose only: the whole 65x80 head is covered (was 31%)",
       bool(m[110:190, 117:182].all()), f"{m[110:190, 117:182].mean():.0%} {p}")
-x0, y0, x1, y1 = faceblur.plan_frame(pred_of([person(*A)]), W, H).regions[0]
-check("the patch is generous: at least 2.5 head widths across",
-      min(x1 - x0, y1 - y0) >= 2.5 * 2 * FACE, f"{x1 - x0}x{y1 - y0}")
+x0, y0, x1, y1 = faceblur.plan_frame(pred_of([person(*A)]), W, H).regions[1]  # the face patch
+check("face points confident: the patch is HEAD-sized, 1.6 to 2.4 head widths across",
+      1.6 * 2 * FACE <= min(x1 - x0, y1 - y0) and max(x1 - x0, y1 - y0) <= 2.4 * 2 * FACE,
+      f"{x1 - x0}x{y1 - y0} for a {2 * FACE}-px head")
+# Utility (Brendan, 2026-10-20): the guard and chest below a whole boxer's head stay
+# visible -- the body-sized patch and top-third floor hid them, and they are where
+# feints show.
+p = faceblur.plan_frame(pred_of([person(*A)]), W, H)
+m = faceblur.blurred_mask(p, H, W)
+chest = m[A[1] + 40:A[1] + 120, A[0] - 30:A[0] + 30]
+check("a whole boxer's chest and guard (40-120 px below the eyes) are not mosaicked",
+      not chest.any(), f"{chest.mean():.0%} of the chest mosaicked")
+for (j1, j2), name in (((faceblur.L_EYE, faceblur.R_EYE), "both eyes"),
+                       ((faceblur.NOSE, faceblur.L_EYE), "nose + one eye"),
+                       ((faceblur.L_EYE, faceblur.L_EAR), "eye + ear, same side"),
+                       ((faceblur.NOSE, faceblur.R_EAR), "nose + ear")):
+    two_pts = person(*A, conf=0.05)
+    two_pts[2][[j1, j2]] = 0.9
+    p = faceblur.plan_frame(pred_of([two_pts]), W, H)
+    out = faceblur.apply_plan(scene([A]), p)
+    check(f"two face points ({name}): the head-sized patch still covers the whole face",
+          covered(p, *A) and destroyed(scene([A]), out, *A), str(p))
+huge = person(*A, s=1.4)  # a bigger head: the patch grows with the face points
+hx0, hy0, hx1, hy1 = faceblur.plan_frame(pred_of([huge]), W, H).regions[1]
+check("the head-sized patch scales with the face (1.4x the person, wider patch)",
+      hx1 - hx0 > x1 - x0, f"{hx1 - hx0} vs {x1 - x0}")
+clump = person(*A, conf=0.05)  # two face points almost on top of each other: no size info
+clump[1][[faceblur.L_EYE, faceblur.R_EYE]] = [(A[0], A[1]), (A[0] + 0.5, A[1])]
+clump[2][[faceblur.L_EYE, faceblur.R_EYE]] = 0.9
+f = faceblur.face_patch(clump[0], clump[1], clump[2], W, H)
+check("two face points on top of each other: no head size, the generous body-sized patch",
+      faceblur.head_width([faceblur.L_EYE, faceblur.R_EYE], clump[1], 170) is None
+      and f.region[2] - f.region[0] >= 2.5 * 2 * FACE, str(f))
 
 print("the box is the floor: keypoints only add blur (blocker report, option 1)")
 chest = person(*A)  # confident face points, all on the chest: the skeleton is wrong
@@ -226,17 +256,60 @@ check("box-wide head in a 2:1 crop at the frame edge, no face points: whole head
       p.mode == "box" and bool(m[100:225, 100:200].all())
       and hf(out[100:225, 100:200]) < 0.2 * hf(big2[100:225, 100:200]),
       f"{m[100:225, 100:200].mean():.1%} {p}")
-# Option (c): away from the frame edge a whole boxer's floor is the top third (plus
-# padding), not 1.5 box widths -- the guard and torso stay visible for feint labels.
-mid = person(*A)[0]  # (50, 40, 110, 210) in a 320x240 frame: touches no edge
-fx0, fy0, fx1, fy1 = faceblur.top_third_region(mid, W, H)
-check("mid-frame whole boxer: the floor stops at the top third + padding (guard and torso visible)",
+# Option (c), then the top fifth (Brendan, 2026-10-20): away from the frame edge a
+# whole boxer's floor is the top fifth (+5%), not 1.5 box widths or a third -- the
+# guard and torso stay visible for feint labels.
+mid, mk, mc_ = person(*A)  # box (50, 40, 110, 210) in a 320x240 frame: touches no edge
+sh_y = mk[[5, 6], 1].mean()
+fx0, fy0, fx1, fy1 = faceblur.box_floor_region(mid, W, H, mk, mc_)
+check("mid-frame whole boxer: the floor stops at the shoulder line + 5% (guard and torso visible)",
       not faceblur._touches_edge(mid, W, H)
-      and fy1 <= np.ceil(mid[1] + (mid[3] - mid[1]) * (1 / 3 + faceblur.TOP_THIRD_PAD)),
-      f"floor ends at y={fy1}, box {mid}")
+      and fy1 <= np.ceil(max(mid[1] + faceblur.FLOOR_FRAC * (mid[3] - mid[1]), sh_y)
+                         + faceblur.FLOOR_BELOW * (mid[3] - mid[1])),
+      f"floor ends at y={fy1}, shoulders at {sh_y}, box {mid}")
+# Review R1: arms raised, so the box top is the gloves and the head sits at ~0.3-0.4
+# of the box -- below the top fifth. Face points on a glove (wrong skeleton): the
+# head was 0% covered. The floor now reaches the shoulder line.
+W3, H3 = 320, 420
+up_box = np.array([100.0, 40.0, 160.0, 400.0])  # gloves at y=40, head at 145-175
+up_k = np.zeros((N_JOINTS, 2))
+up_k[:] = (130, 300)
+up_k[list(faceblur.FACE_JOINTS)] = [(130, 52), (125, 48), (135, 48), (120, 50), (140, 50)]  # on the glove
+up_k[[5, 6]] = [(115, 190), (145, 190)]  # shoulders, correctly placed
+up_c = np.full(N_JOINTS, 0.9)
+up_scene = scene([(130, 160, 15)], W3, H3)
+p = faceblur.plan_frame((up_box[None], up_k[None], up_c[None]), W3, H3)
+out = faceblur.apply_plan(up_scene, p)
+check("arms up, face points on a glove: the real head is under the shoulder-anchored floor (was 0%)",
+      p.mode != "full" and covered(p, 130, 160, 15, H3, W3) and destroyed(up_scene, out, 130, 160, 15),
+      str(p))
+no_sh = up_c.copy()
+no_sh[[5, 6]] = 0.1
+fx0, fy0, fx1, fy1 = faceblur.box_floor_region(up_box, W3, H3, up_k, no_sh)
+check("... and with no confident shoulder the floor falls back to a third + 10%",
+      fy1 >= up_box[1] + (up_box[3] - up_box[1]) * (1 / 3 + 0.10) - 1, f"floor ends at {fy1}")
+# Review of R1: a skeleton fitted up the raised arm -- face on the glove AND shoulders
+# on the elbows -- is ONE failure, and brought the floor back to the top fifth (0%).
+for name, ubox in (("arms up", up_box), ("referee raising one arm", np.array([100.0, 40.0, 177.0, 400.0]))):
+    shifted = up_k.copy()
+    shifted[[5, 6]] = [(115, 80), (145, 80)]  # shoulders on the elbows
+    p = faceblur.plan_frame((ubox[None], shifted[None], up_c[None]), W3, H3)
+    out = faceblur.apply_plan(up_scene, p)
+    check(f"{name} ({(ubox[3] - ubox[1]) / (ubox[2] - ubox[0]):.1f}:1), whole skeleton shifted up the "
+          "arm: the head is still covered (was 0%)",
+          covered(p, 130, 160, 15, H3, W3) and destroyed(up_scene, out, 130, 160, 15), str(p))
+one_high = up_k.copy()
+one_high[5] = (115, 80)  # one shoulder on an elbow, the other correct
+fx0, fy0, fx1, fy1 = faceblur.box_floor_region(np.array([100.0, 40.0, 200.0, 400.0]), W3, H3, one_high, up_c)
+check("one shoulder wrongly high: the floor follows the LOWER shoulder (the mean gave 47%)",
+      fy1 >= 190, f"floor ends at {fy1}")
+guard = np.array([50.0, 40.0, 100.0, 210.0])  # 3.4:1, a side-on guard
+gx0, gy0, gx1, gy1 = faceblur.box_floor_region(guard, W, H, mk, mc_)
+check("a side-on guard box (3.4:1) keeps the shallow floor (the arms-up rule starts at 4:1)",
+      gy1 <= np.ceil(max(guard[1] + 0.2 * 170, sh_y) + 0.05 * 170), f"floor ends at {gy1}")
 edge = mid.copy()
 edge[3] = H  # the same boxer, feet cut off by the frame's bottom edge
-ex0, ey0, ex1, ey1 = faceblur.top_third_region(edge, W, H)
+ex0, ey0, ex1, ey1 = faceblur.box_floor_region(edge, W, H, mk, mc_)
 check("... and the same box touching the frame edge reaches 1.5 box widths",
       ey1 >= edge[1] + 1.5 * (edge[2] - edge[0]), f"floor ends at y={ey1}, box {edge}")
 # Review of option (c): the model places edges to ~1 model pixel (imgsz 640), so a
@@ -264,12 +337,15 @@ for t in range(500):
     if p.mode == "full":
         continue
     m = faceblur.blurred_mask(p, H, W)
-    for b, _, _ in people:
-        x0, y0, x1, y1 = faceblur.top_third_region(b, W, H)
-        if not m[y0:y1, x0:x1].all():
+    for b, k, c in people:
+        x0, y0, x1, y1 = faceblur.box_floor_region(b, W, H, k, c)
+        bwi, bhi = b[2] - b[0], b[3] - b[1]  # the floor no keypoint can shrink: top fifth + 5%
+        mx0, my0 = max(0, int(np.floor(b[0] - 0.1 * bwi))), max(0, int(np.floor(b[1] - 0.1 * bhi)))
+        mx1, my1 = min(W, int(np.ceil(b[2] + 0.1 * bwi))), min(H, int(np.ceil(b[1] + 0.25 * bhi)))
+        if not (m[y0:y1, x0:x1].all() and m[my0:my1, mx0:mx1].all()):
             floor_bad.append(t)
-check("keypoints only add: every person's box patch is blurred in every non-full plan (500 scenes)",
-      not floor_bad, str(floor_bad[:5]))
+check("keypoints only add: every person's box floor, and at least its top fifth + 5%, is blurred "
+      "in every non-full plan (500 scenes)", not floor_bad, str(floor_bad[:5]))
 
 print("box fallback (no confident face keypoints)")
 noface = person(*A)
@@ -356,8 +432,11 @@ check("clinch, both skeletons on ONE head -> whole frame, the other head destroy
       p.mode == "full" and p.reason == "ambiguous_faces"
       and destroyed(both, faceblur.apply_plan(both, p), A[0] + 40, A[1] + 10), str(p))
 p = faceblur.plan_frame(pred_of([person(*A), person(A[0] + 40, A[1] + 10)]), W, H)
-check("overlapping boxes, faces close together (each inside the other's box) -> whole frame",
-      p.mode == "full" and p.reason == "ambiguous_faces", str(p))
+near = scene([A, (A[0] + 40, A[1] + 10)])
+outn = faceblur.apply_plan(near, p)
+check("overlapping boxes, two distinct heads 40 px apart: whatever the mode, BOTH heads destroyed",
+      covered(p, *A) and covered(p, A[0] + 40, A[1] + 10)
+      and destroyed(near, outn, *A) and destroyed(near, outn, A[0] + 40, A[1] + 10), str(p))
 # Review N1: side by side, boxes NOT touching, but B's skeleton puts its face on A's
 # head (16 px outside B's box, within the slack). B's real head was 0% covered.
 W2, H2 = 320, 420

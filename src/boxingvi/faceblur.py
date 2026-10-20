@@ -7,16 +7,17 @@ names. Every decision below fails toward MORE blur, never less:
 - Every person YOLO11-pose finds in a frame is blurred, not only the tracked boxer
   (`pose_yolo.extract` keeps one person; this does not).
 - The BOX is the floor: every person's box patch is blurred, always -- the top
-  third of the box when it is body-shaped (at least twice as tall as wide; 1.5 box
+  fifth of the box when it is body-shaped (at least twice as tall as wide; 1.5 box
   widths if it touches the frame edge, where close-up crops come from), else the
   whole box (a crop, or a deep crouch, can be mostly head).
   Keypoints only ADD blur, never replace it: four review rounds each found a new
   way a confidently wrong skeleton moved a face patch off a head, and no list of
   guards closes that space (docs/quality-loop.md, blocker report, option 1).
-- A person with confident face keypoints (nose, eyes, ears) also gets a patch
-  centred on them, sized from the LARGEST of several body measures (shoulder
-  width, torso length, face-keypoint spread, box height, and the box itself unless
-  the skeleton reaches the legs inside it), for a head that leaves the top third.
+- A person with two or more confident face keypoints (nose, eyes, ears) also gets
+  a HEAD-SIZED patch (~1.8 head widths), the head measured from the face points
+  themselves (`head_width`). With one face point the patch is sized generously from
+  the body instead (the LARGEST of shoulder width, torso length, box height, and the
+  box itself unless the skeleton reaches the legs inside it).
 - The whole frame is blurred when the frame cannot be trusted: the predictor
   raised or returned malformed output; nobody was found; a person seen in a
   neighbouring frame has no counterpart here (a detector miss in a fast-motion
@@ -83,10 +84,31 @@ TORSO_SCALE = 0.8      # ... nor below 0.8 x shoulder-to-hip length (survives a 
 BOX_SCALE = 1.25
 LEG_JOINTS = (13, 14, 15, 16)  # knees, ankles
 LEG_SPAN = 0.4  # a knee or ankle this far (x box height) below the shoulders: a whole body
+# Head-sized patch, used when two or more face points are confident: the head's
+# width is estimated from the face points themselves, each pair scaled by its
+# frontal-view ratio to head width (interpupillary ~0.42 head widths, ear to ear
+# ~0.9, ...), taking the LARGEST estimate -- turning the head foreshortens some
+# pairs but lengthens others, so the max over visible pairs does not collapse. The
+# body-scaled patch above (PAD x 3-4 head widths) hid the guard and chest, which is
+# where feints show (Brendan, 2026-10-20); the box floor still sits underneath.
+HEAD_PAIR_FACTORS = {
+    frozenset((L_EAR, R_EAR)): 1.3, frozenset((L_EYE, R_EYE)): 2.6,
+    frozenset((NOSE, L_EYE)): 3.8, frozenset((NOSE, R_EYE)): 3.8,
+    frozenset((L_EYE, L_EAR)): 4.5, frozenset((R_EYE, R_EAR)): 4.5,
+    frozenset((NOSE, L_EAR)): 2.6, frozenset((NOSE, R_EAR)): 2.6,
+    frozenset((L_EYE, R_EAR)): 1.7, frozenset((R_EYE, L_EAR)): 1.7,
+}
+HEAD_PAD = 0.9         # patch half-size, in head widths: a patch ~1.8 head widths across
+HEAD_MARGIN = 0.5      # ... and never less than the farthest face point + half a head width
+HEAD_MIN_BOX_H = 0.05  # an estimate under 5% of the box height is not trusted (fallback)
 FACE_IN_BOX_SLACK = 0.25  # a face this far (x box size) outside its own box is not trusted
-TOP_THIRD_PAD = 0.10   # the box-only patch: top third of the box, widened by 10% a side ...
+FLOOR_PAD = 0.10   # the box floor reaches 10% of the box above it and to each side ...
+FLOOR_FRAC = 0.2       # ... and down to the top fifth of a whole-body box (a head is ~13-15%
+FLOOR_BELOW = 0.05     # of a standing body's height) or the shoulder line if lower, plus
+FLOOR_NO_SHOULDER = 0.05  # 5% of the box below that; with no confident shoulder, a third + 10% ...
 FULL_BODY_ASPECT = 2.0  # ... when the box is at least twice as tall as wide; else all of it
-# A box this close to the frame edge may be a crop (see top_third_region): 1% of the
+ARMS_UP_ASPECT = 4.0   # a box this tall and narrow may be arms up: the deep floor, always
+# A box this close to the frame edge may be a crop (see box_floor_region): 1% of the
 # long side, ~6 model pixels at imgsz 640. A fixed 2 px was finer than the model can
 # place an edge (one model pixel is ~3 px at 1080p), and a crop 3 px short lost the
 # extension: 70% of the head covered (review of option c).
@@ -205,6 +227,18 @@ def _whole_body(kxy, kc, sh, hp, box) -> bool:
                 and low - shoulder_y >= LEG_SPAN * bh)
 
 
+def head_width(face, kxy, bh) -> "float | None":
+    """Head width estimated from the confident face points `face`, or None when
+    fewer than two are confident, or the estimate is implausibly small for the box
+    (points nearly on top of each other say nothing about size)."""
+    est = [float(np.linalg.norm(kxy[a] - kxy[b])) * f
+           for pair, f in HEAD_PAIR_FACTORS.items() if pair <= set(face)
+           for a, b in [tuple(pair)]]
+    if not est or max(est) < HEAD_MIN_BOX_H * bh:
+        return None
+    return max(est)
+
+
 def face_patch(box, kxy, kc, width, height) -> "_Face | None":
     """The face patch for one person; None when no face keypoint is confident. A
     `_Face` with region None means the keypoints exist but cannot be trusted."""
@@ -218,6 +252,12 @@ def face_patch(box, kxy, kc, width, height) -> "_Face | None":
     if not (x0 - FACE_IN_BOX_SLACK * bw <= cx <= x1 + FACE_IN_BOX_SLACK * bw
             and y0 - FACE_IN_BOX_SLACK * bh <= cy <= y1 + FACE_IN_BOX_SLACK * bh):
         return _Face((cx, cy), 0.0, None, "face_outside_box")
+    hw = head_width(face, kxy, bh)
+    if hw is not None:  # head-sized: the face points measure the head directly
+        half = max(HEAD_PAD * hw, float(np.abs(pts - (cx, cy)).max()) + HEAD_MARGIN * hw)
+        r = _clip_region(cx - half, cy - half, cx + half, cy + half, width, height)
+        return _Face((cx, cy), half, r, "" if r else "empty_region")
+    # One face point (or an implausibly small head): size from the body, generously.
     scales = [MIN_SCALE_BOX_H * bh]
     if len(pts) > 1:
         spread = max(float(np.linalg.norm(a - b)) for a in pts for b in pts)
@@ -249,14 +289,34 @@ def _touches_edge(box, width, height) -> bool:
     return x0 <= e or y0 <= e or x1 >= width - e or y1 >= height - e
 
 
-def top_third_region(box, width, height):
-    """The box patch, every person's floor: the top third of a whole body. A box that
-    is not body-shaped (a deep crouch, or a crop) may be mostly head, and its top
-    third misses the chin, so the WHOLE box is blurred instead. A body-shaped box
-    touching the frame edge may be a close-up crop: 1.5 box widths from the top."""
+def box_floor_region(box, width, height, kxy=None, kc=None):
+    """The box patch, every person's floor: the top fifth of a whole body, or down to
+    the confident-shoulder line if lower, or a third + 10% with no confident
+    shoulder (+5% of the box below it, 10% above and to each side). Shoulders can
+    only deepen it past the top fifth. A box that is not body-shaped (a deep
+    crouch, or a crop) may be mostly head, and its top fifth misses the chin, so the
+    WHOLE box is blurred instead. A body-shaped box touching the frame edge may be a
+    close-up crop: 1.5 box widths from the top."""
     x0, y0, x1, y1 = box
     bw, bh = x1 - x0, y1 - y0
-    top = bh / 3
+    top = FLOOR_FRAC * bh
+    # The top fifth holds the head only while the box top is the head. With arms
+    # raised the box top is the gloves and the head sits at 0.3-0.4 of the box: a
+    # wrong skeleton then left it bare (review R1). So the floor also reaches the
+    # shoulder line, and with no confident shoulder, the old third + 10%.
+    # The LOWER shoulder, not the mean: one shoulder wrongly placed high (on an
+    # elbow) pulled the mean line halfway up (47% of the head covered).
+    sh = [] if kc is None else [j for j in (L_SHOULDER, R_SHOULDER) if kc[j] >= BODY_MIN_CONF]
+    if sh:
+        top = max(top, float(kxy[sh, 1].max()) - y0)
+    else:
+        top = max(top, bh / 3 + FLOOR_NO_SHOULDER * bh)
+    # ... but a skeleton fitted up a raised arm puts its shoulders up there too: one
+    # failure, not two (0%). Raised arms make the box tall and narrow (arms up 5.6:1,
+    # a referee raising one 4.7:1; guard and punches 3.4:1 and below), so from 4:1 the
+    # deep floor applies whatever the keypoints say.
+    if bh >= ARMS_UP_ASPECT * bw:
+        top = max(top, bh / 3 + FLOOR_NO_SHOULDER * bh)
     if _touches_edge(box, width, height):
         # A head is no wider than its box and ~1.25x as tall as wide, so a
         # head-to-chest crop that passes the 2:1 test still has its chin inside
@@ -264,9 +324,9 @@ def top_third_region(box, width, height):
         # edge, where real close-up crops come from: on a whole boxer in guard
         # (~0.4x as wide as tall) it would mosaic head to hips (Brendan, option c).
         top = max(top, 1.5 * bw)
-    bottom = y0 + top + TOP_THIRD_PAD * bh if bh >= FULL_BODY_ASPECT * bw else y1
-    return _clip_region(x0 - TOP_THIRD_PAD * bw, y0 - TOP_THIRD_PAD * bh,
-                        x1 + TOP_THIRD_PAD * bw, bottom, width, height)
+    bottom = y0 + top + FLOOR_BELOW * bh if bh >= FULL_BODY_ASPECT * bw else y1
+    return _clip_region(x0 - FLOOR_PAD * bw, y0 - FLOOR_PAD * bh,
+                        x1 + FLOOR_PAD * bw, bottom, width, height)
 
 
 def _intersect(a, b) -> bool:
@@ -346,7 +406,7 @@ def _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_miss
     # skeleton costs extra blur, never a bare head (blocker report, option 1).
     regions, any_box = [], False
     for i in range(n):
-        r = top_third_region(boxes[i], width, height)
+        r = box_floor_region(boxes[i], width, height, kxy[i], kc[i])
         if r is None:  # cannot happen for a validated box; fail closed regardless
             return _full(n, "empty_region")
         regions.append(r)
