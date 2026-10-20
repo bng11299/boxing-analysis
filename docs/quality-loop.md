@@ -1003,3 +1003,7 @@ layouts, read from their headers: nine `(N, 25, 17, 2)` and V6 `(46497, 1, 17, 3
   `np.load`; there is no absolute cap because the release's largest file is 19 MB and a
   plain `.npy` cannot amplify. A FIFO planted in `Skeleton_data` would block a read on a
   POSIX machine, but planting one needs local write access to `data/`.
+- **Reproduce:** a clean clone at afaf819 (no `data/`, no `results/`, none tracked) gives the
+  same numbers in every suite (pipeline 314, ingest 162, classify 202, report 130, labels 50,
+  env 36, hands 38, machine scripts 38; `run_baseline.py --synthetic` exits 0). The pipeline
+  and ingest check lists match the working tree's line for line.
