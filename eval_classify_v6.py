@@ -71,6 +71,14 @@ def corpus_clip(track, s) -> "np.ndarray | None":
     return pad_or_trim(_with_validity_channel((track.xy[lo:hi] / np.array(SOURCE_SIZE)).astype(np.float32)))
 
 
+def finder_pairs(det, spans, fps: float) -> "dict[int, int]":
+    """Labelled span -> the finder's detection that readings C, E and G read it at.
+
+    Nearest attribution (punchfind.match_nearest), not punchfind.match's greedy: 212 of
+    V6's 685 spans overlap the next one, and the greedy hands a combination's one
+    detection to whichever span ends first. The count is the same either way."""
+    return dict(punchfind.match_nearest(det, spans, int(round(TOL_S * fps))))
+
 def block(preds: dict, y: dict, keep) -> dict:
     """Scores and paired gaps over the spans in `keep`."""
     out = {"readings": {}, "paired": {}}
@@ -117,7 +125,7 @@ def main(argv=None) -> int:
     sig = punchfind.wrist_signal(track, geom.variant)
     row = {int(f): i for i, f in enumerate(track.frame_ids)}
     det, dh = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
-    pairs = dict(punchfind.match(det, spans, int(round(TOL_S * track.fps))))
+    pairs = finder_pairs(det, spans, track.fps)
 
     def extent_window(peak: int, hand: int):
         e = classify.punch_extent(track, sig, peak, hand, ex, geom)
@@ -168,7 +176,7 @@ def main(argv=None) -> int:
     lo, hi = r["test_window"]
     second = {j for j, s in enumerate(spans) if lo <= s.start and s.end <= hi}
     result = {"video": "V6", "n_labelled": len(spans), "classifier_sha256": man["sha256"],
-              "geometry": asdict(geom), "extent": ex, "finder_matched": len(pairs),
+              "geometry": asdict(geom), "extent": ex, "finder_matched": len(pairs), "finder_attribution": "nearest",
               "clip_cut_from_labelled_punches": cut_labelled._asdict(),
               "clip_cut_from_finder_detections": {**cut_finder._asdict(), "n_detections": int(len(det))},
               "all": block(preds, y, set(y)), "second_half": {"window": [lo, hi], **block(preds, y, second)},

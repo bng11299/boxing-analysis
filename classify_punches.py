@@ -236,7 +236,9 @@ def main(argv=None) -> int:
         spans = load_labels(a.labels, len(pose), pose.fps)
         named = [(j, s) for j, s in enumerate(spans) if s.label != UNCLEAR_LABEL]
         tol = int(round(TOL_S * pose.fps))
-        pairs = punchfind.match([d["frame"] for d in rows], spans, tol)
+        # Who is scored against which label: nearest, not punchfind.match's greedy, which hands a fast
+        # jab-cross's one detection to the jab (punchfind.match_nearest). Same count either way.
+        pairs = punchfind.match_nearest([d["frame"] for d in rows], spans, tol)
         yt, yp, matched_unclassified = [], [], 0
         for si, di in pairs:
             if spans[si].label == UNCLEAR_LABEL:
@@ -266,7 +268,7 @@ def main(argv=None) -> int:
                 by_window.append(classify.cut_span(track, *classify.clip_window(pk, cut, pose.fps), geom, torso))
         ious = [punchfind.span_iou(spans_read[di], (spans[si].start, spans[si].end)) for si, di in pairs]
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
-        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
+        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol, "matching": "nearest",
                   "classifier_sha256": man["sha256"], "cut": {"per": "clip", **cut._asdict()},
                   "matched_detections": type_scores(yt, yp),
                   "matched_unclassifiable": matched_unclassified,

@@ -234,6 +234,61 @@ find_punches.main(["--pose", str(tmp / "IMG_6666.pose.npz"), "--rule", str(rule)
 check("a 10 s clip gets no chance floor (too few distinct shifts to mean anything)",
       "shift_floor" not in json.loads((tmp / "o" / "IMG_6666.score.json").read_text(encoding="utf-8")))
 
+print("nearest attribution (punchfind.match_nearest)")
+JAB, CROSS = 0, 1
+# A jab 10-18 then a cross 19-26; the finder reports one peak, at the cross's middle (22).
+combo = [Span(10, 18, JAB), Span(19, 26, CROSS)]
+greedy = punchfind.match([22], combo, 4)
+near = punchfind.match_nearest([22], combo, 4)
+check("punchfind.match credits the jab with the cross's detection (why attribution needs match_nearest)",
+      greedy == [(0, 0)], str(greedy))
+check("nearest matching gives that detection to the cross, whose middle it sits on", near == [(1, 0)], str(near))
+# Count comes first: z fits only A; w fits A (nearer) and C. Nearest-per-detection would give both to A.
+a_c = [Span(0, 10, JAB), Span(9, 30, CROSS)]
+check("a maximum matching first: the nearer span is given up when that keeps a hit",
+      punchfind.match_nearest([5, 9], a_c, 0) == [(0, 0), (1, 1)], str(punchfind.match_nearest([5, 9], a_c, 0)))
+rng = np.random.default_rng(3)
+same = True
+for _ in range(200):
+    starts = np.sort(rng.integers(0, 300, 12))
+    sp = [Span(int(s), int(s + rng.integers(3, 20)), int(rng.integers(0, 6))) for s in starts]
+    det = rng.integers(0, 320, int(rng.integers(0, 15)))
+    m = punchfind.match_nearest(det, sp, 3)
+    same &= len(m) == len(punchfind.match(det, sp, 3)) and len({j for _, j in m}) == len(m) \
+        and all(sp[s].start - 3 <= det[j] <= sp[s].end + 3 for s, j in m)
+check("200 random cases: as many hits as punchfind.match, one-to-one, every pair inside span +- tol", bool(same))
+import itertools  # noqa: E402
+
+opt = True
+for _ in range(150):
+    ns, nd = int(rng.integers(1, 6)), int(rng.integers(1, 6))
+    st = np.sort(rng.integers(0, 60, ns))
+    sp = [Span(int(x), int(x + rng.integers(2, 15)), 0) for x in st]
+    det = rng.integers(0, 75, nd)
+    fits = lambda si, di: sp[si].start - 2 <= det[di] <= sp[si].end + 2  # noqa: E731
+    dist = lambda si, di: abs(det[di] - (sp[si].start + sp[si].end) / 2)  # noqa: E731
+    best = (0, 0.0)                              # (hits, -total distance), maximised
+    for perm in itertools.permutations(range(nd), min(ns, nd)):
+        pairs = [(si, di) for si, di in zip(range(ns), perm) if fits(si, di)]
+        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
+    for perm in itertools.permutations(range(ns), min(ns, nd)):   # spans fewer than detections either way
+        pairs = [(si, di) for di, si in zip(range(nd), perm) if fits(si, di)]
+        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
+    m = punchfind.match_nearest(det, sp, 2)
+    opt &= len(m) == best[0] and abs(sum(dist(si, di) for si, di in m) + best[1]) < 1e-9
+check("150 small random cases against brute force: the most hits, then the least total distance", bool(opt))
+check("no detections, or no spans: no pairs", punchfind.match_nearest([], combo, 2) == [] and punchfind.match_nearest([5], [], 2) == [])
+
+raises("negative tolerance refused, as punchfind.match refuses it", lambda: punchfind.match_nearest([1], [Span(0, 1, 0)], -1))
+raises("... even with no detections, before the empty answer", lambda: punchfind.match_nearest([], [Span(0, 1, 0)], -1))
+# The combination as V6 has it: a hook whose span runs into the next, and the finder's one peak at the second's middle.
+hooks = [Span(100, 116, 2), Span(112, 128, 3), Span(200, 210, 2)]
+check("overlapping spans (as 212 of V6's 685 do): the detection goes to the span it sits in the middle of",
+      punchfind.match_nearest([117, 205], hooks, 2) == [(1, 0), (2, 1)]
+      and punchfind.match([117, 205], hooks, 2) == [(0, 0), (2, 1)], str(punchfind.match_nearest([117, 205], hooks, 2)))
+check("pairs come back sorted by span, whatever order the detections arrive in",
+      punchfind.match_nearest([205, 117], hooks, 2) == [(1, 1), (2, 0)], str(punchfind.match_nearest([205, 117], hooks, 2)))
+
 print("coverage is exactly where the signal is")
 walk = body(900, 59.946)
 walk.xy[:, [9, 10]] += np.random.default_rng(3).normal(0, 6, (900, 2, 2)).cumsum(axis=0)  # never still

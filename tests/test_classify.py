@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from boxingvi import classify, pose_yolo, punchfind  # noqa: E402
-from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Track  # noqa: E402
+from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Span, Track  # noqa: E402
 from boxingvi.stgcnpp import STGCNPP, prepare_input  # noqa: E402
 
 PASS = FAIL = 0
@@ -795,6 +795,41 @@ check("a labelled punch with no wrist speed in it is not scored 'at its peak' (i
       sc_still["labelled_punch_by_clip_window_unclassifiable"] == 1
       and sc_still["labelled_punch_by_clip_window_at_its_peak"]["n"] == 1
       and sc_still["labelled_punch_from_labelled_frames"]["n"] == 2, str(sc_still))
+# A fast jab-cross: the finder reports one peak (the right hand's, at 14 s) and it fits both labels; the jab
+# ends first. punchfind.match hands that detection to the jab, so a window read at the cross would be scored
+# against 'jab'. The score must attribute it to the cross, whose middle it sits nearest.
+f14 = int(rows[2]["frame"])
+check("control: the third finder punch is the right hand's", rows[2]["hand"] == "right", str(rows[2]))
+combo = [{"start": f14 - 20, "end": f14 - 3, "label": "jab"}, {"start": f14 - 2, "end": f14 + 14, "label": "cross"}]
+tol14 = int(round(find_punches.TOL_S * fps))
+greedy14 = punchfind.match([f14], [Span(c["start"], c["end"], 0) for c in combo], tol14)
+check("control: punchfind.match gives this detection to the jab (the fixture reproduces the V5 failure)",
+      greedy14 == [(0, 0)], str(greedy14))
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": combo}), encoding="utf-8")
+classify_punches.main(args + ["--stance", "orthodox", "--labels", str(lab)])
+sc_jc = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding="utf-8"))
+check("jab-cross: the matched detection is scored against the cross, not the jab",
+      sc_jc["matched_detections"]["n"] == 1 and sc_jc["matched_detections"]["classes_present"] == ["cross"],
+      str(sc_jc["matched_detections"]))
+check("... and the score says how detections were attributed", sc_jc.get("matching") == "nearest")
+
+print("eval_classify_v6 attribution")
+import eval_classify_v6  # noqa: E402
+
+v6_combo = [Span(10, 20, CLASSES.index("lead_hook")), Span(19, 26, CLASSES.index("rear_hook"))]
+check("control: at 24 fps the tolerance is 2 frames, and punchfind.match gives 22 to the first hook",
+      int(round(eval_classify_v6.TOL_S * 24.0)) == 2 and punchfind.match([22], v6_combo, 2) == [(0, 0)])
+check("readings C/E/G read the second hook at the detection on its middle, not the first",
+      eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0) == {1: 0},
+      str(eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0)))
+check("finder_pairs: no detections -> no pairs", eval_classify_v6.finder_pairs(np.array([], dtype=np.int64), v6_combo, 24.0) == {})
+import run_punch_extent  # noqa: E402
+
+check("the extent gate measures overlap at the detection on the second hook's middle, not the first's",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100)) == [(1, 0)],
+      str(run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100))))
+check("... and only spans wholly inside the window are kept",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 25)) == [], "the second hook ends at 26")
 
 def punches_with(text):
     p = tmp / "p.csv"
