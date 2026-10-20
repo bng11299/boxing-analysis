@@ -281,6 +281,16 @@ check("no detections, or no spans: no pairs", punchfind.match_nearest([], combo,
 
 raises("negative tolerance refused, as punchfind.match refuses it", lambda: punchfind.match_nearest([1], [Span(0, 1, 0)], -1))
 raises("... even with no detections, before the empty answer", lambda: punchfind.match_nearest([], [Span(0, 1, 0)], -1))
+import scipy.optimize  # noqa: E402
+
+_lsa = scipy.optimize.linear_sum_assignment
+scipy.optimize.linear_sum_assignment = lambda c: (np.array([], int), np.array([], int))   # a solver that drops a hit
+try:
+    raises("a solver answer with fewer hits than punchfind.match is refused, not scored",
+           lambda: punchfind.match_nearest([22], combo, 4), AssertionError)
+finally:
+    scipy.optimize.linear_sum_assignment = _lsa
+check("... and the real solver is back", punchfind.match_nearest([22], combo, 4) == [(1, 0)])
 # The combination as V6 has it: a hook whose span runs into the next, and the finder's one peak at the second's middle.
 hooks = [Span(100, 116, 2), Span(112, 128, 3), Span(200, 210, 2)]
 check("overlapping spans (as 212 of V6's 685 do): the detection goes to the span it sits in the middle of",

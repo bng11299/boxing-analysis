@@ -27,8 +27,11 @@ same labelled punches, by the same saved classifier:
 F - B and G - C are what the per-clip window buys over the old one; D - F and
 E - G what sizing each punch on its own adds (on V6, nothing measurable either
 way); A - F what cutting still costs;
-F - G the finder's timing and its unlabelled detections. Reported on all of V6 and
-on its second half alone, because the extent rule's width level and the choice of
+F - G the finder's timing and its unlabelled detections. Which detection a labelled
+punch is read at in C, E and G is decided by punchfind.match_nearest (`finder_pairs`):
+where spans overlap, the one whose middle the detection sits nearest.
+
+Reported on all of V6 and on its second half alone, because the extent rule's width level and the choice of
 rule were made looking at the first half (run_punch_extent.py); the second half
 is the clean number. Paired bootstrap intervals on the punches both readings read.
 

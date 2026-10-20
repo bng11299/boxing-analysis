@@ -17,8 +17,9 @@ look like one of those clips, in time and in space:
   slow footage. V5 + V9, 742 punches: per clip 0.826, the old fixed 0.375 s window
   0.806, per punch 0.774 (per punch minus per clip -0.053 [-0.075, -0.030]). V6
   second half: per clip 0.631, per punch 0.608, old window 0.500 (per punch minus
-  per clip -0.022 [-0.054, +0.010], a tie; at the finder's own detections 0.678
-  against 0.684, also a tie). A boxer's tempo is steady within a clip; one punch's
+  per clip -0.022 [-0.054, +0.010], a tie; at the finder's own detections 0.684
+  against 0.694, also a tie -- detections attributed to the span whose middle they
+  sit nearest since 2026-10-20; 0.678 against 0.684 before). A boxer's tempo is steady within a clip; one punch's
   peak width is a noisy reading of it. `cut_window`, the fixed-length window,
   stays as the baseline these are measured against.
   THE CHOICE WAS MADE LOOKING AT THOSE NUMBERS: V5, V9 and V6's second half are no
