@@ -71,7 +71,7 @@ check("the script keeps no matcher of its own", not hasattr(ev, "match_nearest")
 check("split_detections attributes with punchfind.match_nearest by default: the jab-cross detection is the cross's",
       ev.split_detections([22], combo, [], 4, 30)["pairs"] == [(1, 0)], str(ev.split_detections([22], combo, [], 4, 30)))
 
-rng = np.random.default_rng(3)   # the later random cases' generator (it was seeded here before the move)
+rng = np.random.default_rng(3)   # the later random cases' generator; their draws differ from before the move
 
 print("splitting detections")
 spans = [Span(100, 110, JAB), Span(200, 210, CROSS)]

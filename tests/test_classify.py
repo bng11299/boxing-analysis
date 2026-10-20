@@ -546,6 +546,8 @@ check("a good rule file is read", extent_json()() == {"frac": 0.5, "lead_widths"
 raises("a rule that did not beat the fixed window is refused", extent_json(beats_fixed_window=False))
 raises("a rule file from before the per-clip cut (the flag, but no gated cut) is refused", extent_json(gated_cut=None))
 raises("a rule file that gated another cut is refused", extent_json(gated_cut="per punch, at labelled peaks"))
+raises("a rule file gated with the greedy attribution (before 2026-10-20) is refused: the gate measured other pairs",
+       extent_json(gated_cut="per clip, median over the finder's detections, windows at its matched detections"))
 raises("a rule with no verdict is refused (truthy is not True)", extent_json(beats_fixed_window="yes"))
 raises("a rule measured with another wrist-speed variant is refused", extent_json(variant="radial"))
 raises("a width level of 1.0 is refused", extent_json(frac=1.0))

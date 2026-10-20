@@ -237,7 +237,8 @@ def main(argv=None) -> int:
         named = [(j, s) for j, s in enumerate(spans) if s.label != UNCLEAR_LABEL]
         tol = int(round(TOL_S * pose.fps))
         # Who is scored against which label: nearest, not punchfind.match's greedy, which hands a fast
-        # jab-cross's one detection to the jab (punchfind.match_nearest). Same count either way.
+        # jab-cross's one detection to the jab (punchfind.match_nearest). The same number of matches either
+        # way, but not the same spans: matched_detections.n and matched_unclassifiable can move.
         pairs = punchfind.match_nearest([d["frame"] for d in rows], spans, tol)
         yt, yp, matched_unclassified = [], [], 0
         for si, di in pairs:

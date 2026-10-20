@@ -29,11 +29,12 @@ E - G what sizing each punch on its own adds (on V6, nothing measurable either
 way); A - F what cutting still costs;
 F - G the finder's timing and its unlabelled detections. Which detection a labelled
 punch is read at in C, E and G is decided by punchfind.match_nearest (`finder_pairs`):
-where spans overlap, the one whose middle the detection sits nearest.
+among the matchings with the most hits, the one with the least total distance from
+each detection to its span's middle.
 
-Reported on all of V6 and on its second half alone, because the extent rule's width level and the choice of
-rule were made looking at the first half (run_punch_extent.py); the second half
-is the clean number. Paired bootstrap intervals on the punches both readings read.
+Reported on all of V6 and on its second half alone, because the extent rule's
+width level and the choice of rule were made looking at the first half
+(run_punch_extent.py); the second half is the clean number. Paired bootstrap intervals on the punches both readings read.
 
 Limits, stated in the results: V6 has only hooks and uppercuts (no jabs or
 crosses), one athlete, and the same channel as training video V1, so its numbers
@@ -81,6 +82,7 @@ def finder_pairs(det, spans, fps: float) -> "dict[int, int]":
     V6's 685 spans overlap the next one, and the greedy hands a combination's one
     detection to whichever span ends first. The count is the same either way."""
     return dict(punchfind.match_nearest(det, spans, int(round(TOL_S * fps))))
+
 
 def block(preds: dict, y: dict, keep) -> dict:
     """Scores and paired gaps over the spans in `keep`."""
