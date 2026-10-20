@@ -29,10 +29,14 @@ reports rather than guesses, and remains the first thing to run on new data.
 from __future__ import annotations
 
 import json
+import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+from .npyread import read_data, read_header
 
 # COCO-17, the order AlphaPose emits.
 KEYPOINTS = [
@@ -154,7 +158,52 @@ def _read_alphapose_json(path: Path) -> np.ndarray:
     return np.stack(out)
 
 
-SKELETON_READERS = {".json": _read_alphapose_json, ".npy": lambda p: np.load(p)}
+# The two layouts the release ships, read from the headers of all ten files on
+# 2026-10-20: nine (N, 25, 17, 2) clip arrays and V6's (46497, 1, 17, 3) per-frame
+# pose, every one '<f8' in .npy format 1.0. Channels may be 2 or 3 in a clip array
+# (`_with_validity_channel` takes either). Name -> (shape test, what it expects).
+_NPY_LAYOUTS = {
+    "clips": (lambda s: len(s) == 4 and s[1:3] == (MAX_FRAMES, N_JOINTS) and s[3] in (2, 3),
+              f"(N, {MAX_FRAMES}, {N_JOINTS}, 2 or 3)"),
+    "v6": (lambda s: len(s) == 4 and s[1:] == (1, N_JOINTS, 3), f"(F, 1, {N_JOINTS}, 3)"),
+}
+
+
+def load_corpus_npy(path: Path, layouts: "tuple[str, ...]") -> np.ndarray:
+    """Load a corpus .npy, refusing it from its header before anything is allocated.
+
+    The corpus is third-party data, so this is the trust boundary. `np.load`
+    allocates whatever shape a header claims and only then finds the data missing:
+    a 128-byte V6.npy claiming 2M frames cost 816 MB before a ValueError (measured
+    2026-10-20). Here the header is read through a byte cap, then checked -- a plain
+    float dtype of at most 8 bytes (never object, so nothing is ever unpickled),
+    integer dims matching one of `layouts` (keys of `_NPY_LAYOUTS`), and promised
+    bytes no more than the file holds after its header -- and only then is one
+    buffer of exactly that size filled. A file that cannot be opened raises OSError;
+    anything wrong inside it, ValueError.
+    """
+    p = Path(path)
+    with open(p, "rb") as fh:
+        shape, fortran, dtype = read_header(fh, p.name)
+        if (dtype.kind != "f" or dtype.hasobject or dtype.fields is not None
+                or dtype.subdtype is not None or dtype.itemsize > 8):
+            raise ValueError(f"{p.name}: dtype {dtype.str!r}; corpus keypoints are "
+                             "floats of at most 8 bytes")
+        if (not all(type(d) is int and d >= 0 for d in shape)  # (True, ...) parses
+                or not any(_NPY_LAYOUTS[k][0](shape) for k in layouts)):
+            want = " or ".join(_NPY_LAYOUTS[k][1] for k in layouts)
+            raise ValueError(f"{p.name}: expected {want}, got {shape}")
+        need = dtype.itemsize * math.prod(shape)  # Python ints: cannot overflow
+        room = os.fstat(fh.fileno()).st_size - fh.tell()
+        if need > room:
+            raise ValueError(f"{p.name}: header promises {need:,} bytes of data; "
+                             f"the file holds {room:,} after its header")
+        return read_data(fh, shape, fortran, dtype, p.name)
+
+
+# A loose .npy under Skeleton_data is one of the two layouts the release ships.
+SKELETON_READERS = {".json": _read_alphapose_json,
+                    ".npy": lambda p: load_corpus_npy(p, ("clips", "v6"))}
 
 
 def discover_layout(root: Path) -> dict:
@@ -285,12 +334,9 @@ def _load_presegmented(video: str, skel: Path, ann: Path):
     """The nine videos the authors shipped already cut into 25-frame clips."""
     import pandas as pd
 
-    arr = np.load(skel / f"{video}.npy", allow_pickle=False)
+    arr = load_corpus_npy(skel / f"{video}.npy", ("clips",))
     df = pd.read_excel(ann / f"{video}.xlsx")
 
-    if arr.ndim != 4 or arr.shape[1:3] != (MAX_FRAMES, N_JOINTS):
-        raise ValueError(f"{video}: expected (N, {MAX_FRAMES}, {N_JOINTS}, C), "
-                         f"got {arr.shape}")
     # The alignment this loader depends on. If the counts ever diverge, the
     # row-to-clip correspondence is unknowable and guessing would silently
     # mislabel the whole video.
@@ -319,9 +365,7 @@ def _load_v6(skel: Path, ann: Path):
     """V6 ships raw per-frame pose; rebuild clips from its annotation spans."""
     import pandas as pd
 
-    arr = np.load(skel / "V6.npy", allow_pickle=False)
-    if arr.shape[1:] != (1, N_JOINTS, 3):
-        raise ValueError(f"V6: expected (F, 1, {N_JOINTS}, 3), got {arr.shape}")
+    arr = load_corpus_npy(skel / "V6.npy", ("v6",))
     frame_ids = arr[:, 0, 0, 0].astype(np.int64)  # channel 0 is a frame index
     xy = arr[:, 0, :, 1:3]                        # channels 1-2 are x, y
     index = {int(f): i for i, f in enumerate(frame_ids)}
@@ -434,9 +478,7 @@ class Span:
 
 
 def load_v6_track(skel: Path) -> Track:
-    arr = np.load(Path(skel) / "V6.npy", allow_pickle=False)
-    if arr.ndim != 4 or arr.shape[1:] != (1, N_JOINTS, 3):
-        raise ValueError(f"V6: expected (F, 1, {N_JOINTS}, 3), got {arr.shape}")
+    arr = load_corpus_npy(Path(skel) / "V6.npy", ("v6",))
     ids = arr[:, 0, :, 0]
     # Channel 0 is one frame id repeated over the 17 joints. If that ever stops
     # holding, it is not a frame id and the alignment above does not apply.

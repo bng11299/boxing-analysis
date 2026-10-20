@@ -1186,5 +1186,196 @@ with tempfile.TemporaryDirectory() as _d:
 check("native frame rates cover every video, and none is 30 exactly",
       set(data.NATIVE_FPS) == set(data.VIDEOS) and 30.0 not in data.NATIVE_FPS.values())
 
+
+print("\n--- Corpus .npy: headers checked before anything is allocated ---")
+# The corpus is third-party data. `np.load` allocates the shape a header claims and
+# only then finds the data missing: a 128-byte V6.npy claiming 2M frames cost 816 MB
+# before an ordinary-looking ValueError. So every refusal below checks the message
+# (the intended check fired) AND the traced peak (it fired before the allocation).
+import io  # noqa: E402
+import pickle  # noqa: E402
+import struct  # noqa: E402
+import tracemalloc  # noqa: E402
+
+
+def refuses(name: str, fn, needle: str) -> None:
+    """ValueError whose message names `needle`, so the intended check is what fired."""
+    try:
+        fn()
+    except ValueError as e:
+        check(name, needle in str(e), f"wrong check fired: {e}")
+    except Exception as e:
+        check(name, False, f"raised {type(e).__name__}: {e}")
+    else:
+        check(name, False, "did not raise")
+
+
+def peak_mb(fn) -> float:
+    """Peak traced allocation while `fn` runs; numpy reports its buffers to tracemalloc."""
+    tracemalloc.start()
+    try:
+        fn()
+    except Exception:
+        pass
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return peak / 1e6
+
+
+def refused_small(name: str, fn, needle: str) -> None:
+    """Refused by the named check, with nothing large allocated on the way."""
+    refuses(name, fn, needle)
+    mb = peak_mb(fn)
+    check("... before anything large is allocated", mb < 5, f"peak {mb:.1f} MB")
+
+
+def npy_header_only(shape, descr: str = "<f8") -> bytes:
+    """A .npy that is all header: it claims `shape` and carries no data at all."""
+    b = io.BytesIO()
+    np.lib.format.write_array_header_1_0(b, {"descr": descr, "fortran_order": False,
+                                            "shape": shape})
+    return b.getvalue()
+
+
+_UNPICKLED: "list[int]" = []
+
+
+def _mark_unpickled() -> int:
+    _UNPICKLED.append(1)
+    return 0
+
+
+class _PickleProbe:
+    """Records it if anything ever unpickles it; a loader must not."""
+
+    def __reduce__(self):
+        return (_mark_unpickled, ())
+
+
+with tempfile.TemporaryDirectory() as _d:
+    _sk = Path(_d)
+    _v1, _v6 = _sk / "V1.npy", _sk / "V6.npy"
+    _read = data.SKELETON_READERS[".npy"]
+
+    # 1. Header bombs, through every public way in.
+    _v6.write_bytes(npy_header_only((10**12, 1, N_JOINTS, 3)))
+    check("bomb fixture is tiny", _v6.stat().st_size <= 128, str(_v6.stat().st_size))
+    refused_small("V6 track: a 128-byte file claiming 10^12 frames is refused",
+                  lambda: data.load_v6_track(_sk), "promises 408,000,000,000,000 bytes")
+    _v6.write_bytes(npy_header_only((2_000_000, 1, N_JOINTS, 3)))  # np.load: 816 MB
+    refused_small("V6 track: one claiming 2M frames (816 MB under np.load) is refused",
+                  lambda: data.load_v6_track(_sk), "promises 816,000,000 bytes")
+    refused_small("V6 clips loader: the same file is refused",
+                  lambda: data._load_v6(_sk, _sk), "promises 816,000,000 bytes")
+    _v1.write_bytes(npy_header_only((100_000, MAX_FRAMES, N_JOINTS, 2)))  # 680 MB
+    refused_small("pre-segmented loader: 100k claimed clips in 128 bytes is refused",
+                  lambda: data._load_presegmented("V1", _sk, _sk), "the file holds 0")
+    _v1.write_bytes(npy_header_only((10**12, MAX_FRAMES, N_JOINTS, 2)))
+    refused_small("SKELETON_READERS['.npy']: 10^12 claimed clips is refused",
+                  lambda: _read(_v1), "promises 6,800,000,000,000,000 bytes")
+    _full = np.random.default_rng(0).random((4, MAX_FRAMES, N_JOINTS, 2))
+    np.save(_v1, _full)
+    _v1.write_bytes(_v1.read_bytes()[:-1])
+    refuses("a file one byte short of what its header promises is refused",
+            lambda: _read(_v1), f"promises {_full.nbytes:,} bytes")
+    # Format 2.0 gives the header a 4-byte length. Plain np.load read 4.3 GB for a
+    # 112-byte file claiming one (Python's buffered read reserves what is asked for).
+    _v1.write_bytes(b"\x93NUMPY\x02\x00" + struct.pack("<I", 0xFFFFFFF0) + b" " * 100)
+    refused_small("a header claiming a 4 GB length is read through the byte cap",
+                  lambda: _read(_v1), "EOF: reading array header")
+    _h = b"{'descr': '<f8', 'fortran_order': False, 'shape': " + b"(" * 300 + b"}"
+    _h += b" " * (63 - (10 + len(_h)) % 64) + b"\n"
+    _v1.write_bytes(b"\x93NUMPY\x01\x00" + struct.pack("<H", len(_h)) + _h)
+    refuses("an unparseable header (np.load: tokenize.TokenError) is a ValueError",
+            lambda: _read(_v1), "unparseable .npy header")
+    _v1.write_bytes(b"not a numpy file at all, just some bytes")
+    refuses("a file without the .npy magic is a ValueError",
+            lambda: _read(_v1), "magic string")
+
+    # 2. Wrong dtype: refused from the header, ahead of the size check.
+    for _descr, _what in (("<i8", "an integer"), ("<c16", "a complex"), ("|b1", "a bool"),
+                          ("<U4", "a text"), ("|V16", "a raw void")):
+        _v1.write_bytes(npy_header_only((3, MAX_FRAMES, N_JOINTS, 2), _descr))
+        refuses(f"{_what} array ({_descr}) is refused by its dtype",
+                lambda: _read(_v1), f"dtype {_descr!r}")
+    np.save(_v1, np.zeros((3, MAX_FRAMES, N_JOINTS, 2), dtype=[("x", "<f8")]))
+    refuses("a structured array is refused by its dtype", lambda: _read(_v1), "dtype")
+    _v1.write_bytes(npy_header_only((10**6, MAX_FRAMES, N_JOINTS, 2), "<i8"))
+    refused_small("a bomb-sized integer array is refused by dtype, not size",
+                  lambda: _read(_v1), "dtype '<i8'")
+
+    # 3. Wrong shape: refused from the header, ahead of the size check.
+    for _shape, _what in (((3, 30, N_JOINTS, 2), "30 frames"),
+                          ((3, MAX_FRAMES, 12, 2), "12 joints"),
+                          ((3, MAX_FRAMES, N_JOINTS, 4), "4 channels"),
+                          ((MAX_FRAMES, N_JOINTS, 2), "3-D"),
+                          ((1, 3, MAX_FRAMES, N_JOINTS, 2), "5-D"),
+                          ((True, MAX_FRAMES, N_JOINTS, 2), "a bool dimension")):
+        _v1.write_bytes(npy_header_only(_shape))
+        refuses(f"pre-segmented loader refuses {_what} {_shape}",
+                lambda: data._load_presegmented("V1", _sk, _sk),
+                f"expected (N, {MAX_FRAMES}, {N_JOINTS}, 2 or 3)")
+    _v1.write_bytes(npy_header_only((5, 1, N_JOINTS, 3)))
+    refuses("pre-segmented loader refuses V6's per-frame layout",
+            lambda: data._load_presegmented("V1", _sk, _sk), "got (5, 1, 17, 3)")
+    _v6.write_bytes(npy_header_only((5, MAX_FRAMES, N_JOINTS, 2)))
+    refuses("V6 track refuses a clip-array layout",
+            lambda: data.load_v6_track(_sk), f"expected (F, 1, {N_JOINTS}, 3)")
+    _v6.write_bytes(npy_header_only((5, 1, N_JOINTS, 2)))
+    refuses("V6 track refuses 2 channels (channel 0 must be the frame id)",
+            lambda: data.load_v6_track(_sk), f"expected (F, 1, {N_JOINTS}, 3)")
+    _v1.write_bytes(npy_header_only((10**6, 30, N_JOINTS, 2)))
+    refused_small("a bomb-sized wrong shape is refused by shape, not size",
+                  lambda: _read(_v1), "got (1000000, 30, 17, 2)")
+
+    # 4. Object dtype: refused from the header, and nothing is ever unpickled.
+    _obj = np.empty((2, MAX_FRAMES, N_JOINTS, 2), dtype=object)
+    _obj[...] = _PickleProbe()
+    np.save(_v1, _obj, allow_pickle=True)
+    np.save(_v6, _obj[:, :1, :, :1].repeat(3, axis=3), allow_pickle=True)
+    check("probe fixture really is a pickle that runs code when loaded",
+          np.load(_v1, allow_pickle=True) is not None and len(_UNPICKLED) > 0)
+    _UNPICKLED.clear()
+    refuses("SKELETON_READERS['.npy'] refuses an object array",
+            lambda: _read(_v1), "dtype '|O'")
+    refuses("pre-segmented loader refuses an object array",
+            lambda: data._load_presegmented("V1", _sk, _sk), "dtype '|O'")
+    refuses("V6 track refuses an object array", lambda: data.load_v6_track(_sk), "dtype '|O'")
+    refuses("V6 clips loader refuses an object array",
+            lambda: data._load_v6(_sk, _sk), "dtype '|O'")
+    check("... and none of them unpickled anything", _UNPICKLED == [], str(len(_UNPICKLED)))
+
+    # 5. Real-shaped arrays load exactly as np.load reads them.
+    _rng = np.random.default_rng(1)
+    for _arr, _what in ((_rng.random((200, MAX_FRAMES, N_JOINTS, 2)), "clips '<f8' (the release)"),
+                        (_rng.random((7, MAX_FRAMES, N_JOINTS, 3)).astype(np.float32),
+                         "clips float32, 3 channels"),
+                        (np.asfortranarray(_rng.random((7, MAX_FRAMES, N_JOINTS, 2))),
+                         "clips, Fortran order"),
+                        (_rng.random((7, MAX_FRAMES, N_JOINTS, 2)).astype(">f8"),
+                         "clips, big-endian"),
+                        (np.zeros((0, MAX_FRAMES, N_JOINTS, 2)), "zero clips"),
+                        (_rng.random((50, 1, N_JOINTS, 3)), "V6 layout")):
+        np.save(_v1, _arr)
+        _got, _ref = _read(_v1), np.load(_v1, allow_pickle=False)
+        check(f"loads {_what} identical to np.load",
+              _got.shape == _ref.shape and _got.dtype == _ref.dtype
+              and np.array_equal(_got, _ref) and np.array_equal(_got, _arr))
+    np.save(_v1, _full)
+    _mb = peak_mb(lambda: _read(_v1))
+    check("a real-shaped load allocates the array once, not twice",
+          _mb < 1.5 * _full.nbytes / 1e6 + 0.5, f"peak {_mb:.2f} MB for {_full.nbytes / 1e6:.2f} MB")
+    with open(_v1, "ab") as _fh:
+        _fh.write(b"trailing")
+    check("trailing bytes are ignored, as np.load ignores them",
+          np.array_equal(_read(_v1), _full))
+    np.save(_v6, np.stack([np.concatenate([np.full((N_JOINTS, 1), 157.0 + i),
+                                           np.full((N_JOINTS, 2), 0.5)], axis=1)[None]
+                           for i in range(5)]))
+    check("V6 track still loads a well-formed file through the checked path",
+          data.load_v6_track(_sk).frame_ids.tolist() == [157, 158, 159, 160, 161])
+    raises("a missing file is still FileNotFoundError, not a ValueError",
+           lambda: _read(_sk / "V9.npy"), FileNotFoundError)
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

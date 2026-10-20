@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import tokenize
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -32,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from .data import N_JOINTS, Track
+from .npyread import read_data, read_header
 from .punchfind import L_SHOULDER, L_WRIST, R_SHOULDER, R_WRIST
 from .video import VideoInfo, iter_frames, probe
 
@@ -53,7 +53,6 @@ CONTINUITY_BONUS = 2.0  # ... and its area counts double, so a bigger bystander 
 # 35,363 frames.
 MAX_POSE_FRAMES = 2_000_000
 MAX_POSE_TEXT = 4096    # characters in `source` / `model`; a 'U' scalar's size is in its header
-_READ_CHUNK = 1 << 24   # array data is read in 16 MB pieces straight into its final buffer
 
 
 @dataclass
@@ -150,10 +149,6 @@ _POSE_KINDS = {"xy": "f", "conf": "f", "detected": "b", "fps": "fiu",
 # decompresses deflate in bounded steps, but bz2 and lzma with no output limit: a
 # 2 KB bz2 member reached 584 MB just to yield the 8-byte .npy magic.
 _POSE_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
-# The most a header may take: 8 bytes of magic and version, a 4-byte length, and
-# numpy's own 10,000-byte header limit -- which numpy checks only AFTER reading the
-# length a header claims (up to 4 GB in format 2.0), so the stream is capped here.
-_NPY_HEADER_MAX = 8 + 4 + 10_000
 # Deflate's ceiling (258 bytes from a 2-bit code, with block overhead). A header that
 # promises more data than its zip entry could expand to is refused before `np.empty`:
 # without this, a 1.3 KB file claiming exactly the frame cap at float64 allocated
@@ -161,33 +156,11 @@ _NPY_HEADER_MAX = 8 + 4 + 10_000
 _DEFLATE_MAX_RATIO = 1032
 
 
-class _Capped:
-    """A stream that yields at most `left` bytes, then reports end of file."""
-
-    def __init__(self, raw, left: int) -> None:
-        self.raw, self.left = raw, left
-
-    def read(self, n: int = -1) -> bytes:
-        data = self.raw.read(self.left if n is None or n < 0 else min(n, self.left))
-        self.left -= len(data)
-        return data
-
-
 def _npy_header(member, key: str, name: str):
-    """(shape, fortran_order, dtype) from a member's .npy header, read through a cap,
-    with the dtype checked against what `save` writes for `key`. Leaves `member`
-    positioned at the first byte of array data (numpy reads exact sizes)."""
-    capped = _Capped(member, _NPY_HEADER_MAX)
-    try:
-        version = np.lib.format.read_magic(capped)
-        if version == (1, 0):
-            shape, fortran, dtype = np.lib.format.read_array_header_1_0(capped)
-        elif version == (2, 0):
-            shape, fortran, dtype = np.lib.format.read_array_header_2_0(capped)
-        else:  # 3.0 exists only for structured dtypes with non-latin-1 names, refused anyway
-            raise ValueError(f"{name}: {key} uses .npy format {version}, not 1.0 or 2.0")
-    except (tokenize.TokenError, SyntaxError) as e:  # numpy re-tokenizes a header it can't eval
-        raise ValueError(f"{name}: {key} has an unparseable .npy header") from e
+    """(shape, fortran_order, dtype) from a member's .npy header, read through a cap
+    (`npyread.read_header`), with the dtype checked against what `save` writes for
+    `key`. Leaves `member` positioned at the first byte of array data."""
+    shape, fortran, dtype = read_header(member, f"{name}: {key}")
     max_item = 4 * MAX_POSE_TEXT if dtype.kind == "U" else 8  # 'U' is 4 bytes a character
     if (dtype.kind not in _POSE_KINDS[key] or dtype.hasobject or dtype.fields is not None
             or dtype.subdtype is not None or dtype.itemsize > max_item):
@@ -240,24 +213,8 @@ def _read_pose_npz(fh, name: str) -> "dict[str, np.ndarray]":
             with zf.open(k + ".npy") as m:
                 if _npy_header(m, k, name) != heads[k]:  # rewritten since validated
                     raise ValueError(f"{name}: {k} changed while being read")
-                out[k] = _read_npy_data(m, *heads[k], k, name)
+                out[k] = read_data(m, *heads[k], f"{name}: {k}")
         return out
-
-
-def _read_npy_data(member, shape, fortran: bool, dtype, key: str, name: str) -> np.ndarray:
-    """Read exactly the bytes the (already validated) header promises, straight into
-    one buffer of that size. Short data is refused; trailing bytes are ignored, as
-    `np.load` ignores them."""
-    arr = np.empty(shape[::-1] if fortran else shape, dtype=dtype)
-    buf = arr.reshape(-1).view(np.uint8)  # C-contiguous, so a view, not a copy
-    pos = 0
-    while pos < buf.size:
-        chunk = member.read(min(_READ_CHUNK, buf.size - pos))
-        if not chunk:
-            raise ValueError(f"{name}: {key} is truncated ({pos} of {buf.size} bytes)")
-        buf[pos:pos + len(chunk)] = np.frombuffer(chunk, np.uint8)
-        pos += len(chunk)
-    return arr.T if fortran else arr
 
 
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
