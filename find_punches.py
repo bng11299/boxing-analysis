@@ -79,6 +79,11 @@ def main(argv=None) -> int:
     ap.add_argument("--labels", type=Path)
     ap.add_argument("--rule", type=Path, default=DEFAULT_RULE)
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--per-hand", action="store_true",
+                    help="each hand's own peaks, the minimum gap applied within a hand (default: the pooled rule)")
+    ap.add_argument("--unclear", choices=("punch", "not-a-punch"), default="punch",
+                    help="what an 'unclear' label means: a punch nobody could name (the labelling guide), or a "
+                         "motion that is not a punch, such as framing or a feint")
     a = ap.parse_args(argv)
 
     rule = load_rule(a.rule)
@@ -87,7 +92,7 @@ def main(argv=None) -> int:
     raw = pose.to_track(usable_only=False)            # every detected frame, with confidence
     track = punchfind.bridge(raw, int(round(punchfind.BRIDGE_S * pose.fps)))
     sig = punchfind.wrist_signal(track, rule["variant"])
-    det, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
+    det, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"], per_hand=a.per_hand)
     row = {int(f): i for i, f in enumerate(track.frame_ids)}
     observed = set(int(f) for f in raw.frame_ids)
     valid = punchfind.hand_valid(track)
@@ -119,10 +124,23 @@ def main(argv=None) -> int:
     print(f"  -> {out}" + (f"  ({n_interp} peak(s) on an interpolated frame, flagged)" if n_interp else ""))
 
     if a.labels:
-        spans = load_labels(a.labels, len(pose), pose.fps)
+        labelled = load_labels(a.labels, len(pose), pose.fps)
         tol = int(round(TOL_S * pose.fps))
+        point_tol = int(round(punchfind.POINT_TOL_S * pose.fps))
+        # Framing marks, when 'unclear' means not a punch, are scored apart: a detection on one is a false positive.
+        not_punch = [s_ for s_ in labelled if a.unclear == "not-a-punch" and s_.label == UNCLEAR_LABEL]
+        spans = punchfind.for_matching([s_ for s_ in labelled if s_ not in not_punch], tol, point_tol)
+        n_points = sum(s_.start == s_.end for s_ in labelled)
         s = punchfind.score(det, spans, tol, whole)
-        result = {"clip": clip, "rule": rule, "tolerance_frames": tol, "score": s}
+        result = {"clip": clip, "rule": rule, "per_hand": a.per_hand, "tolerance_frames": tol,
+                  "point_labels": n_points, "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
+                  "score": s}
+        if not_punch:
+            matched = {di for _, di in punchfind.match(det, spans, tol)}
+            rest = [i for i in range(len(det)) if i not in matched]
+            on_framing = punchfind.match(det[rest], punchfind.for_matching(not_punch, tol, point_tol), tol)
+            result["framing"] = {"marks": len(not_punch), "flagged_as_punches": len(on_framing),
+                                 "frames": [int(det[rest][di]) for _, di in on_framing]}
         min_shift = int(round(MIN_SHIFT_S * pose.fps))
         if len(pose) >= 2 * min_shift + 2:
             fl = punchfind.shift_floor(det, spans, tol, whole, min_shift)
@@ -130,8 +148,13 @@ def main(argv=None) -> int:
             floor = f"chance floor F1 {fl['f1_mean']:.3f} (97.5th pct {fl['f1_p97_5']:.3f})"
         else:  # too few distinct shifts for a percentile to mean anything
             floor = f"no chance floor: the clip is under {2 * MIN_SHIFT_S:.0f} s"
-        print(f"  vs {s['n_labelled']} labelled punches (+-{tol} frames): precision {s['precision']:.3f} "
+        within = (f"+-{tol} frames" + (f"; the {n_points} point labels +-{point_tol}" if n_points else ""))
+        print(f"  vs {s['n_labelled']} labelled punches ({within}): precision {s['precision']:.3f} "
               f"recall {s['recall']:.3f} F1 {s['f1']:.3f}; {floor}")
+        if "framing" in result:
+            fr = result["framing"]
+            print(f"  {fr['flagged_as_punches']} of {fr['marks']} framing marks were flagged as punches "
+                  "(counted as false positives above)")
         (a.out_dir / f"{clip}.score.json").write_text(json.dumps(result, indent=1, allow_nan=False),
                                                       encoding="utf-8")
     return 0

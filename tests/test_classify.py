@@ -851,5 +851,63 @@ with torch.no_grad():
     again = reloaded(prepare_input(xs[18:], 50)).argmax(1).numpy()
 check("the saved state_dict reproduces the predictions run_stgcnpp scored", np.array_equal(again, r["_pred"]))
 
+print("per-hand finder rows, point labels and framing marks")
+# A jab and a cross 0.25 s apart, then a lone jab: the per-hand finder reports both hands of the combination.
+xyc = body(n, fps, punches=[3.0, 8.0], hand=0).xy.copy()
+xyc[:, 10] = body(n, fps, punches=[3.25], hand=1).xy[:, 10]
+pose_yolo.PoseSequence(xyc.astype(np.float32), cf, np.ones(n, bool), fps, 1080, 1920, "IMG_5050.mov", "test").save(
+    tmp / "IMG_5050.pose.npz")
+find_punches.main(["--pose", str(tmp / "IMG_5050.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "ph"),
+                   "--per-hand"])
+ph_rows = list(csv.DictReader((tmp / "ph" / "IMG_5050.punches.csv").open(encoding="utf-8")))
+check("control: the per-hand finder reports the combination's two hands", [r["hand"] for r in ph_rows][:2] == ["left", "right"],
+      str([(r["frame"], r["hand"]) for r in ph_rows]))
+args_ph = ["--pose", str(tmp / "IMG_5050.pose.npz"), "--punches", str(tmp / "ph" / "IMG_5050.punches.csv"),
+           "--classifier", str(mpath), "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox",
+           "--out-dir", str(tmp / "ph")]
+check("per-hand rows are accepted: each is a peak of its own hand above the rule's threshold",
+      classify_punches.main(args_ph) == 0
+      and len(list(csv.DictReader((tmp / "ph" / "IMG_5050.classified.csv").open(encoding="utf-8")))) == len(ph_rows))
+# Point labels: a click inside each punch; the lone jab marked 'unclear' (framing).
+lab50 = tmp / "IMG_5050.labels.json"
+clicks = [(int(r["frame"]) + 5, l_) for r, l_ in zip(ph_rows, ("jab", "cross", "unclear"))]
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [{"start": f_, "end": f_, "label": l_} for f_, l_ in clicks]}),
+                 encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+s50 = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("point labels: the finder found 2 of the 2 punches, and 2 of its 3 detections were real",
+      s50["finder"] == {"labelled_punches": 2, "detections": 3, "matched": 2, "recall": 1.0, "precision": 2 / 3}
+      and s50["point_labels"] == 3 and s50["unclear_means"] == "not-a-punch", str(s50["finder"]))
+check("the framing mark that drew a detection is reported, with what the classifier called it",
+      s50["framing"]["marks"] == 1 and s50["framing"]["flagged_as_punches"] == 1
+      and sum(s50["framing"]["named_as"].values()) == 1
+      and set(s50["framing"]["named_as"]) <= set(CLASSES) | {"unclassified"}, str(s50["framing"]))
+check("point labels have no start and end, so the 'from labelled frames' reading is empty, and no length is claimed",
+      s50["labelled_punch_from_labelled_frames"]["n"] == 0 and s50["labelled_length_s_median"] is None
+      and s50["window_iou_with_labels"]["n"] == 0, str(s50))
+check("... while the perfect-finder reading uses the speed peak within 0.2 s of each click",
+      s50["labelled_punch_by_clip_window_at_its_peak"]["n"] == 2)
+# A click on a still frame just before the lone jab, within 0.2 s of its speed peak: the point rule finds the
+# peak; reading the click as a one-frame span would find no wrist speed there.
+tr50 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_5050.pose.npz").to_track(usable_only=False), 3)
+sg50 = punchfind.wrist_signal(tr50, "relative")
+jab_peak = int(ph_rows[2]["frame"])
+still = [f_ for f_ in range(jab_peak - 11, jab_peak + 12) if sg50[f_].max() == 0]   # the wrist at rest after the punch
+check("control: there is a still frame within 0.2 s of the jab's speed peak", bool(still))
+still_click = min(still, key=lambda f_: abs(f_ - jab_peak))
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": still_click, "end": still_click, "label": "jab"}]}), encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50)])
+s_still = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("a click on a still frame within 0.2 s of a punch's peak is read at that peak, not at the click",
+      s_still["labelled_punch_by_clip_window_at_its_peak"]["n"] == 1
+      and s_still["labelled_punch_by_clip_window_unclassifiable"] == 0, f"click {still_click}, peak {jab_peak}: {s_still}")
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [{"start": f_, "end": f_, "label": l_} for f_, l_ in clicks]}),
+                 encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50)])
+s50p = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("with 'unclear' as a punch (the default), all 3 are punches and there is no framing report",
+      s50p["finder"]["labelled_punches"] == 3 and s50p["finder"]["matched"] == 3 and "framing" not in s50p, str(s50p["finder"]))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

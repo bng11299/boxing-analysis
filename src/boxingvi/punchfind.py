@@ -193,9 +193,19 @@ def signal_coverage(track: Track, min_conf: float = MIN_CONF, bridge_s: float = 
 
 
 def detect(track: Track, signal: np.ndarray, threshold: float,
-           min_gap_s: float) -> "tuple[np.ndarray, np.ndarray]":
-    """Peaks of the faster hand's speed above `threshold`, at least `min_gap_s`
-    apart. Returns (video frame ids, hand: 0 left / 1 right)."""
+           min_gap_s: float, per_hand: bool = False) -> "tuple[np.ndarray, np.ndarray]":
+    """Peaks of wrist speed above `threshold`. Returns (video frame ids, hand: 0
+    left / 1 right), in frame order.
+
+    Pooled (the V6-tuned rule): peaks of the FASTER hand's speed, at least
+    `min_gap_s` apart whichever hand threw them. A jab-cross faster than that is
+    one detection.
+    Per hand: each hand's own peaks, at least `min_gap_s` apart within that hand,
+    so alternating combinations are seen as separate punches. On Brendan's own
+    labelled clips, 40% and 32% of punches follow the previous one within 0.4 s,
+    but only 11% and 0% follow one by the same hand (2026-10-19). The threshold and
+    the gap are the pooled rule's, unchanged.
+    """
     from scipy.signal import find_peaks
 
     if signal.shape != (len(track.frame_ids), 2):
@@ -203,13 +213,41 @@ def detect(track: Track, signal: np.ndarray, threshold: float,
     if not (np.isfinite(threshold) and min_gap_s >= 0):
         raise ValueError("threshold must be finite and min_gap_s non-negative")
     dist = max(1, int(round(min_gap_s * track.fps)))
-    best = signal.max(axis=1)
     frames, hands = [], []
     for lo, hi in track.segments():
-        peaks, _ = find_peaks(best[lo:hi], height=threshold, distance=dist)
-        frames.append(track.frame_ids[lo + peaks])
-        hands.append(signal[lo + peaks].argmax(axis=1))
-    return np.concatenate(frames), np.concatenate(hands)
+        if per_hand:
+            for h in (0, 1):
+                peaks, _ = find_peaks(signal[lo:hi, h], height=threshold, distance=dist)
+                frames.append(track.frame_ids[lo + peaks])
+                hands.append(np.full(len(peaks), h, dtype=np.int64))
+        else:
+            best = signal[lo:hi].max(axis=1)
+            peaks, _ = find_peaks(best, height=threshold, distance=dist)
+            frames.append(track.frame_ids[lo + peaks])
+            hands.append(signal[lo + peaks].argmax(axis=1))
+    f, h = np.concatenate(frames), np.concatenate(hands)
+    order = np.lexsort((h, f))
+    return f[order], h[order]
+
+
+# A label that is a single frame marks one instant somewhere inside a punch (a click in
+# the labelling tool, not a drag from start to end). The finder reports the wrist-speed
+# peak, which can sit anywhere in the same punch, so a point label matches a detection
+# within half a punch. Half of 0.4 s: the training clips' median punch is 0.375 s, and the
+# per-clip windows on Brendan's clips are 0.39 and 0.41 s. Chosen 2026-10-19 after the
+# scores at 0.1 s and 0.2 s had been seen on those clips; both are reported.
+POINT_TOL_S = 0.2
+
+
+def for_matching(spans: "list[Span]", tol: int, point_tol: int) -> "list[Span]":
+    """Spans as `match` should see them: a single-frame span (a point label) is widened
+    so that, with `match`'s own `tol` on top, it matches within `point_tol` frames.
+    Start is kept at frame 0 or later, so a point near the clip's start still counts as
+    inside a window that starts there."""
+    if tol < 0 or point_tol < 0:
+        raise ValueError("tolerances must be >= 0")
+    extra = max(point_tol - tol, 0)
+    return [Span(max(s.start - extra, 0), s.end + extra, s.label) if s.start == s.end else s for s in spans]
 
 
 def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":

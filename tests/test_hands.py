@@ -255,6 +255,55 @@ raises("no tuned rule file -> refused with what to run",
 rule.write_text(json.dumps({"chosen": {"variant": "sideways", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
 raises("a rule file naming an unknown variant -> refused",
        lambda: find_punches.main(["--pose", str(tmp / "IMG_7777.pose.npz"), "--rule", str(rule)]))
+rule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
+
+print("point labels: a click inside a punch, not a span")
+pts = [Span(100, 100, 1), Span(300, 320, 2), Span(3, 3, 1)]
+wide = punchfind.for_matching(pts, 6, 12)
+check("a point label is widened so that, with match's own tolerance, it matches within 12 frames; a span is untouched",
+      wide == [Span(94, 106, 1), Span(300, 320, 2), Span(0, 9, 1)], str(wide))
+check("... so a detection 12 frames from the click matches and one 13 frames away does not",
+      punchfind.match([112], wide[:1], 6) == [(0, 0)] and punchfind.match([113], wide[:1], 6) == [])
+check("a point tolerance smaller than match's own changes nothing", punchfind.for_matching(pts, 6, 3)[0] == Span(100, 100, 1))
+raises("a negative tolerance is refused", lambda: punchfind.for_matching(pts, -1, 12))
+check("the point tolerance is half a punch, 0.2 s", punchfind.POINT_TOL_S == 0.2)
+
+print("per-hand finding: a jab-cross faster than the minimum gap")
+combo = body(600, 60.0, punches=[3.0], hand=0)
+combo.xy[:, 10] = body(600, 60.0, punches=[3.25], hand=1).xy[:, 10]   # the right hand 0.25 s after the left
+csig = punchfind.wrist_signal(combo)
+pf, ph = punchfind.detect(combo, csig, 1.0, 0.4)
+hf, hh = punchfind.detect(combo, csig, 1.0, 0.4, per_hand=True)
+check("pooled, the 0.4 s gap makes the two punches one detection", len(pf) == 1, f"{pf} {ph}")
+check("per hand, each hand's punch is found inside its own punch (left 3.0-3.25 s, right 3.25-3.5 s), in frame order",
+      len(hf) == 2 and list(hh) == [0, 1] and hf[0] <= hf[1]
+      and 180 <= hf[0] <= 195 + 6 and 195 <= hf[1] <= 210 + 6, f"{hf} {hh}")
+check("per hand, the gap still applies within a hand: one punch per hand here, not two",
+      list(punchfind.detect(combo, csig, 1.0, 0.4, per_hand=True)[1]).count(0) == 1)
+check("default is the pooled rule (V6-tuned)", np.array_equal(punchfind.detect(combo, csig, 1.0, 0.4)[0], pf))
+
+print("find_punches: point labels and framing marks")
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": int(3.08 * fps), "end": int(3.08 * fps), "label": "jab"},       # a click 0.08 s after the punch starts
+    {"start": int(9.1 * fps), "end": int(9.1 * fps), "label": "unclear"},    # marked as framing
+    {"start": int(14.05 * fps), "end": int(14.05 * fps), "label": "cross"}]}), encoding="utf-8")
+base = ["--pose", str(tmp / "IMG_7777.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o"), "--labels", str(lab)]
+find_punches.main(base)
+sp_ = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))
+check("'unclear' as a punch (the default): all 3 point labels found, nothing else",
+      sp_["score"]["tp"] == 3 and sp_["score"]["n_labelled"] == 3 and sp_["point_labels"] == 3
+      and sp_["unclear_means"] == "punch" and "framing" not in sp_, str(sp_["score"]))
+find_punches.main(base + ["--unclear", "not-a-punch"])
+sf = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))
+check("'unclear' as framing: 2 punches to find, the detection on the framing mark is a false positive",
+      sf["score"]["n_labelled"] == 2 and sf["score"]["tp"] == 2 and sf["score"]["n_detected"] == 3
+      and abs(sf["score"]["precision"] - 2 / 3) < 1e-12, str(sf["score"]))
+check("... and the framing mark is reported as flagged, at its frame",
+      sf["framing"]["marks"] == 1 and sf["framing"]["flagged_as_punches"] == 1
+      and abs(sf["framing"]["frames"][0] - 9.0 * fps) < 0.3 * fps, str(sf["framing"]))
+find_punches.main(base + ["--per-hand"])
+check("the per-hand choice is recorded with the score",
+      json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))["per_hand"] is True)
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

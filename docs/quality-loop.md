@@ -746,3 +746,41 @@ on; (4) own footage re-run; (5) suites green in a clean clone.
 - **Residual, accepted:** V5, V9 and V6's second half are no longer clean tests of this cut;
   the censoring rule and the too-few fallback are unmeasured; intervals resample punches
   independently.
+
+## `feat/own-footage-scoring` -- 2026-10-19
+
+Brendan's labels on IMG_4395 and IMG_4406 are single-frame clicks (94 of 94), not start-to-end
+spans, and he used "unclear" for FRAMING (hands out to measure or block), not for a punch nobody
+could name. Acceptance: (1) a point label matches within half a punch; (2) "unclear" can be
+scored as a non-punch, with what the finder and classifier did with those marks reported; (3) a
+per-hand finder option, measured against the pooled rule on own footage AND V6; (4) suites green.
+
+### Iteration 1
+- **Build:** `punchfind.POINT_TOL_S = 0.2` and `for_matching` (a single-frame label is widened so
+  it matches within 0.2 s; spans keep 0.1 s); `--unclear {punch,not-a-punch}` on find_punches and
+  classify_punches (framing marks leave the punch set; detections on them are false positives and
+  are reported with the type the classifier gave them); `detect(..., per_hand=True)` and
+  `find_punches --per-hand` (each hand's own peaks, the 0.4 s gap within a hand; threshold and gap
+  unchanged). classify_punches now accepts a row that is its hand's speed peak above the rule's
+  threshold, rather than requiring that hand to be the faster one.
+- **The 0.2 s point tolerance was chosen after seeing the scores at 0.1 s and 0.2 s**; both are
+  reported. A click marks one instant in a ~0.4 s punch, and the finder reports the speed peak.
+- **Test:** hands 51, classify 211; 8 mutants, one survivor (a click read as a one-frame span)
+  given a fixture: a click on a still frame within 0.2 s of a punch's peak.
+- **Real-world facts, own footage (orthodox; framing as not-a-punch; point rule):**
+
+  | | IMG_4406 pooled | IMG_4406 per hand | IMG_4395 pooled | IMG_4395 per hand |
+  |---|---|---|---|---|
+  | punches found (recall) | 35/47 0.745 | 40/47 0.851 | 35/40 0.875 | 40/40 1.000 |
+  | detections real (precision) | 35/41 0.854 | 40/59 0.678 | 35/42 0.833 | 40/57 0.702 |
+  | type right on matched | 0.886 (35) | 0.825 (40) | 0.600 (35) | 0.700 (40) |
+  | framing marks flagged | 1 of 5 (cross) | 1 of 5 | 1 of 2 (jab) | 1 of 2 |
+
+  Why the finder misses: 40% and 32% of these punches follow the previous one within 0.4 s, but
+  only 11% and 0% follow one by the same hand. The per-hand rule finds them (recall +0.11, +0.13)
+  and pays in precision (-0.18, -0.13): the other wrist's retraction is counted too. V6 says the
+  same: per hand recall 0.761 vs 0.741, precision 0.361 vs 0.465, F1 0.489 vs 0.571 (second half).
+  **Pooled stays the default.** A cross-hand duplicate rule would be a new parameter; it must be
+  tuned on data that is not these clips.
+- **Framing:** 2 of 7 framing marks drew a detection, named cross and jab, as Brendan expected; most
+  false positives come from elsewhere (6 and 7 on the pooled finder, 1 each on framing).

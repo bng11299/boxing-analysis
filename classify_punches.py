@@ -144,6 +144,9 @@ def main(argv=None) -> int:
     ap.add_argument("--extent", type=Path, default=DEFAULT_EXTENT,
                     help="the punch-extent rule from run_punch_extent.py")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--unclear", choices=("punch", "not-a-punch"), default="punch",
+                    help="with --labels: what an 'unclear' label means: a punch nobody could name (the labelling "
+                         "guide), or a motion that is not a punch, such as framing or a feint")
     a = ap.parse_args(argv)
 
     pose = PoseSequence.load(a.pose)
@@ -175,9 +178,13 @@ def main(argv=None) -> int:
     for d in rows:
         hand = 0 if d["hand"] == "left" else 1
         i = row_of.get(d["frame"])
-        # The finder reported this hand's speed peak at this frame. If this pose has no frame
-        # there, or the other hand is the faster one, the CSV was not made from this pose.
-        if i is None or not sig[i, hand] > 0 or int(np.argmax(sig[i])) != hand:
+        # The finder reported a speed peak of this hand at this frame, above the rule's threshold:
+        # if this pose has no frame there, or that hand is not at a peak above it there, the CSV
+        # was not made from this pose with this rule. (The other hand may be faster: the per-hand
+        # finder reports each hand's own peaks.)
+        h_ = sig[:, hand]
+        if (i is None or not h_[i] >= rule["threshold"]
+                or (i > 0 and h_[i - 1] > h_[i]) or (i + 1 < len(h_) and h_[i + 1] > h_[i])):
             raise ValueError(f"{a.punches.name}: frame {d['frame']} is not a {d['hand']}-hand speed peak in "
                              f"this pose; it was not made from {a.pose.name} with this rule")
         peaks.append((d["frame"], hand))
@@ -233,10 +240,16 @@ def main(argv=None) -> int:
     print(f"  -> {out} (+ .json provenance)")
 
     if a.labels:
-        spans = load_labels(a.labels, len(pose), pose.fps)
-        named = [(j, s) for j, s in enumerate(spans) if s.label != UNCLEAR_LABEL]
+        labelled = load_labels(a.labels, len(pose), pose.fps)
         tol = int(round(TOL_S * pose.fps))
-        pairs = punchfind.match([d["frame"] for d in rows], spans, tol)
+        point_tol = int(round(punchfind.POINT_TOL_S * pose.fps))
+        # A single-frame label is a point inside a punch (punchfind.POINT_TOL_S); an 'unclear'
+        # label is either an unnamed punch or, with --unclear not-a-punch, framing or a feint.
+        framing = [x for x in labelled if a.unclear == "not-a-punch" and x.label == UNCLEAR_LABEL]
+        spans = [x for x in labelled if x not in framing]
+        n_points = sum(x.start == x.end for x in labelled)
+        named = [(j, x) for j, x in enumerate(spans) if x.label != UNCLEAR_LABEL]
+        pairs = punchfind.match([d["frame"] for d in rows], punchfind.for_matching(spans, tol, point_tol), tol)
         yt, yp, matched_unclassified = [], [], 0
         for si, di in pairs:
             if spans[si].label == UNCLEAR_LABEL:
@@ -246,6 +259,14 @@ def main(argv=None) -> int:
                 continue
             yt.append(spans[si].label)
             yp.append(int(np.argmax(pred[di])))
+        # Detections that matched no punch but sit on a framing mark: what the classifier called them.
+        on_framing = []
+        if framing:
+            taken = {di for _, di in pairs}
+            rest = [k for k in range(len(rows)) if k not in taken]
+            for _, k in punchfind.match([rows[r]["frame"] for r in rest],
+                                        punchfind.for_matching(framing, tol, point_tol), tol):
+                on_framing.append(rest[k])
 
         def scored(windows) -> "tuple[dict, int]":
             keep = [k for k, w_ in enumerate(windows) if w_.keypoints is not None]
@@ -254,20 +275,33 @@ def main(argv=None) -> int:
                     len(named) - len(keep))
 
         # Every labelled punch, two ways. From its labelled frames: perfect finder AND perfect start
-        # and end. By the clip's window at its own wrist-speed peak: perfect finder, the pipeline's cut.
-        by_label = [classify.cut_span(track, s.start, s.end, geom, torso) for _, s in named]
-        by_window = []
-        for _, s in named:
-            pk = span_peak(track, sig, s.start, s.end)
+        # and end (not possible for a point label: it has no start or end). By the clip's window at
+        # the wrist-speed peak inside the punch (for a point label, within POINT_TOL_S of it):
+        # a perfect finder, the pipeline's cut.
+        by_label, by_window = [], []
+        for _, x in named:
+            if x.start == x.end:
+                by_label.append(classify.Window(None, 0, "a point label has no start and end to read"))
+                lo_, hi_ = x.start - point_tol, x.end + point_tol
+            else:
+                by_label.append(classify.cut_span(track, x.start, x.end, geom, torso))
+                lo_, hi_ = x.start, x.end
+            pk = span_peak(track, sig, lo_, hi_)
             i = row_of.get(pk)
-            if i is None or not sig[i].max() > 0:   # span_peak fell back to the span's middle: there is no peak
+            if i is None or not sig[i].max() > 0:   # span_peak fell back to the middle: there is no peak
                 by_window.append(classify.Window(None, 0, "no wrist speed inside the labelled punch"))
             else:
                 by_window.append(classify.cut_span(track, *classify.clip_window(pk, cut, pose.fps), geom, torso))
-        ious = [punchfind.span_iou(spans_read[di], (spans[si].start, spans[si].end)) for si, di in pairs]
+        ious = [punchfind.span_iou(spans_read[di], (spans[si].start, spans[si].end))
+                for si, di in pairs if spans[si].start != spans[si].end]
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
-        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
+        found = len(pairs)
+        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol, "point_labels": n_points,
+                  "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
                   "classifier_sha256": man["sha256"], "cut": {"per": "clip", **cut._asdict()},
+                  "finder": {"labelled_punches": len(spans), "detections": len(rows), "matched": found,
+                             "recall": found / len(spans) if spans else None,
+                             "precision": found / len(rows) if rows else None},
                   "matched_detections": type_scores(yt, yp),
                   "matched_unclassifiable": matched_unclassified,
                   "labelled_punch_by_clip_window_at_its_peak": window_scores,
@@ -275,16 +309,29 @@ def main(argv=None) -> int:
                   "labelled_punch_from_labelled_frames": label_scores,
                   "labelled_punch_from_labelled_frames_unclassifiable": label_unc,
                   "window_iou_with_labels": {"n": len(ious), "mean": float(np.mean(ious)) if ious else None},
-                  "labelled_length_s_median": float(np.median([(s.end - s.start) / pose.fps for s in spans]))}
-        for name, s in (("matched detections", result["matched_detections"]),
-                        ("every labelled punch, cut by the clip's window at its peak", window_scores),
-                        ("every labelled punch, from its labelled frames", label_scores)):
-            if s["n"]:
-                print(f"  vs labels, {name}: type accuracy {s['accuracy']:.3f} on {s['n']} "
-                      f"(commonest-type floor {s['majority_floor_accuracy']:.3f}), "
-                      f"hand right {s['side_accuracy']:.3f}")
-        print(f"  the clip's window is {cut.length_s:.2f} s; your labelled punches are a median "
-              f"{result['labelled_length_s_median']:.2f} s")
+                  "labelled_length_s_median": (float(np.median([(x.end - x.start) / pose.fps for x in spans]))
+                                               if n_points < len(labelled) else None)}
+        if framing:
+            types = [CLASSES[int(np.argmax(pred[k]))] if k in pred else "unclassified" for k in on_framing]
+            result["framing"] = {"marks": len(framing), "flagged_as_punches": len(on_framing),
+                                 "named_as": {t: types.count(t) for t in sorted(set(types))}}
+        print(f"  vs labels: the finder found {found} of {len(spans)} labelled punches, and {found} of its "
+              f"{len(rows)} detections were real" + (f" ({n_points} point labels, matched within +-{point_tol} frames)"
+                                                     if n_points else ""))
+        for name, sc in (("matched detections", result["matched_detections"]),
+                         ("every labelled punch, cut by the clip's window at its peak", window_scores),
+                         ("every labelled punch, from its labelled frames", label_scores)):
+            if sc["n"]:
+                print(f"  vs labels, {name}: type accuracy {sc['accuracy']:.3f} on {sc['n']} "
+                      f"(commonest-type floor {sc['majority_floor_accuracy']:.3f}), "
+                      f"hand right {sc['side_accuracy']:.3f}")
+        if framing:
+            fr = result["framing"]
+            print(f"  framing marks: {fr['flagged_as_punches']} of {fr['marks']} were flagged as punches, named "
+                  + (", ".join(f"{t} {n}" for t, n in fr["named_as"].items()) or "nothing"))
+        if result["labelled_length_s_median"] is not None:
+            print(f"  the clip's window is {cut.length_s:.2f} s; your labelled punches are a median "
+                  f"{result['labelled_length_s_median']:.2f} s")
         (a.out_dir / f"{clip}.classify_score.json").write_text(
             json.dumps(result, indent=1, allow_nan=False), encoding="utf-8")
     return 0
