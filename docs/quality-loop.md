@@ -1002,3 +1002,28 @@ so the guard is mosaicked whenever the face is.
   209), or to the knees (frame 2204): the guard, the torso and most of the arms. That
   is far more than the "top third" option 1 described, driven by P3 and H1, which are
   synthetic close-up crops. Open decision for Brendan.
+
+### Iteration 6 -- option (c): the 1.5-width floor only at the frame edge (Brendan, 2026-10-20)
+
+- **Change:** a body-shaped box gets the top third (+pad); it gets 1.5 box widths only
+  when it touches the frame edge, where real close-up crops come from. A box that is not
+  body-shaped still gets all of it.
+- **Review: FIX FIRST, then SHIP.** The first version used a fixed 2 px edge band, which
+  is finer than YOLO places an edge (one model pixel is about 3 frame pixels at 1080p).
+  A crop 3 px short of the edge lost the extension, leaving 70% of the head covered. The
+  band is now 1% of the frame's long side (6.4 model pixels at any resolution). New
+  tests: crops 3 px short at 1080p and 6 px short at 4K, in all four orientations
+  (69.6% each with the old band, 100% now), plus a mid-frame whole boxer whose floor
+  must stop at the top third. The reviewer would move to 2% unless a histogram of
+  real box-to-edge gaps argues for 1%; left as a tuning decision. Black bars baked
+  into a clip are an operator rule ("feed the camera's own file"), not a code check.
+- **Accepted residual (Brendan's decision):** a mid-frame body-shaped box whose head
+  reaches below the top third + pad, with no face patch.
+- **Test:** 121 checks; 15,000 extra scenes, 0 faces left; every other suite green; a
+  clean clone of `284cbc5` gives the same counts.
+- **Real check (own footage, final code, `edge_frac` 0.01 in both reports):** mode and
+  whole-frame counts are unchanged (IMG_4395: 26.9%; IMG_4406: 16.4%). All 12 frames
+  were re-extracted and looked at: **no face recognisable.** The floor on a mid-frame
+  boxer now stops at about the chest: in IMG_4406 frame 2204 the torso, arms and a
+  hand are visible again. Close-up and edge-touching boxes (IMG_4395) are still
+  mosaicked wholly or to 1.5 widths.
