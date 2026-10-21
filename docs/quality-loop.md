@@ -805,3 +805,44 @@ frames (a silent, plausible-looking number); a different person in frame scored 
 - The earlier control gave 0.823 with the same lengths to within a frame.
 - **Limit added to the results file:** the per-clip cut was chosen looking at these numbers, so
   they are no longer a clean test of it.
+
+### Iteration 4 -- the two Codex findings (2026-10-21)
+Codex (2026-10-20), both confirmed by reading: (1) every reading used `seen and seen_all`, so
+A - Y_all, the pose-switch cost under the pipeline's every-joint rule, was computed only on
+punches the obsolete 0.3 rule also sees; (2) when alignment passes but no punch has usable
+wrist speed, the cut readings are `{"n": 0}` and the print raised `KeyError: 'accuracy'`
+before the results file was written.
+- **Acceptance:** (a) A vs Y_all read on `all_seen`, legacy Y only on a named subset
+  `legacy_common`, both n's in the file; (b) a run with sharp alignment and nothing cuttable
+  exits 0, writes results and says so; (c) reverting either fix fails a test; (d) gate 1 still
+  0.8145 / 0.7207 on the real run; (e) suites green in a fresh clone.
+- **Build:** scoring moved into a pure `aggregate(rows, predict_fn, scored)`; printing into
+  `summary_lines(report)`, where every reading may be empty and prints `n/a` (the per-video
+  line had the same crash waiting for a video with no seen punch). Results layout:
+  `all_seen` {A, Y_all, A_minus_Y_all}; `legacy_common` {A, Y, Y_all, A_minus_Y,
+  A_minus_Y_all}; `same_person` and `by_video` each hold both; `n_legacy_blanked`; the cut
+  readings (`window`) now start from `all_seen` and carry their own `n`. Window keys unchanged.
+- **Test:** 13 new checks in `tests/test_poseswitch.py` (29 total). Eight on `aggregate` with a
+  fake classifier: 6 punches both rules see plus 3 only the every-joint rule sees, where the old
+  filter reads A - Y_all as 0 on 6 and the fix as 1/3 on 9. Five on the CLI, end to end: a
+  synthetic corpus, a random-init ST-GCN++ and a V5 pose of a rigid body on a whole-pixel random
+  walk (alignment sharp at offset 0) whose wrists are never detected (no wrist speed, no cut);
+  4 of its 20 spans have every joint at 0.2. The HEAD script on that fixture: `KeyError:
+  'accuracy'`, no file. **Mutants, 5 of 5 caught:** old filter for all_seen (7 checks fail);
+  legacy Y scored on all_seen (6); unguarded accuracy print (1); window guard removed (1);
+  window drawn from the common subset (1).
+- **Real run, V5 + V9 (same inputs: the pre-fix code reproduced the recorded file exactly):**
+  gate 1 0.8145 / 0.7207. `all_seen` 742, `legacy_common` 742, `n_legacy_blanked` 0, 0 missed,
+  0 other-person. **The headline does not change:** A 0.896 (F1 0.819), Y_all 0.889 (F1 0.801),
+  A - Y_all **+0.007 [-0.009, +0.024]** on 742; per video +0.007 on 594 (V5) and on 148 (V9);
+  legacy Y 0.348 on its 742. 27 result blocks compared against the pre-fix run: identical to
+  the bit. Why nothing moved: the old rule drops a punch only if fewer than 2 of its frames keep
+  ANY joint at 0.3 or above; it blanks joints, not frames, and on these videos no punch lost
+  whole frames. The finding was a real flaw with no effect on this data; it would on darker
+  footage (IMG_4395) or V2.
+- **Downstream:** #20's gate 4 reads `window.Y_all` / `window.Y_clip` (n and accuracy): values
+  unchanged (0.889 / 0.826 on 742), but its selection copies the old `seen and seen_all` filter
+  and must drop the `seen` half to stay the same selection as this file.
+- **Review:** self-review restored macro F1 in the printed pooled lines (still in the JSON).
+- **Security:** no new input path; `aggregate` / `summary_lines` are pure over rows the gated
+  loaders built; the test runs the CLI by argument list in `mkdtemp`. No findings.

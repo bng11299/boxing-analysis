@@ -44,9 +44,15 @@ Readings of the same held-out punches by the same classifier:
          (it does not). All on the punch types these videos hold (V6 had hooks and
          uppercuts only). The per-punch extent's overlap with each labelled span is
          reported by punch type.
-Reported on every clip YOLO saw, and separately on clips where YOLO followed the
-same person as AlphaPose; clips YOLO missed are counted. Paired bootstrap
-intervals on A - Y.
+Which punches each comparison is read on (`aggregate`, 2026-10-21):
+  all_seen       every punch YOLO saw in >= 2 frames with every detected joint kept, the
+                 pipeline's rule. A, Y_all and A - Y_all (the pose-switch cost) are read here,
+                 and the cut readings start from here.
+  legacy_common  the punches of all_seen that the legacy 0.3 rule ALSO sees in >= 2 frames.
+                 Y is compared only here, with A and Y_all re-read on the same punches.
+Until 2026-10-21 every reading used legacy_common, so A - Y_all left out the punches the
+old rule blanks and the pipeline reads. Both n's are reported, pooled, for the same person
+only, and per video; clips YOLO missed are counted. Paired bootstrap intervals throughout.
 """
 
 from __future__ import annotations
@@ -93,6 +99,112 @@ def paired(y, a, b) -> dict:
         return {"n": len(y)}
     return {"n": len(y), "accuracy": bootstrap_gap_ci(y, a, b, metric="accuracy"),
             "macro_f1": bootstrap_gap_ci(y, a, b, metric="macro_f1")}
+
+
+SUBSETS = {
+    "all_seen": "every punch YOLO saw in >= 2 frames with every detected joint kept (the pipeline's rule); "
+                "A - Y_all, the cost of the pose switch, is read here",
+    "legacy_common": "the punches of all_seen that the legacy 0.3 rule (Y) also sees in >= 2 frames; "
+                     "Y is compared only here, with A and Y_all re-read on the same punches",
+}
+CUTS = ("Y_fix", "Y_ext", "Y_clip")
+
+
+def _block(y, preds: dict, mask) -> dict:
+    """Scores of every reading in `preds` on the punches `mask` picks, and A minus each other one."""
+    out = {"n": int(mask.sum())}
+    out.update({k: scores(y[mask], p[mask]) for k, p in preds.items()})
+    out.update({f"A_minus_{k}": paired(y[mask], preds["A"][mask], p[mask]) for k, p in preds.items() if k != "A"})
+    return out
+
+
+def _readings(sub: list, predict_fn, keys: tuple, scored: list) -> dict:
+    y = np.array([r["label"] for r in sub], dtype=int)
+    preds = {k: np.asarray(predict_fn([r[k] for r in sub]), dtype=int) for k in keys}
+    same = np.array([r["same"] is True for r in sub], dtype=bool)
+    vid = np.array([r["video"] for r in sub], dtype=str)
+    return {"pooled": _block(y, preds, np.ones(len(sub), bool)), "same_person": _block(y, preds, same),
+            "by_video": {v: _block(y, preds, vid == v) for v in scored}}
+
+
+def aggregate(rows: list, predict_fn, scored: list) -> dict:
+    """Every score in the results file, from the per-punch rows. `predict_fn` maps a
+    list of clips to predicted labels; nothing else here touches the classifier.
+
+    A vs Y_all is read on all_seen; the legacy rule Y only on legacy_common (see
+    SUBSETS). Any reading can be empty (n 0): `scores` then gives {"n": 0}."""
+    seen_all = [r for r in rows if r["seen_all"]]
+    common = [r for r in seen_all if r["seen"]]
+    s = _readings(seen_all, predict_fn, ("A", "Y_all"), scored)
+    c = _readings(common, predict_fn, ("A", "Y", "Y_all"), scored)
+    wseen = [r for r in seen_all if all(r[k] is not None for k in CUTS)]
+    yw = np.array([r["label"] for r in wseen], dtype=int)
+    pw = {k: np.asarray(predict_fn([r[k] for r in wseen]), dtype=int) for k in ("Y_all",) + CUTS}
+    iou_by = {c_: [r["iou"] for r in rows if r["iou"] is not None and r["label"] == n] for n, c_ in enumerate(CLASSES)}
+    return {
+        "n_clips": len(rows), "n_yolo_missed": len(rows) - len(seen_all),
+        "n_legacy_blanked": len(seen_all) - len(common),
+        "n_same_person": sum(r["same"] is True for r in seen_all),
+        "n_other_person": sum(r["same"] is False for r in seen_all),
+        "subsets": SUBSETS,
+        "all_seen": s["pooled"], "legacy_common": c["pooled"],
+        "same_person": {"all_seen": s["same_person"], "legacy_common": c["same_person"]},
+        "by_video": {v: {"all_seen": s["by_video"][v], "legacy_common": c["by_video"][v]} for v in scored},
+        "window": {"subset": "the all_seen punches every cut exists for", "n": len(wseen),
+                   **{k: scores(yw, v) for k, v in pw.items()},
+                   "Y_all_minus_Y_clip": paired(yw, pw["Y_all"], pw["Y_clip"]),
+                   "Y_ext_minus_Y_fix": paired(yw, pw["Y_ext"], pw["Y_fix"]),
+                   "Y_ext_minus_Y_clip": paired(yw, pw["Y_ext"], pw["Y_clip"]),
+                   "Y_clip_minus_Y_fix": paired(yw, pw["Y_clip"], pw["Y_fix"]),
+                   "n_uncuttable": len(seen_all) - len(wseen),
+                   "extent_iou_with_label": {c_: {"n": len(v), "mean": float(np.mean(v)) if v else None}
+                                             for c_, v in iou_by.items()}}}
+
+
+def _acc(s: dict) -> str:
+    return f"{s['accuracy']:.3f}" if s.get("n") else "n/a"
+
+
+def _accf1(s: dict) -> str:
+    return f"{s['accuracy']:.3f} F1 {s['macro_f1']:.3f}" if s.get("n") else "n/a"
+
+
+def _gap(block: dict, key: str) -> str:
+    g = (block.get(key) or {}).get("accuracy")
+    return f"{g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}]" if g else "n/a"
+
+
+def summary_lines(report: dict) -> "list[str]":
+    """What the run prints. Every reading may be empty; an empty one prints as n/a."""
+    out = [f"SCORED: {'/'.join(report['scored_videos'])} of the held-out {'/'.join(report['held_out_videos'])}"
+           + (f"; EXCLUDED: {'/'.join(report['excluded_videos'])}" if report["excluded_videos"] else "")]
+    for v in report["scored_videos"]:
+        s, c = report["by_video"][v]["all_seen"], report["by_video"][v]["legacy_common"]
+        out.append(f"  {v}: A acc {_acc(s['A'])}, Y_all acc {_acc(s['Y_all'])} on {s['n']}; "
+                   f"A - Y_all {_gap(s, 'A_minus_Y_all')}. Old 0.3 rule {_acc(c['Y'])} on the {c['n']} it sees")
+    for name, s, c in (("every punch YOLO saw", report["all_seen"], report["legacy_common"]),
+                       ("same person only", report["same_person"]["all_seen"],
+                        report["same_person"]["legacy_common"])):
+        out.append(f"{name} (all_seen, {s['n']}): A acc {_accf1(s['A'])}, Y_all acc {_accf1(s['Y_all'])}; "
+                   f"A - Y_all {_gap(s, 'A_minus_Y_all')}")
+        out.append(f"  legacy_common ({c['n']} of those {s['n']}): A acc {_accf1(c['A'])}, Y acc {_accf1(c['Y'])}, "
+                   f"Y_all acc {_accf1(c['Y_all'])}; A - Y {_gap(c, 'A_minus_Y')}, A - Y_all {_gap(c, 'A_minus_Y_all')}")
+    w = report["window"]
+    if not w["n"]:
+        out.append(f"cut readings: no punch had every cut ({w['n_uncuttable']} uncuttable); nothing compared")
+    else:
+        out.append("cut readings, every detected joint kept: " + ", ".join(
+            f"{k} acc {_acc(w[k])}" for k in ("Y_all",) + CUTS) + f" on {w['n']}")
+        for key, name in (("Y_all_minus_Y_clip", "what the pipeline's cut costs (Y_all - Y_clip)"),
+                          ("Y_clip_minus_Y_fix", "what the per-clip window buys over the old window (Y_clip - Y_fix)"),
+                          ("Y_ext_minus_Y_clip", "what sizing each punch on its own adds (Y_ext - Y_clip)"),
+                          ("Y_ext_minus_Y_fix", "per-punch extent against the old window (Y_ext - Y_fix)")):
+            out.append(f"{name}: accuracy {_gap(w, key)} on {w[key]['n']}")
+    out.append("extent overlap with the labelled span, by type: " + (", ".join(
+        f"{c} {v['mean']:.2f}" for c, v in w["extent_iou_with_label"].items() if v["mean"] is not None) or "none"))
+    out.append(f"{report['n_yolo_missed']} clips YOLO did not see; {report['n_legacy_blanked']} it saw that the "
+               f"old 0.3 rule blanks; {report['n_other_person']} where it followed someone else")
+    return out
 
 
 def main(argv=None) -> int:
@@ -176,72 +288,15 @@ def main(argv=None) -> int:
     report["scored_videos"] = scored
     if not rows:
         raise SystemExit("GATE 3 FAILED for every video; nothing scored")
-    seen = [r for r in rows if r["seen"] and r["seen_all"]]
-    y = np.array([r["label"] for r in seen])
-    pa = predict(model, man, [r["A"] for r in seen])
-    py = predict(model, man, [r["Y"] for r in seen])
-    pya = predict(model, man, [r["Y_all"] for r in seen])
-    same = np.array([r["same"] is True for r in seen])
-    vid = np.array([r["video"] for r in seen])
-    wseen = [r for r in seen if all(r[k] is not None for k in ("Y_fix", "Y_ext", "Y_clip"))]
-    yw = np.array([r["label"] for r in wseen])
-    pw = {k: predict(model, man, [r[k] for r in wseen]) for k in ("Y_all", "Y_clip", "Y_fix", "Y_ext")}
-    iou_by = {c: [r["iou"] for r in rows if r["iou"] is not None and r["label"] == n] for n, c in enumerate(CLASSES)}
-    report.update({
-        "n_clips": len(rows), "n_yolo_missed": len(rows) - len(seen),
-        "n_same_person": int(same.sum()), "n_other_person": int(sum(r["same"] is False for r in seen)),
-        "all_seen": {"A": scores(y, pa), "Y": scores(y, py), "Y_all": scores(y, pya),
-                     "A_minus_Y": paired(y, pa, py), "A_minus_Y_all": paired(y, pa, pya)},
-        "window": {**{k: scores(yw, v) for k, v in pw.items()},
-                   "Y_all_minus_Y_clip": paired(yw, pw["Y_all"], pw["Y_clip"]),
-                   "Y_ext_minus_Y_fix": paired(yw, pw["Y_ext"], pw["Y_fix"]),
-                   "Y_ext_minus_Y_clip": paired(yw, pw["Y_ext"], pw["Y_clip"]),
-                   "Y_clip_minus_Y_fix": paired(yw, pw["Y_clip"], pw["Y_fix"]),
-                   "n_uncuttable": len(seen) - len(wseen),
-                   "extent_iou_with_label": {c: {"n": len(v), "mean": float(np.mean(v)) if v else None}
-                                             for c, v in iou_by.items()}},
-        "same_person": {"A": scores(y[same], pa[same]), "Y": scores(y[same], py[same]),
-                        "Y_all": scores(y[same], pya[same]),
-                        "A_minus_Y_all": paired(y[same], pa[same], pya[same]),
-                        "A_minus_Y": paired(y[same], pa[same], py[same])},
-        "by_video": {v: {"A": scores(y[vid == v], pa[vid == v]), "Y": scores(y[vid == v], py[vid == v]),
-                         "Y_all": scores(y[vid == v], pya[vid == v]),
-                         "A_minus_Y_all": paired(y[vid == v], pa[vid == v], pya[vid == v])} for v in scored},
-        "limits": ["the per-clip cut (Y_clip) was CHOSEN looking at these videos' numbers and at V6's second half "
-                   "(ADR-0014, 2026-10-13): this is no longer a clean test of it",
-                   "held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
-                   "the video-disjoint split may not be athlete-disjoint (O55)",
-                   "YOLO keeps one person per frame; other-person clips are counted, and scored in all_seen"]})
-    print(f"SCORED: {'/'.join(scored)} of the held-out {'/'.join(held_out)}"
-          + (f"; EXCLUDED: {'/'.join(report['excluded_videos'])}" if report["excluded_videos"] else ""))
-    for v in scored:
-        b = report["by_video"][v]
-        g = b["A_minus_Y_all"].get("accuracy")
-        print(f"  {v}: A acc {b['A']['accuracy']:.3f}, Y_all acc {b['Y_all']['accuracy']:.3f}, "
-              f"old 0.3 rule {b['Y']['accuracy']:.3f}, on {b['A']['n']}"
-              + (f"; A - Y_all {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}]" if g else ""))
-    for name, block in (("every clip YOLO saw", report["all_seen"]), ("same person only", report["same_person"])):
-        print(f"{name}: " + ", ".join(f"{k} acc {block[k]['accuracy']:.3f} F1 {block[k]['macro_f1']:.3f}"
-                                      for k in ("A", "Y", "Y_all") if k in block and block[k].get("n")))
-        for key in ("A_minus_Y_all", "A_minus_Y"):
-            g = (block.get(key) or {}).get("accuracy")
-            if g:
-                print(f"  {key.replace('_minus_', ' - ')} accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, "
-                      f"{g['ci_high']:+.3f}] on {block[key]['n']}")
-    w_ = report["window"]
-    print("cut readings, every detected joint kept: " + ", ".join(
-        f"{k} acc {w_[k]['accuracy']:.3f}" for k in ("Y_all", "Y_clip", "Y_fix", "Y_ext")) + f" on {w_['Y_all']['n']}")
-    for key, name in (("Y_all_minus_Y_clip", "what the pipeline's cut costs (Y_all - Y_clip)"),
-                      ("Y_clip_minus_Y_fix", "what the per-clip window buys over the old window (Y_clip - Y_fix)"),
-                      ("Y_ext_minus_Y_clip", "what sizing each punch on its own adds (Y_ext - Y_clip)"),
-                      ("Y_ext_minus_Y_fix", "per-punch extent against the old window (Y_ext - Y_fix)")):
-        g = report["window"][key].get("accuracy")
-        if g:
-            print(f"{name}: accuracy {g['point']:+.3f} [{g['ci_low']:+.3f}, {g['ci_high']:+.3f}] "
-                  f"on {report['window'][key]['n']}")
-    print("extent overlap with the labelled span, by type: " + ", ".join(
-        f"{c} {v['mean']:.2f}" for c, v in report["window"]["extent_iou_with_label"].items() if v["mean"] is not None))
-    print(f"{report['n_yolo_missed']} clips YOLO did not see; {report['n_other_person']} where it followed someone else")
+    report.update(aggregate(rows, lambda clips: predict(model, man, clips), scored))
+    report["limits"] = [
+        "the per-clip cut (Y_clip) was CHOSEN looking at these videos' numbers and at V6's second half "
+        "(ADR-0014, 2026-10-13): this is no longer a clean test of it",
+        "held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
+        "the video-disjoint split may not be athlete-disjoint (O55)",
+        "YOLO keeps one person per frame; other-person clips are counted, and scored in all_seen"]
+    for line in summary_lines(report):
+        print(line)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(report, indent=1, allow_nan=False, default=float), encoding="utf-8")
     print(f"-> {a.out}")
