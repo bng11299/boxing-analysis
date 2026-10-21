@@ -746,3 +746,54 @@ on; (4) own footage re-run; (5) suites green in a clean clone.
 - **Residual, accepted:** V5, V9 and V6's second half are no longer clean tests of this cut;
   the censoring rule and the too-few fallback are unmeasured; intervals resample punches
   independently.
+
+### Iteration 8 -- Codex's two findings (2026-10-21, `e2459d5`)
+Acceptance: (1) the under-5 fallback reads exactly `cut_window`'s frames, checked by the frames
+read, not the stored length; (2) a repeated (frame, hand) CSV row is refused; (3) decide and
+record whether threshold and local-peak checks belong here; (4) no row the finder emits is
+refused; (5) suites green here and in a clean clone; one Astra review.
+- **Finding 1, and why the obvious fix was wrong.** `clip_cut` stored `geom.duration_s` (9/24 s,
+  a sample count) as `length_s`, which `clip_window` treats as first-to-last: 10 frames at 24 fps
+  where `cut_window` reads 9. Correcting the length to (9 - 1)/24 s fixes 24 fps but, read through
+  `clip_window` + `cut_span`, reads **8** frames at 25, 29.97 and 59.94 fps: the start snaps to a
+  frame and `cut_span` reads only whole training steps. The old one-step-too-long length had
+  masked that (9 frames at phone rates, 10 only at multiples of 24). So the fallback, which IS
+  the old fixed window, is now read by `cut_window`'s own frames through the new
+  `classify.read_clip_window`; a clip's own cut goes through `clip_window` + `cut_span` exactly
+  as gated (tested equal). `classify_punches.py` and `eval_classify_v6.py` call it, and the
+  recorded span is now the frames read (it had been 2 frames wider at 59.94 fps). A manifest
+  whose lead-in would put the peak after the window's last frame is refused.
+- **Finding 2, and the decision.** Duplicates refused in `read_punches`. Threshold and local-peak
+  checks: **added here**. They are facts about this branch's own finder (`punchfind.detect`:
+  `find_peaks` on the faster hand's speed, `height` = threshold), they close the same hole
+  (rows the finder cannot emit setting the clip's tempo), and leaving them to #22 would leave
+  #14's pipeline open on its own. Here they read the faster-hand curve the finder peaks on; #22's
+  version reads each hand's curve because it adds a per-hand finder. Necessary, not sufficient:
+  a peak the minimum gap suppressed, or a CSV with rows deleted, still passes.
+- **Tests:** 202 -> 221 checks. Frames compared by index coded into the nose: 47-55 at a 24 fps
+  peak at 50; every peak tried at 23.976, 24, 25, 29.97, 30, 59.94 and 60 fps. Negative: five
+  copies, two copies, one frame up and one down the slope, threshold one ulp above the slowest
+  punch (control at exactly its speed passes: `>=`, as `find_peaks`), unknown cut source, late
+  lead-in. Two existing expectations encoded the bug (0.375 s length, 22-frame CLI span) and
+  were corrected to 8/24 s and 20 frames. **Mutants: 9, all caught**, including "length fixed but
+  read through `cut_span`" (fails the 7-rate check).
+- **Real-world facts, own footage at 59.946 fps** (outputs to scratch; finder re-run with this
+  branch): IMG_4406 and IMG_4395, 41 and 42 finder rows, all accepted by the new checks;
+  classified CSVs **byte-identical** to `49473f9`. Their first 4 rows alone (the fallback): 9
+  frames per punch before and after, the length-only fix 8; 7 of 8 types unchanged, one
+  low-confidence punch moved (rear hook 0.53 -> rear uppercut 0.36).
+- **Gates:** test green (221/260/38/109/50/36 + 38 PowerShell), the same counts in a clean clone
+  at `e2459d5`. Review (self): one overstated comment fixed. Security: changed files only; the
+  CSV boundary and manifest checks are stricter and fail closed; the duplicate set is bounded by
+  MAX_ROWS; errors name file, line and frame only.
+- **Astra (Codex, read-only, effort medium): FIX FIRST, both items in stacked branches, none in
+  this diff.** (a) `eval_pose_switch.py:166` on #16 reads through `clip_window` + `cut_span`:
+  route it through `read_clip_window` in #16's fix pass (its V5/V9 cuts have far more than 5
+  punches, so no reported number moves). (b) Merging into #22: keep #22's per-hand check, this
+  branch's duplicate guard, and `read_clip_window` at both read sites. No false refusal found
+  (plateaus, segment edges, threshold equality, same signal code in both tools). Astra could
+  not run Python in its sandbox ("Access is denied"); the runtime evidence above is this
+  session's.
+- **Residual, accepted:** `run_punch_extent.py` still takes fallback spans from `clip_window`
+  (description only; V6 never falls back). At exactly 60 fps `cut_window`'s x.5 ties fall either
+  way by float noise (pre-existing). The fallback remains unmeasured on labelled footage.
