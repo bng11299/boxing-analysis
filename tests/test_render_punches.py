@@ -124,7 +124,7 @@ def _not_utf8() -> Path:
 
 
 def rows_of(p: Path, n=N):
-    return report.read_classified(p, n / FPS)
+    return report.read_classified(p, n / FPS, fps=FPS)
 
 
 SCALE, LX, LY, MAXC = rp.layout(W, H)
@@ -322,6 +322,18 @@ raises("a sidecar recording another frame rate",
        lambda: rp.render_punch_overlay(vid, pose_npz, write_case(tmp / "fps", side={"fps": 30.0}), r_out))
 raises("a sidecar with no frame rate",
        lambda: rp.render_punch_overlay(vid, pose_npz, write_case(tmp / "nofps", side={"fps": None}), r_out))
+# Sidecar frames and fps match this pose and the hash matches, but every time is frame / 30: the CSV
+# came from a 30 fps clip. Only the row check (report.read_classified's fps=) can see it.
+slow = [r_[:1] + [f"{int(r_[0]) / 30:.3f}"] + r_[2:] for r_ in ROWS]
+try:
+    rp.render_punch_overlay(vid, pose_npz, write_case(tmp / "slow", rows=slow), r_out)
+    why = "accepted"
+except ValueError as e:
+    why = str(e)
+check("a hash-matched CSV whose times are frame / 30 is refused against this pose", "is not frame" in why, why)
+gp = write_case(tmp / "bytes")
+check("read_classified takes the caller's bytes and the fps together",
+      report.read_classified(gp, N / FPS, gp.read_bytes(), fps=FPS) == rows_of(gp))
 nos = write_case(tmp / "noside")
 nos.with_suffix(".json").unlink()
 raises("no sidecar beside the CSV", lambda: rp.render_punch_overlay(vid, pose_npz, nos, r_out))

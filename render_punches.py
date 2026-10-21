@@ -192,17 +192,10 @@ def _checked_inputs(video: Path, pose, classified: Path, out: Path,
         raise ValueError(f"no {sidecar.name} beside the CSV: re-run classify_punches.py, which writes it")
     data = _load(classified, classified.read_bytes)   # read once: the bytes hashed are the bytes parsed
     side = _load(sidecar, lambda: report.verify_sidecar(classified, sidecar, clip, data))
-    frames = side.get("pose_frames")
-    if type(frames) is not int or frames != len(pose):
-        raise ValueError(f"{classified.name} was classified on a {frames!r}-frame pose; this one has {len(pose)}")
-    fps = side.get("fps")
-    try:
-        fps_ok = type(fps) in (int, float) and abs(float(fps) - pose.fps) <= 1e-6
-    except OverflowError:   # an integer too big for a float
-        fps_ok = False
-    if not fps_ok:
-        raise ValueError(f"{classified.name} was classified at {fps!r} fps; this pose is at {pose.fps:.3f}")
-    rows = _load(classified, lambda: report.read_classified(classified, len(pose) / pose.fps, data))
+    # The report's own check (frames AND fps, exact, overflow-safe), so the overlay and the
+    # report refuse the same sidecars; then every row's time is checked against frame / fps.
+    report.check_pose(side, len(pose), pose.fps)
+    rows = _load(classified, lambda: report.read_classified(classified, len(pose) / pose.fps, data, fps=pose.fps))
     for r in rows:
         if not 0 <= r["frame"] < len(pose):
             raise ValueError(f"{classified.name}: a punch peaks at frame {r['frame']}, outside this "

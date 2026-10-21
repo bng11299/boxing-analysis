@@ -10,20 +10,22 @@ rate is described from the numbers as printed, and only when it is bigger than
 chance would produce.
 
 Reliability comes from measurements, linked by hashes rather than trusted:
-  classified CSV --(sidecar: csv sha256, classifier sha256)--> classifier manifest
-  --(per-class F1, recomputed from the matrix)--> the reported run's held-out
+  classified CSV --(sidecar: csv sha256, classifier sha256, pose frames and fps,
+  finder rule)--> classifier manifest --(the held-out confusion matrix, cell for
+  cell, and per-class F1 recomputed from it)--> the reported run's held-out
   confusion matrix (results/stgcnpp.json).
 * punch type: that confusion matrix.
 * the hand: the share of held-out punches whose predicted TYPE is thrown by the
   same hand as the true one. That measures the classifier's hand. The finder's
   hand (which wrist moved) has never been measured on its own; the report shows
   how often the two disagree and says which number belongs to which reading.
-* punch finding: the tuned rule's held-out score on V6, recall AND count ratio.
+* punch finding: the tuned rule's held-out score on V6, recall AND count ratio,
+  only if the sidecar records that rule (variant, threshold, minimum gap).
   V6 labels only hooks and uppercuts, so its precision understates the truth and
   its count ratio overstates the over-count; how far counts are off on your
   footage is unknown, and the summary says so.
 * your own footage: the clip's classify_score.json, when you labelled it, and
-  only if it scored the same classifier.
+  only if it scored the same classifier and the same classified CSV.
 
 Fixed rules, stated in the report: a punch type the classifier names correctly
 under LOW_RECALL of the time is "named least reliably"; a count more than
@@ -57,6 +59,8 @@ CHANCE_SE = 2.0
 MAX_ROWS = 100_000
 MAX_ROUNDS = 100
 MAX_JSON_BYTES = 4 * 1024 * 1024
+MAX_COUNT = 10 ** 9   # a punch count or confusion cell; far above any real one, far below int64
+TIME_TOL_S = 2e-3   # find_punches.py writes times to the millisecond; classify_punches.py checks the same bound
 PLURAL = {"jab": "jabs", "cross": "crosses", "lead_hook": "lead hooks", "lead_uppercut": "lead uppercuts",
           "rear_hook": "rear hooks", "rear_uppercut": "rear uppercuts"}
 # The only notes classify_punches.py writes: an unnamed punch carries one REASON, a named
@@ -100,17 +104,23 @@ def _prob(x, what: str) -> float:
 
 
 def _count(x, what: str) -> int:
-    if isinstance(x, bool) or not isinstance(x, int) or x < 0:
-        raise ValueError(f"{what} must be a whole number >= 0, got {x!r}")
+    if isinstance(x, bool) or not isinstance(x, int) or not 0 <= x <= MAX_COUNT:   # bounded: no int64 overflow
+        raise ValueError(f"{what} must be a whole number in 0..{MAX_COUNT}, got {str(x)[:20]!r}")
     return x
 
 
-def read_classified(path: Path, duration_s: float, data: "bytes | None" = None) -> "list[dict]":
+def read_classified(path: Path, duration_s: float, data: "bytes | None" = None, *, fps: float) -> "list[dict]":
     """classify_punches.py's CSV, checked field by field: it sits on disk between
     the two tools, and everything in it ends up in front of the user. `data`, when
     given, is the file's bytes as already read (and hashed) by the caller; `path`
-    then only names it."""
+    then only names it. Every frame must lie in this clip and every time must equal
+    frame / this clip's fps, as find_punches.py wrote it: a CSV made at another
+    frame rate is refused even when its sidecar has been made to agree."""
     path = Path(path)
+    if (isinstance(fps, bool) or not isinstance(fps, (int, float)) or (isinstance(fps, int) and not 0 < fps <= 10_000)
+            or not (math.isfinite(fps) and fps > 0)):
+        raise ValueError("fps must be a positive number")
+    n_frames = round(duration_s * fps)
     rows, leads = [], set()
     with (path.open(newline="", encoding="utf-8") if data is None
           else io.StringIO(data.decode("utf-8"), newline="")) as f:
@@ -128,6 +138,11 @@ def read_classified(path: Path, duration_s: float, data: "bytes | None" = None) 
                 raise ValueError(f"{where}: frame numbers must be whole numbers")
             if not _DECIMAL.fullmatch(d["time_s"]) or not float(d["time_s"]) <= duration_s:
                 raise ValueError(f"{where}: time {d['time_s']!r} is not inside this {duration_s:.1f} s clip")
+            if not int(d["frame"]) < n_frames:
+                raise ValueError(f"{where}: frame {d['frame']} is past this {n_frames}-frame clip")
+            if abs(float(d["time_s"]) - int(d["frame"]) / fps) > TIME_TOL_S:
+                raise ValueError(f"{where}: time {d['time_s']} is not frame {d['frame']} at {fps:.3f} fps: "
+                                 "this CSV was not made from this clip")
             if d["hand"] not in ("left", "right") or d["lead_rear"] not in ("lead", "rear"):
                 raise ValueError(f"{where}: hand {d['hand']!r} / {d['lead_rear']!r}")
             leads.add(d["hand"] if d["lead_rear"] == "lead" else ("right" if d["hand"] == "left" else "left"))
@@ -192,6 +207,19 @@ def verify_provenance(csv_path: Path, sidecar: Path, manifest: Path, clip: str) 
     return man
 
 
+def check_pose(sidecar: dict, n_frames: int, fps: float) -> None:
+    """The pose the report reads is the one the CSV was classified on: the same number
+    of frames AND the same frame rate. A clip classified at 60 fps is refused against
+    a same-named, same-length pose at 30 fps; its times would all be wrong."""
+    frames, rate = sidecar.get("pose_frames"), sidecar.get("fps")
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames != n_frames:
+        raise ValueError(f"these punches were classified on a {frames!r}-frame pose; this one has {n_frames}")
+    # Python compares int with float exactly, so a huge JSON integer is refused here instead of
+    # overflowing math.isfinite; NaN and inf are never equal to a real pose's fps.
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate != fps:
+        raise ValueError(f"these punches were classified on a pose at {rate!r} fps; this one is at {fps!r}")
+
+
 def parse_rounds(text: "str | None", duration_s: float) -> "list[tuple[float, float]]":
     """'0-180,240-420' in seconds; the whole clip when not given. Rounds must be
     inside the clip, in order and not overlapping."""
@@ -232,8 +260,11 @@ class TypeReliability:
 
 def benchmark_reliability(reference: Path, manifest: dict) -> dict:
     """Per-type reliability from the reported run's held-out confusion matrix. Used
-    only if the matrix reproduces its own per-class F1 and those equal the F1 the
-    classifier's manifest records."""
+    only if the matrix is, cell for cell, the one the classifier's manifest records
+    (train_classifier.py writes the matrix of the very model it saves), and it
+    reproduces the per-class F1 both files record. Per-class F1 alone is not enough:
+    it is unchanged when the matrix is transposed, while recall, precision and every
+    over- and under-count warning reverse."""
     ref = _read_json(reference)
     runs = [r for r in ref.get("results", []) if isinstance(r, dict) and r.get("model") == "st-gcn++ pretrained"]
     if len(runs) != 1:
@@ -247,6 +278,16 @@ def benchmark_reliability(reference: Path, manifest: dict) -> dict:
     if (c.sum(axis=1) == 0).any():
         raise ValueError(f"{Path(reference).name}: a punch type has no held-out examples")
     held = manifest.get("held_out") if isinstance(manifest.get("held_out"), dict) else {}
+    pinned = held.get("confusion")
+    if not (isinstance(pinned, list) and len(pinned) == len(CLASSES)
+            and all(isinstance(row, list) and len(row) == len(CLASSES) for row in pinned)):
+        raise ValueError("the classifier's manifest records no held-out confusion matrix: re-run "
+                         "train_classifier.py, which records it, so the reliability can be tied to this model")
+    mine = np.array([[_count(v, "manifest confusion cell") for v in row] for row in pinned], dtype=np.int64)
+    if not np.array_equal(mine, c):
+        how = ("is the manifest's with rows and columns swapped" if np.array_equal(mine, c.T)
+               else "is not the one the classifier's manifest records")
+        raise ValueError(f"{Path(reference).name}'s confusion matrix {how}: it does not describe this classifier")
     want, got = r.get("per_class_f1"), held.get("per_class_f1")
     table = []
     for i, cls in enumerate(CLASSES):
@@ -268,8 +309,32 @@ def benchmark_reliability(reference: Path, manifest: dict) -> dict:
             "accuracy": float(np.trace(c) / c.sum()), "n": int(c.sum()), "videos": videos}
 
 
-def finder_reliability(rule: Path) -> dict:
+RULE_KEYS = ("variant", "threshold", "min_gap_s")
+
+
+def _rule_of(d, what: str) -> dict:
+    """The finder rule's three settings, as find_punches.load_rule returns them and
+    classify_punches.py records them in the sidecar."""
+    if not isinstance(d, dict) or not isinstance(d.get("variant"), str):
+        raise ValueError(f"{what}: no punch-finder rule (variant, threshold, min_gap_s)")
+    out = {"variant": d["variant"]}
+    for k in RULE_KEYS[1:]:
+        v = d.get(k)
+        if (isinstance(v, bool) or not isinstance(v, (int, float))
+                or (isinstance(v, int) and abs(v) > 1e6) or not math.isfinite(v)):   # int bound: no float overflow
+            raise ValueError(f"{what}: rule {k} {str(v)[:20]!r} is not a number")
+        out[k] = float(v)
+    return out
+
+
+def finder_reliability(rule: Path, used: dict) -> dict:
+    """The tuned rule's held-out score, only if `used` -- the rule the sidecar says
+    found these punches -- is this rule: the same variant, threshold and minimum gap.
+    Another rule's recall says nothing about the punches in front of the user."""
     d = _read_json(rule)
+    if _rule_of(d.get("chosen"), Path(rule).name) != _rule_of(used, "the sidecar"):
+        raise ValueError(f"these punches were found with another rule than {Path(rule).name} "
+                         f"({_rule_of(used, 'the sidecar')}); its held-out score does not apply")
     t = (d.get("chosen") or {}).get("test") if isinstance(d.get("chosen"), dict) else None
     if not isinstance(t, dict):
         raise ValueError(f"{Path(rule).name}: no held-out test score for the punch finder")
@@ -280,12 +345,24 @@ def finder_reliability(rule: Path) -> dict:
     return {"recall": _prob(t.get("recall"), "finder recall"), "count_ratio": float(ratio), "video": video}
 
 
-def own_reliability(score: Path, clip: str, classifier_sha256: str) -> dict:
+def own_reliability(score: Path, clip: str, classifier_sha256: str, csv_sha256: str) -> dict:
+    """The clip's score against your labels, only if it scored THESE punches: the same
+    clip, the same classifier, and the classified CSV whose sha256 the sidecar records.
+    Re-classifying a clip (another stance, rule or cut) leaves the old score file on
+    disk; without the CSV hash its accuracy would be reported for punches it never saw."""
     d = _read_json(score)
     if d.get("clip") != clip:
         raise ValueError(f"{Path(score).name} scores clip {d.get('clip')!r}, not {clip}")
     if d.get("classifier_sha256") != classifier_sha256:
         raise ValueError(f"{Path(score).name} scored another classifier; re-run classify_punches.py --labels")
+    if not (isinstance(csv_sha256, str) and _HEX64.fullmatch(csv_sha256)):
+        raise ValueError("no classified-CSV sha256 to check the score against")
+    if "csv_sha256" not in d:
+        raise ValueError(f"{Path(score).name} does not say which classified CSV it scored (written before scores "
+                         "recorded it); re-run classify_punches.py --labels")
+    if d["csv_sha256"] != csv_sha256:
+        raise ValueError(f"{Path(score).name} scored another classified CSV than this one (the clip was classified "
+                         "again since); re-run classify_punches.py --labels")
     m = d.get("matched_detections")
     if not isinstance(m, dict):
         raise ValueError(f"{Path(score).name}: no matched-detection score")
