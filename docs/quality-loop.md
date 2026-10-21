@@ -965,3 +965,4 @@ times belong to another frame rate; (3) every suite green.
   3 of 3 caught.
 - **Review / security:** no new input; one duplicated check removed in favour of the shared one.
   No findings.
+- **Review (Astra / Codex, read-only, effort medium, one review of the #17/#18/#19 merges): SHIP all.** Merge OK on each branch, no adaptation defects; it checked that the shared checks are identical to feat/output-report's on all three (confirmed here: no changed line). Its sandbox could not run Python, so its verdict is from reading plus the results above; fresh clones of 2e2059f, f2412e8 and a2f90be reproduce every count.
