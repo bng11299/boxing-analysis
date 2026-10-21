@@ -119,7 +119,8 @@ bad("frame 9600 of a 9600-frame clip is refused, though its time (160.000 s) is 
 check("a time rounded to the millisecond is read: frame 61 at 60 fps is 1.0167 s, written 1.017",
       report.read_classified(write_csv(tmp / "ms.csv", [row(61 / FPS, "jab")]), DUR, fps=FPS)[0]["time_s"] == 1.017)
 raises("the clip's fps is a required argument", lambda: report.read_classified(good, DUR), exc=TypeError)
-for f_, why in ((0.0, "zero"), (True, "a boolean"), (float("nan"), "NaN"), (10 ** 400, "a 400-digit integer")):
+for f_, why in ((0.0, "zero"), (True, "a boolean"), (float("nan"), "NaN"), (10 ** 400, "a 400-digit integer"),
+                (-(10 ** 400), "a negative 400-digit integer (Astra, 10-21)"), (-30, "a negative integer")):
     raises(f"an fps that is {why} is refused", lambda f_=f_: report.read_classified(good, DUR, fps=f_), match="fps")
 for t_, why in (("nan", "NaN"), ("1_0", "underscored"), (" 1.0", "padded"), ("-1.0", "negative")):
     r_ = row(1, "jab"); r_[1] = t_; bad(f"a {why} time is refused", [r_])

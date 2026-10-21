@@ -115,7 +115,7 @@ def read_classified(path: Path, duration_s: float, *, fps: float) -> "list[dict]
     find_punches.py wrote it: a CSV made at another frame rate is refused even when
     its sidecar has been made to agree."""
     path = Path(path)
-    if (isinstance(fps, bool) or not isinstance(fps, (int, float)) or (isinstance(fps, int) and fps > 10_000)
+    if (isinstance(fps, bool) or not isinstance(fps, (int, float)) or (isinstance(fps, int) and not 0 < fps <= 10_000)
             or not (math.isfinite(fps) and fps > 0)):
         raise ValueError("fps must be a positive number")
     n_frames = round(duration_s * fps)

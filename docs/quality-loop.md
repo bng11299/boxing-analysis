@@ -844,18 +844,24 @@ Threat sketch unchanged (files on disk between tools; reliability borrowed from 
   model's matrix (`run_stgcnpp` saves after scoring); the report requires equality and says
   when the reference is the transpose. Per-class F1 is symmetric under transpose, so the old
   F1 check could not see it.
-- **Test:** report 130 -> 183, classify 202 -> 209; other suites unchanged (env 36, hands 38,
+- **Test:** report 130 -> 185, classify 202 -> 209; other suites unchanged (env 36, hands 38,
   ingest 109, labels 50, pipeline 260). New refusal tests name the phrase the error must
   carry, so none passes on another refusal. A real fact is pinned: the reported held-out
   matrix (V2/V5/V9, 976 punches) gives cross +28% and lead uppercut -41%; its transpose has
   the same F1 and would have said lead uppercuts run HIGH by 69% -- refused. The manifest's
   matrix is checked against one counted by hand from the saved model's own predictions.
-  19 guards reverted one at a time in a scratch copy: all 19 caught.
+  20 guards reverted one at a time in a scratch copy: all 20 caught.
 - **Review (self):** one bug in my own fix -- `math.isfinite` on a 400-digit JSON integer
   raises OverflowError, not ValueError (sidecar fps, rule threshold), and the same class in
   `_count` (int64 overflow on a confusion cell, pre-existing). Fixed: exact int/float
   comparison, bounded counts (<= 10^9); tests added. Message for a pre-10-21 score said
   "classified again since" when the truth is "never recorded"; split.
+- **Review (Astra / Codex, read-only, effort medium, on `d3975ef`): SHIP.** All four findings
+  CLOSED, each cited to file:line; the stacked-branch list confirmed for #17, #18 and #19
+  (#21/#24/#25 were outside its brief; `git diff --stat` shows they do not touch these files).
+  One nit, confirmed by reading: `read_classified(..., fps=-(10**400))` overflowed, because the
+  integer guard bounded only the top. Fixed (`0 < fps <= 10_000` for integers); test and a
+  20th reverted guard added.
 - **Security (changed files):** no queries, shells or new paths; every new input goes through
   the bounded JSON reader; errors truncate file-supplied numbers to 20 characters. The
   overflow above was the one finding (low: it failed closed, with a traceback).
