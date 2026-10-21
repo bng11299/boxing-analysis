@@ -954,7 +954,7 @@ with `-`.
 - The punch-labelled overlay (`feat/punch-overlay`, PR #18) is not swapped in: two lines in
   `render_overlay` once it is merged into the base.
 
-### Iteration 4 -- feat/output-report's four fixes merged in (2026-10-21)
+### Iteration 3 -- feat/output-report's four fixes merged in (2026-10-21)
 Acceptance: (1) the preflight refuses a manifest without the pinned held-out matrix, and a
 transposed reference, before the pose model runs; (2) the sidecar check refuses a sidecar that
 differs only in fps, the way the report does; (3) a sidecar recording another finder rule stops
