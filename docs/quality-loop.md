@@ -822,3 +822,50 @@ the figures the project plan states.
   24% crosses, 14% lead hooks, 14% rear uppercuts, 10% lead uppercuts. IMG_4406 read over
   0.39 s (41 punches), 41 punches: 41% jabs, 17% crosses, 17% rear uppercuts, 15% lead hooks,
   10% lead uppercuts. Unmeasured against labels.
+
+### Iteration 5 -- the four Codex findings (2026-10-21)
+Codex (10-20) found four ways the report could state a reliability that does not describe
+the punches in front of the user; each was confirmed by reading before fixing.
+Acceptance criteria: (1) a CSV classified at another fps is refused, at the sidecar AND at
+every row's time, by a CLI test that changes only the fps; (2) an own-footage score is
+refused unless it names the classified CSV's sha256, which `classify_punches.py --labels`
+now writes; (3) the finder's held-out score is refused unless the sidecar's rule (variant,
+threshold, min_gap_s) is `--rule`'s; (4) a reference matrix that is not, cell for cell, the
+matrix the classifier's manifest pins is refused (transpose included), and
+`train_classifier.py` pins it; (5) all suites green in the working tree and a clean clone.
+Threat sketch unchanged (files on disk between tools; reliability borrowed from another run).
+
+- **Fix:** (1) `report.check_pose` compares the sidecar's `pose_frames` and `fps` with the
+  pose; `read_classified(..., fps=)` (required, keyword-only) refuses a frame past the clip
+  and a time more than 2 ms from frame / fps, as `classify_punches.read_punches` does. (2)
+  The score records `csv_sha256`; `own_reliability` takes the sidecar's (already verified)
+  hash and refuses a mismatch, or a score with no hash. (3) `finder_reliability(rule, used)`
+  compares the three settings exactly. (4) The manifest's `held_out.confusion` is the saved
+  model's matrix (`run_stgcnpp` saves after scoring); the report requires equality and says
+  when the reference is the transpose. Per-class F1 is symmetric under transpose, so the old
+  F1 check could not see it.
+- **Test:** report 130 -> 183, classify 202 -> 209; other suites unchanged (env 36, hands 38,
+  ingest 109, labels 50, pipeline 260). New refusal tests name the phrase the error must
+  carry, so none passes on another refusal. A real fact is pinned: the reported held-out
+  matrix (V2/V5/V9, 976 punches) gives cross +28% and lead uppercut -41%; its transpose has
+  the same F1 and would have said lead uppercuts run HIGH by 69% -- refused. The manifest's
+  matrix is checked against one counted by hand from the saved model's own predictions.
+  19 guards reverted one at a time in a scratch copy: all 19 caught.
+- **Review (self):** one bug in my own fix -- `math.isfinite` on a 400-digit JSON integer
+  raises OverflowError, not ValueError (sidecar fps, rule threshold), and the same class in
+  `_count` (int64 overflow on a confusion cell, pre-existing). Fixed: exact int/float
+  comparison, bounded counts (<= 10^9); tests added. Message for a pre-10-21 score said
+  "classified again since" when the truth is "never recorded"; split.
+- **Security (changed files):** no queries, shells or new paths; every new input goes through
+  the bounded JSON reader; errors truncate file-supplied numbers to 20 characters. The
+  overflow above was the one finding (low: it failed closed, with a traceback).
+- **Real data, read-only:** on IMG_4406 and IMG_4395 the fps, row-time (41 and 42 rows) and
+  rule checks accept today's outputs. Two refusals, both intended: today's manifest has no
+  matrix (re-run `train_classifier.py`), and today's score files have no CSV hash (re-run
+  `classify_punches.py --labels`). Until both are re-run the real reports refuse.
+- **Stacked branches:** #17 (edits report.py / report_punches.py / test_report.py: conflicts,
+  fixtures need the matrix, rule and fps), #18 (`render_punches` calls `read_classified`
+  positionally with `data`; needs `fps=`), #19 (`analyse_clip.preflight` calls
+  `finder_reliability(a.rule)` and needs the rule; its test manifest lacks the matrix;
+  `check_classified` can use `check_pose`). #21 and #24 (and #25) do not touch these files.
+  #22 also edits the `--labels` block of `classify_punches.py`: merge by hand.

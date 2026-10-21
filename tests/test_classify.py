@@ -768,6 +768,10 @@ check("the window's overlap with labels that equal it is 1, over all 3 matched p
       sc["window_iou_with_labels"] == {"n": 3, "mean": 1.0}, str(sc["window_iou_with_labels"]))
 check("the score records the cut it scored", sc["cut"]["per"] == "clip" and sc["cut"]["source"] == "training")
 check("the score names the classifier it scored, by hash", sc["classifier_sha256"] == man["sha256"])
+prov_l = json.loads((tmp / "o" / "IMG_7777.classified.json").read_text(encoding="utf-8"))
+check("the score names the classified CSV it scored: the file's sha256, as the sidecar records it",
+      sc.get("csv_sha256") == prov_l["csv_sha256"]
+      == hashlib.sha256((tmp / "o" / "IMG_7777.classified.csv").read_bytes()).hexdigest(), str(sc.get("csv_sha256")))
 check("control: no matched punch is unclassifiable on the whole clip", sc.get("matched_unclassifiable") == 0)
 half = [{"start": s_["start"], "end": (s_["start"] + s_["end"]) // 2, "label": s_["label"]} for s_ in spans]
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": half}), encoding="utf-8")
@@ -795,6 +799,21 @@ check("a labelled punch with no wrist speed in it is not scored 'at its peak' (i
       sc_still["labelled_punch_by_clip_window_unclassifiable"] == 1
       and sc_still["labelled_punch_by_clip_window_at_its_peak"]["n"] == 1
       and sc_still["labelled_punch_from_labelled_frames"]["n"] == 2, str(sc_still))
+# Classified again without --labels (another stance): the CSV changes, the score file on disk does not.
+from boxingvi import report as report_mod  # noqa: E402
+
+score_path = tmp / "o" / "IMG_7777.classify_score.json"
+classify_punches.main(args + ["--stance", "southpaw"])
+prov_s = json.loads((tmp / "o" / "IMG_7777.classified.json").read_text(encoding="utf-8"))
+check("re-classifying without --labels leaves a score whose CSV hash is no longer the sidecar's",
+      json.loads(score_path.read_text(encoding="utf-8"))["csv_sha256"] != prov_s["csv_sha256"])
+try:
+    report_mod.own_reliability(score_path, "IMG_7777", man["sha256"], prov_s["csv_sha256"])
+    why = "accepted"
+except ValueError as e:
+    why = str(e)
+check("... and the report refuses that stale score for the new CSV (same clip, same classifier)",
+      "another classified CSV" in why, why)
 
 def punches_with(text):
     p = tmp / "p.csv"
@@ -850,6 +869,20 @@ reloaded = STGCNPP(); reloaded.load_state_dict(torch.load(tmp / "saved.pt", weig
 with torch.no_grad():
     again = reloaded(prepare_input(xs[18:], 50)).argmax(1).numpy()
 check("the saved state_dict reproduces the predictions run_stgcnpp scored", np.array_equal(again, r["_pred"]))
+# The matrix the manifest records, counted by hand from the saved model's own predictions: rows true, columns
+# predicted. Independent of sklearn's convention, so a transposed record fails here.
+by_hand = [[0] * len(CLASSES) for _ in CLASSES]
+for t_, p_ in zip(ys[18:], again):
+    by_hand[int(t_)][int(p_)] += 1
+held = train_classifier.held_out_block(r)
+check("the manifest's held-out block records the saved model's confusion matrix, rows true",
+      held["confusion"] == by_hand and held["accuracy"] == r["accuracy"] and held["per_class_f1"] == r["per_class_f1"],
+      f"{held['confusion']} vs {by_hand}")
+check("... and the matrix is not symmetric, so this test can tell it from its transpose",
+      by_hand != [list(c_) for c_ in zip(*by_hand)], str(by_hand))
+check("... as plain integers (JSON-safe)", all(type(v) is int for row_ in held["confusion"] for v in row_))
+raises("a run with no matrix is not recorded as if it had one",
+       lambda: train_classifier.held_out_block({k: v for k, v in r.items() if k != "confusion"}))
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
