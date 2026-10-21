@@ -1027,3 +1027,50 @@ so the guard is mosaicked whenever the face is.
   boxer now stops at about the chest: in IMG_4406 frame 2204 the torso, arms and a
   hand are visible again. Close-up and edge-touching boxes (IMG_4395) are still
   mosaicked wholly or to 1.5 widths.
+
+### Iteration 7 -- tighter blur for feint labels (Brendan, 2026-10-20)
+
+- **Why:** Brendan found no face recognisable, but he "genuinely can't see" the boxer. Measured over
+  every frame (16x16 blocks that were textured in the original and flat in the output):
+  44-53% of the textured picture was mosaicked, and even typical frames hid the head,
+  guard, shoulders and chest.
+- **Change:**
+  - Face patch: with two or more confident face points, the head is measured from the
+    points (`head_width`: max over visible pairs of distance x frontal ratio), and the
+    patch is ~1.8 head widths (was 3-4). One point, or clumped points, keep the
+    body-sized patch.
+  - Floor: the top fifth of a whole body (was a third), or down to the LOWER confident
+    shoulder; a third + 10% with no confident shoulder, and always for boxes 4:1 or
+    taller.
+- **Review:** FIX FIRST twice, then SHIP.
+  - R1: with arms raised the box top is the gloves, so the head is below the top fifth.
+    With face points on a glove the head was 0% covered; the shoulder anchor fixes it.
+  - Then the skeleton fitted up a raised arm (face on the glove, shoulders on the
+    elbows) is ONE failure (0%). It is closed by the box shape: 4:1 or taller always
+    gets the deep floor. Guard (2.6-3.4:1) and punch boxes keep the shallow floor.
+  - A mean of the shoulders gave 47% with one shoulder high; the lower shoulder is now
+    used.
+  - The factors were checked against a 3-D head model (frontal 1.09-1.41x the true
+    width), not against real heads.
+- **Test:** 134 checks; 15,000 extra scenes with 0 faces left; every other suite green; a
+  clean clone of `446d42d` gives the same counts.
+- **Real check, own footage, det-conf 0.10 vs 0.25:**
+
+  | Clip | Whole-frame blur | Nobody found | Textured area mosaicked (mean / median) |
+  |---|---|---|---|
+  | IMG_4395 @0.10 | 26.9% | 52 | 53% / 40% |
+  | IMG_4395 @0.25 | 15.3% | 119 | 46% / 35% |
+  | IMG_4406 @0.10 | 16.4% | 0 | 44% / 33% |
+  | IMG_4406 @0.25 | 3.8% | 0 | 38% / 28% |
+
+  0.25 removes most of the false "people" in these solo clips (2-4 people in 96 and 88
+  frames, down to 35 and 2), and with them most whole-frame blurs. Its cost is misses
+  (IMG_4395: nobody found in 119 frames instead of 52); those frames are blurred whole,
+  so they are safe here. On two-boxer footage a sustained miss is not caught by the
+  neighbour rule; pass --expect-persons 2. Recall on sparring is unmeasured.
+- **What the tighter blur bought:** in face-patch frames the median mosaicked area moved
+  little (27-31%), because the box floor now dominates. It must be box-wide (the head
+  can be anywhere across the box when no keypoint is trusted) and reach the shoulders,
+  so gloves held in guard at face height stay mosaicked. Below the shoulders the arms,
+  hands and torso are visible again (IMG_4406 frame 970: arm, hand and watch). Typical
+  frames for both settings are in `results/face-blur-typical/`.
