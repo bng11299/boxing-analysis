@@ -963,3 +963,4 @@ published real figures unchanged when the real CSVs go through the stricter read
   binomial 0.071, Fisher 0.088, warns; IMG_4406 33 of 41 (80.5%) against 50.4%, binomial 0.00007,
   Fisher 0.00005, passes -- iteration 6's numbers exactly. The full reports cannot be regenerated
   until `train_classifier.py` and `classify_punches.py --labels` are re-run (iteration 7).
+- **Review (Astra / Codex, read-only, effort medium, one review of the #17/#18/#19 merges): SHIP all.** Merge OK on each branch, no adaptation defects; it checked that the shared checks are identical to feat/output-report's on all three (confirmed here: no changed line). Its sandbox could not run Python, so its verdict is from reading plus the results above; fresh clones of 2e2059f, f2412e8 and a2f90be reproduce every count.
