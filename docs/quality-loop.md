@@ -973,3 +973,4 @@ the chain at the report stage with out-dir untouched; (4) every suite green.
 - **Real-world fact, read-only:** the preflight on the real model files refuses today's manifest
   ("re-run train_classifier.py") before the pose model would run: the one-command run stops at
   its first step until the classifier is retrained.
+- **Review (Astra / Codex, read-only, effort medium, one review of the #17/#18/#19 merges): SHIP all.** Merge OK on each branch, no adaptation defects; it checked that the shared checks are identical to feat/output-report's on all three (confirmed here: no changed line). Its sandbox could not run Python, so its verdict is from reading plus the results above; fresh clones of 2e2059f, f2412e8 and a2f90be reproduce every count.
