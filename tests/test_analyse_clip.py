@@ -119,7 +119,7 @@ C = np.array([[90, 5, 0, 0, 5, 0], [2, 98, 0, 0, 0, 0], [0, 0, 80, 20, 0, 0],
 F1 = {c: 2 * int(C[i, i]) / int(C[i].sum() + C[:, i].sum()) for i, c in enumerate(CLASSES)}
 GEOM = classify.WindowGeometry(0.375, 0.125, 24.0, 200.0, 0.5, 0.55, "relative", 100)
 manifest = tmp / "clf.json"
-classify.write_manifest(manifest, ck, GEOM, 50, {"held_out": {"per_class_f1": F1}})
+classify.write_manifest(manifest, ck, GEOM, 50, {"held_out": {"per_class_f1": F1, "confusion": C.tolist()}})
 reference = tmp / "ref.json"
 reference.write_text(json.dumps({"val_videos": ["V2", "V5", "V9"], "results": [
     {"model": "st-gcn++ pretrained", "confusion": C.tolist(), "per_class_f1": F1}]}), encoding="utf-8")
@@ -313,6 +313,19 @@ calls["n"] = 0
 rc, _, se = run(args(tmp / "badextent") + ["--extent", str(bad_extent)])
 check("an extent rule that failed its gate is caught by the preflight", rc == 1 and calls["n"] == 0
       and "preflight" in se, se)
+old_manifest = tmp / "clf_old.json"   # the shape of every manifest written before 2026-10-21: no matrix
+classify.write_manifest(old_manifest, ck, GEOM, 50, {"held_out": {"per_class_f1": F1}})
+calls["n"] = 0
+rc, _, se = run(args(tmp / "oldmanifest") + ["--classifier", str(old_manifest)])
+check("a manifest with no pinned held-out matrix is caught by the preflight, before the pose model runs",
+      rc == 1 and calls["n"] == 0 and "re-run train_classifier.py" in se and not (tmp / "oldmanifest").exists(), se)
+transposed = tmp / "ref_t.json"
+transposed.write_text(json.dumps({"results": [{"model": "st-gcn++ pretrained", "confusion": C.T.tolist(),
+                                               "per_class_f1": F1}]}), encoding="utf-8")
+calls["n"] = 0
+rc, _, se = run(args(tmp / "reft") + ["--reference", str(transposed)])
+check("a transposed reference matrix is caught by the preflight", rc == 1 and calls["n"] == 0
+      and "rows and columns swapped" in se, se)
 
 print("a stage that fails stops the chain; out-dir keeps the previous run")
 
@@ -430,6 +443,25 @@ def classify_on_other_pose(argv):
 
 failing_run(classify_punches, "main", classify_on_other_pose, "a sidecar recording a pose of another length",
             "was classified on another pose", later=[(report_punches, "main")])
+
+
+def sidecar_edit(**kw):
+    """A classify stage that runs for real, then has its sidecar rewritten (the sidecar is unsigned)."""
+    def run_(argv):
+        real_classify(argv)
+        p = Path(argv[argv.index("--out-dir") + 1]) / "IMG_9001.classified.json"
+        p.write_text(json.dumps({**json.loads(p.read_text(encoding="utf-8")), **kw}), encoding="utf-8")
+        return 0
+    return run_
+
+
+failing_run(classify_punches, "main", sidecar_edit(fps=30.0), "a sidecar recording only another frame rate",
+            "was classified on another pose: these punches were classified on a pose at 30.0 fps",
+            later=[(report_punches, "main")])
+failing_run(classify_punches, "main", sidecar_edit(fps=10 ** 400), "a sidecar fps too big for a float",
+            "was classified on another pose", later=[(report_punches, "main")])
+failing_run(classify_punches, "main", sidecar_edit(rule={"variant": "relative", "threshold": 2.0, "min_gap_s": 0.4}),
+            "a sidecar recording another finder rule", "report_punches: these punches were found with another rule")
 real_find = find_punches.main
 
 

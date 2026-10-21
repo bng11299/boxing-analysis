@@ -175,11 +175,15 @@ def _expect(path: Path, stage: str) -> Path:
 
 def preflight(a) -> None:
     """Every file the later stages need, read and validated before the pose model runs."""
-    find_punches.load_rule(a.rule)
+    rule = find_punches.load_rule(a.rule)
     man = classify.read_manifest(a.classifier)
     classify.read_extent(a.extent, man["geometry"].variant)
+    # The manifest must pin the held-out matrix the reference reports: a manifest from before
+    # 2026-10-21 is refused here, before the pose model runs, not after it at the report stage.
     report.benchmark_reliability(a.reference, man)
-    report.finder_reliability(a.rule)
+    # The finder runs with this very rule, so it is its own "used" rule here; the report stage
+    # compares it again with the rule the classify stage records in the sidecar.
+    report.finder_reliability(a.rule, rule)
 
 
 def check_classified(csv_path: Path, a, clip: str, pose: PoseSequence) -> None:
@@ -189,9 +193,10 @@ def check_classified(csv_path: Path, a, clip: str, pose: PoseSequence) -> None:
     side = man["_sidecar"]
     if side.get("stance") != a.stance:
         raise ValueError(f"{csv_path.name} was classified as {side.get('stance')!r}, not {a.stance}")
-    if side.get("pose_frames") != len(pose) or side.get("fps") != pose.fps:
-        raise ValueError(f"{csv_path.name} was classified on another pose "
-                         f"({side.get('pose_frames')} frames at {side.get('fps')} fps)")
+    try:   # the report's own check (frames AND fps, exact, overflow-safe), so both refuse the same sidecars
+        report.check_pose(side, len(pose), pose.fps)
+    except ValueError as e:
+        raise ValueError(f"{csv_path.name} was classified on another pose: {e}") from None
 
 
 def publish(staging: Path, out_dir: Path, clip: str, produced: "list[str]", keep: "set[str]") -> None:

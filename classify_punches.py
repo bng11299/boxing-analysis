@@ -225,8 +225,9 @@ def main(argv=None) -> int:
               f"(chance for these proportions {agree['chance']:.1%}); a consistency check, not accuracy")
     # Provenance for whatever reads the CSV next (report_punches.py): which model named
     # these punches, from which finder rule, extent rule, stance and cut, and the CSV's own hash.
+    csv_sha256 = hashlib.sha256(out.read_bytes()).hexdigest()
     (a.out_dir / f"{clip}.classified.json").write_text(json.dumps({
-        "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+        "clip": clip, "csv_sha256": csv_sha256,
         "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule, "extent": ex,
         "cut": None if cut is None else {"per": "clip", **cut._asdict()},
         "pose_frames": len(pose), "fps": pose.fps}, indent=1, allow_nan=False), encoding="utf-8")
@@ -266,8 +267,11 @@ def main(argv=None) -> int:
                 by_window.append(classify.cut_span(track, *classify.clip_window(pk, cut, pose.fps), geom, torso))
         ious = [punchfind.span_iou(spans_read[di], (spans[si].start, spans[si].end)) for si, di in pairs]
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
+        # csv_sha256: the classified CSV this score describes. A later run without --labels
+        # rewrites the CSV but not this file; the report refuses the score once they differ.
         result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
-                  "classifier_sha256": man["sha256"], "cut": {"per": "clip", **cut._asdict()},
+                  "classifier_sha256": man["sha256"], "csv_sha256": csv_sha256,
+                  "cut": {"per": "clip", **cut._asdict()},
                   "matched_detections": type_scores(yt, yp),
                   "matched_unclassifiable": matched_unclassified,
                   "labelled_punch_by_clip_window_at_its_peak": window_scores,
