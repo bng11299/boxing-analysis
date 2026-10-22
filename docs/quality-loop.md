@@ -1074,3 +1074,44 @@ so the guard is mosaicked whenever the face is.
   so gloves held in guard at face height stay mosaicked. Below the shoulders the arms,
   hands and torso are visible again (IMG_4406 frame 970: arm, hand and watch). Typical
   frames for both settings are in `results/face-blur-typical/`.
+
+### Iteration 8 -- hybrid with deface's face detector (Brendan, 2026-10-21/22)
+
+- **Why:** Brendan found the blur "terrible" for labelling and asked for a free tool.
+  deface (CenterFace, MIT, local) on own footage obscured ~8% of the textured picture
+  (ours 39-47%) and left the guard visible, but alone it found no face in 3.8% (IMG_4406)
+  and 28.5% (IMG_4395) of frames where YOLO saw a person. A contact sheet of those frames
+  showed real faces unblurred: mid-punch, in profile, behind a glove.
+- **Change:** a person drops the box floor only when the CenterFace box and YOLO's
+  keypoints agree. That requires a frontal face (nose and both eyes confident, all inside
+  the box), a box at least half the head wide (head measured from eye-to-eye distance), a
+  box centre on that person, and no confident wrist inside the box. The agreed person gets
+  the box grown 1.3x plus a 1.2-head-width square on the nose and eyes; a box 4:1 or
+  taller keeps its deep floor anyway. Everyone else keeps the floor + face patch.
+  Unclaimed detections are blurred; malformed output or a failing detector means no
+  detections. The model is pinned by sha256; deface 1.5.0 is installed `--no-deps`.
+- **Test:** 155 checks. A 1000-scene random hybrid test found 79 leaks before the keypoint
+  square was unioned in (one-sided face points "agreeing" with a shifted box); now 0, and
+  15,000 more scenes on other seeds give 0.
+- **Review:** FIX FIRST, then SHIP with one residual for Brendan.
+  - D1: arms up, face points and box both on the glove: 0%.
+  - D2: guard, glove decoy: 30%.
+  - Partial three-quarter boxes.
+  - Closed by the arms-up floor under agreement, a wrist veto and frontal-only agreement.
+  - **Residual:** a glove at the cheek fools both models while YOLO misses that wrist.
+- **Real data:** only 6 of 200 sampled persons agreed. The cause was the max-over-pairs
+  head estimate running ~2x the true head on real keypoints, so every CenterFace box
+  failed the size check. With the head measured from the eyes: 97 of 200.
+
+  | Clip @det-conf | Face blur only (agreed) | Fallback | Whole frame | Textured area obscured (median) |
+  |---|---|---|---|---|
+  | IMG_4406 @0.25 | 48% | 48% | 3.8% | 17% (deface 7%, previous blur 28%) |
+  | IMG_4395 @0.25 | 28% | 66% | 15.3% | 30% (deface 8%, previous 36%) |
+  | IMG_4406 @0.05 | 27% | 28% | 44.5% | -- |
+  | IMG_4395 @0.05 | 23% | 45% | 32.3% | -- |
+
+  0.05 (Brendan's ask) multiplies false "people" (up to 6 in a frame) and with them
+  neighbour-rule whole-frame blurs; 0.25 is the better setting. At every frame where deface
+  leaked a face (18 sampled per clip), the hybrid covers it. Agreed frames look like
+  deface: face mosaicked, arms, hands and guard visible. Three-quarter and profile faces
+  (the bladed stance) keep the fallback.
