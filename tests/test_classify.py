@@ -444,9 +444,19 @@ check("... and the capped window still holds the peak, a third in, and fits the 
       ws < 360 < we and (we - ws) / 60 <= 1.0 + 1e-9 and abs((360 - ws) / (we - ws) - 1 / 3) < 0.02
       and len(classify.cut_span(flat800, ws, we, GEOM, 100.0).keypoints) == 25)
 few = classify.clip_cut(flat800, five, peaks5[:4], RULE, GEOM)
-check("under 5 punches there is no tempo to read: the training clips' median window (0.375 s, a third in), and it says so",
-      few.source == "training" and few.length_s == GEOM.duration_s and abs(few.lead_share - 1 / 3) < 1e-12
+# length_s is first frame to last: the training window's 9 frames are 8 steps of 1/24 s, not GEOM.duration_s
+# (9 / 24 s, which counts samples); its peak is 3 of those 8 steps in. Which frames this reads is checked below.
+check("under 5 punches there is no tempo to read: the training clips' median window (9 frames: 8/24 s from first "
+      "to last, the peak 3/8 in), and it says so",
+      few.source == "training" and abs(few.length_s - 8 / 24) < 1e-12 and abs(few.lead_share - 3 / 8) < 1e-12
       and few.n_used == 0 and classify.MIN_CLIP_PUNCHES == 5, str(few))
+raises("a geometry whose peak would fall after the window's last frame is refused (lead-in = duration, 9/24 s)",
+       lambda: replace(GEOM, lead_in_s=GEOM.duration_s))
+late = classify.clip_cut(flat800, five, peaks5[:4], RULE, replace(GEOM, lead_in_s=8 / 24))
+check("... a peak ON the last frame is allowed, and the fallback window ends there",
+      late.lead_share == 1.0
+      and classify.read_clip_window(body(400, 24.0), 50, late, replace(GEOM, lead_in_s=8 / 24), 100.0)[1] == (42, 50),
+      str(late))
 check("no punch, no cut", classify.clip_cut(flat800, five, [], RULE, GEOM) is None)
 raises("a peak whose hand has no speed there is refused, not skipped (the list was not made from this pose)",
        lambda: classify.clip_cut(flat800, five, peaks5[:4] + [(620, 1)], RULE, GEOM))
@@ -476,6 +486,43 @@ check("at the training rate a span is its own frames, as the corpus cuts a label
       np.array_equal(frames_of(k24), np.arange(50, 62)))
 check("a span longer than the corpus's 25 frames keeps its first 25 (the corpus trims the tail too)",
       np.array_equal(frames_of(classify.cut_span(c24, 50, 99, GEOM, 100.0)), np.arange(50, 75)))
+
+
+def coded(f_, n_=400):
+    t_ = body(n_, f_, hx=960, hy=600)
+    t_.xy[:, 0, 0] += 0.001 * t_.frame_ids
+    return t_
+
+
+# Codex on PR #14: the under-5 fallback read 47-56 (10 frames) at a 24 fps peak at 50, where cut_window reads
+# 47-55. Compared here by the frames actually read (each frame's index is coded into the nose's x).
+w50, s50 = classify.read_clip_window(c24, 50, few, GEOM, 100.0)
+check("the under-5 fallback reads cut_window's frames: 47-55 at a 24 fps peak at 50, not 47-56, and says so",
+      np.array_equal(frames_of(w50), np.arange(47, 56)) and s50 == (47, 55)
+      and np.array_equal(frames_of(classify.cut_window(c24, 50, GEOM, 100.0)), np.arange(47, 56)),
+      f"{frames_of(w50)} {s50}")
+# Phone footage is not at 24 fps. Through clip_window + cut_span a correct 8-step span reads 8 frames at 25,
+# 29.97 and 59.94 fps (its start snaps to a frame; only whole steps fit), so the rate matters to this check.
+bad_rates = []
+for f_ in (23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0):
+    tf_ = coded(f_, int(16 * f_))
+    for p_ in range(int(0.5 * f_), int(15 * f_), 7):
+        w_, s_ = classify.read_clip_window(tf_, p_, few, GEOM, 100.0)
+        got, ref = frames_of(w_), frames_of(classify.cut_window(tf_, p_, GEOM, 100.0))
+        if not (len(got) == GEOM.n_frames and np.array_equal(got, ref) and s_ == (got[0], got[-1])
+                and s_[0] <= p_ <= s_[1]):
+            bad_rates.append((f_, p_, got, ref, s_))
+check("... and at 23.976, 24, 25, 29.97, 30, 59.94 and 60 fps, at every peak tried: cut_window's 9 frames, "
+      "frame for frame, with the peak inside and the span its first and last", not bad_rates, str(bad_rates[:2]))
+via_span = classify.cut_span(c24, *classify.clip_window(50, few, 24.0), GEOM, 100.0)
+check("control: the same 24 fps fallback read through clip_window + cut_span holds 9 frames (the length is right; "
+      "the phone-rate check above is what needs cut_window)", len(frames_of(via_span)) == 9)
+w_cc, s_cc = classify.read_clip_window(coded60, 200, cc, GEOM, 100.0)
+check("a clip's own cut is read exactly as gated: clip_window, then cut_span",
+      s_cc == classify.clip_window(200, cc, 60.0)
+      and np.array_equal(w_cc.keypoints, classify.cut_span(coded60, *s_cc, GEOM, 100.0).keypoints))
+raises("a cut from an unknown source is refused, not read as one or the other",
+       lambda: classify.read_clip_window(coded60, 200, cc._replace(source="per punch"), GEOM, 100.0))
 one = classify.cut_span(coded60, 100, 101, GEOM, 100.0)
 check("a punch under two training frames long is unclassifiable, with the reason",
       one.keypoints is None and "shorter than two frames" in one.reason)
@@ -622,8 +669,8 @@ check("each row has a type from the class list and a confidence in (0, 1]",
 check("each punch records the frames it was read from, around its peak",
       all(int(r["punch_start_frame"]) <= int(r["frame"]) <= int(r["punch_end_frame"]) for r in rows), str(rows[0]))
 length = [int(r["punch_end_frame"]) - int(r["punch_start_frame"]) for r in rows]
-check("three punches are too few to read a tempo: each is read over the training window, 0.375 s (22 frames at 60 fps)",
-      all(abs(k_ - 0.375 * fps) <= 1 for k_ in length), str(length))
+check("three punches are too few to read a tempo: each is read over the training window, 8/24 s first to last "
+      "(20 frames at 60 fps)", all(abs(k_ - 8 / 24 * fps) <= 1 for k_ in length), str(length))
 check("orthodox: left-hand punches are lead, right-hand punches rear",
       [r["lead_rear"] for r in rows] == ["lead", "lead", "rear"])
 check("hands_agree says whether the type's hand is the finder's",
@@ -634,7 +681,7 @@ check("the sidecar names the classifier, the extent rule and the stance, and has
       and prov["extent"] == {"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8}
       and prov["csv_sha256"] == hashlib.sha256((tmp / "o" / "IMG_7777.classified.csv").read_bytes()).hexdigest()
       and prov["cut"]["per"] == "clip" and prov["cut"]["source"] == "training" and prov["cut"]["n_used"] == 0
-      and prov["cut"]["length_s"] == 0.375, str(prov))
+      and abs(prov["cut"]["length_s"] - 8 / 24) < 1e-12, str(prov))
 classify_punches.main(args + ["--stance", "southpaw"])
 rows_s = list(csv.DictReader((tmp / "o" / "IMG_7777.classified.csv").open(encoding="utf-8")))
 check("southpaw flips lead and rear, and nothing else",
@@ -752,6 +799,65 @@ raises("a CSV naming the other hand at a punch's frame is refused (it has speed 
                                       "--stance", "orthodox", "--out-dir", str(tmp / "o5")]))
 check("... and nothing was written for it", not (tmp / "o5" / "IMG_5555.classified.csv").exists())
 
+# Rows the finder could not have written (Codex on PR #14). Each CSV below is IMG_7777's own, changed in one way.
+tr7 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_7777.pose.npz").to_track(usable_only=False),
+                       int(round(punchfind.BRIDGE_S * fps)))
+sig7 = punchfind.wrist_signal(tr7, "relative")
+best7 = sig7.max(axis=1)
+lines7 = punches.read_text(encoding="utf-8").splitlines()
+f1, hand1 = int(lines7[1].split(",")[0]), lines7[1].split(",")[2]
+(tmp / "bad").mkdir(exist_ok=True)
+
+
+def classify_csv(body_lines, rule_path=rule, out="obad"):
+    p = tmp / "bad" / "IMG_7777.punches.csv"
+    p.write_text("\n".join([lines7[0]] + body_lines) + "\n", encoding="utf-8")
+    return lambda: classify_punches.main(["--pose", str(tmp / "IMG_7777.pose.npz"), "--punches", str(p),
+                                          "--classifier", str(mpath), "--rule", str(rule_path),
+                                          "--extent", str(extent_file), "--stance", "orthodox",
+                                          "--out-dir", str(tmp / out)])
+
+
+def rule_at(threshold):
+    p = tmp / "bad" / "rule_t.json"
+    p.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": float(threshold), "min_gap_s": 0.4}}),
+                 encoding="utf-8")
+    return p
+
+
+def row7(fr, hand):
+    return f"{fr},{fr / fps:.3f},{hand},1.000,no"
+
+
+def accepted(fn):   # a control that must run: a refusal is a FAIL with its reason, not a crash of the suite
+    try:
+        return fn() == 0
+    except ValueError as e:
+        print(f"        refused: {e}")
+        return False
+
+
+check("control: the finder's own CSV, rewritten by the helper, is accepted",
+      accepted(classify_csv(lines7[1:], out="ogood")) and len(lines7) == 4)
+raises("five copies of one punch are refused (they would pass the five-punch gate and set a fake tempo)",
+       classify_csv([lines7[1]] * 5))
+raises("... and so are two", classify_csv([lines7[1], lines7[1]] + lines7[2:]))
+check("... and nothing was written for them", not (tmp / "obad").exists())
+check("control: the frames beside the first peak are the same hand's, above the threshold, and slower",
+      bool(tr7.frame_ids[f1] == f1 and best7[f1 - 1] >= 1.0 and best7[f1 + 1] >= 1.0
+           and best7[f1 - 1] < best7[f1] > best7[f1 + 1]
+           and int(np.argmax(sig7[f1 - 1])) == int(np.argmax(sig7[f1 + 1])) == (0 if hand1 == "left" else 1)),
+      f"{best7[f1 - 1:f1 + 2]}")
+raises("a row one frame up the rising slope of a punch is refused (not a peak)",
+       classify_csv([row7(f1 - 1, hand1)] + lines7[2:]))
+raises("a row one frame down the falling slope is refused", classify_csv([row7(f1 + 1, hand1)] + lines7[2:]))
+slowest = min(float(best7[int(l_.split(",")[0])]) for l_ in lines7[1:])
+check("control: a rule whose threshold is exactly the slowest punch's peak speed accepts the CSV (>=, as find_peaks)",
+      accepted(classify_csv(lines7[1:], rule_path=rule_at(slowest), out="ogood")))
+raises("a row below the rule's threshold is refused (the CSV was not made with this rule)",
+       classify_csv(lines7[1:], rule_path=rule_at(np.nextafter(slowest, np.inf))))
+check("... and nothing was written for any of them", not (tmp / "obad").exists())
+
 # Labels equal to the frames each punch was read from: the extent's overlap with them must be exactly 1.
 lab = tmp / "IMG_7777.labels.json"
 spans = [{"start": max(int(r["punch_start_frame"]), 0), "end": int(r["punch_end_frame"]), "label": l}
@@ -833,6 +939,10 @@ raises("punches: a NaN time is refused", punches_with(hdr + "600,nan,left,1.0,no
 raises("punches: an unknown hand is refused", punches_with(hdr + f"600,{600 / fps:.3f},both,1.0,no\n"))
 raises("punches: a short row is refused", punches_with(hdr + "600,10.009\n"))
 raises("punches: an unknown interpolation flag is refused", punches_with(hdr + f"600,{600 / fps:.3f},left,1.0,maybe\n"))
+raises("punches: a repeated (frame, hand) row is refused",
+       punches_with(hdr + f"600,{600 / fps:.3f},left,1.0,no\n700,{700 / fps:.3f},left,1.0,no\n600,{600 / fps:.3f},left,1.0,no\n"))
+check("punches: control: one frame with both hands is two rows, not a repeat (main() checks which hand peaks)",
+      len(punches_with(hdr + f"600,{600 / fps:.3f},left,1.0,no\n600,{600 / fps:.3f},right,1.0,no\n")()) == 2)
 
 print("train_classifier reproduces only a reference that records how it was trained")
 import train_classifier  # noqa: E402

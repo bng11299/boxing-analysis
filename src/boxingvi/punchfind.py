@@ -123,7 +123,17 @@ def _smooth(x: np.ndarray, w: int) -> np.ndarray:
     return num / den.reshape((-1,) + (1,) * (x.ndim - 1))
 
 
-def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = 0.1,
+SMOOTH_S = 0.1       # wrist_signal's centred moving-average window, in seconds
+
+
+def smooth_window(fps: float, smooth_s: float = SMOOTH_S) -> int:
+    """The moving-average window of `wrist_signal` in frames: round(smooth_s x fps), at least 1, made odd so it is
+    centred. The ONE place it is computed (the signal and the skip mask both call it)."""
+    w = max(1, int(round(smooth_s * fps)))
+    return w + (w + 1) % 2
+
+
+def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = SMOOTH_S,
                  min_conf: float = MIN_CONF, bridge_s: float = BRIDGE_S) -> np.ndarray:
     """(F, 2) wrist speed per hand (left, right), in body lengths per second.
 
@@ -137,8 +147,7 @@ def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = 0.1,
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}; expected one of {VARIANTS}")
     scale = body_scale(track, min_conf)
-    w = max(1, int(round(smooth_s * track.fps)))
-    w += (w + 1) % 2  # odd, so the window is centred
+    w = smooth_window(track.fps, smooth_s)  # odd, so the window is centred
     max_gap = int(round(bridge_s * track.fps))
     out = np.zeros((len(track.frame_ids), 2))
     for h, (sh, wr) in enumerate(HANDS):
@@ -192,21 +201,48 @@ def signal_coverage(track: Track, min_conf: float = MIN_CONF, bridge_s: float = 
     return {"frames": total, "left": got[0] / total, "right": got[1] / total}
 
 
+def signal_frames(track: Track, min_conf: float = MIN_CONF, bridge_s: float = BRIDGE_S) -> np.ndarray:
+    """(F, 2) bool: does each hand have a speed in each of the track's frames, by exactly the
+    rule `wrist_signal` and `signal_coverage` use (same runs, same bridging). The union over
+    the two hands (`.any(axis=1)`) is the exposure of a detector that takes the faster hand."""
+    max_gap = int(round(bridge_s * track.fps))
+    out = np.zeros((len(track.frame_ids), 2), dtype=bool)
+    for h in range(2):
+        for lo, hi, ok, _ in _hand_runs(track, h, min_conf, max_gap):
+            for a, b in _runs(ok):
+                out[lo + a:lo + b, h] = True
+    return out
+
+
 def detect(track: Track, signal: np.ndarray, threshold: float,
-           min_gap_s: float) -> "tuple[np.ndarray, np.ndarray]":
+           min_gap_s: float, eligible: "np.ndarray | None" = None) -> "tuple[np.ndarray, np.ndarray]":
     """Peaks of the faster hand's speed above `threshold`, at least `min_gap_s`
-    apart. Returns (video frame ids, hand: 0 left / 1 right)."""
+    apart. Returns (video frame ids, hand: 0 left / 1 right).
+
+    `eligible` ((F, 2) bool, default None = every frame): a frame whose hand is not eligible can be a
+    neighbour in the peak test (its signal value is compared as it is) but is never a CANDIDATE, and is
+    excluded BEFORE the minimum-gap suppression, so it cannot suppress a real peak near it and then be
+    discarded itself. None is the original computation, untouched."""
     from scipy.signal import find_peaks
 
     if signal.shape != (len(track.frame_ids), 2):
         raise ValueError(f"signal shape {signal.shape} does not match the track")
     if not (np.isfinite(threshold) and min_gap_s >= 0):
         raise ValueError("threshold must be finite and min_gap_s non-negative")
+    if eligible is not None and (eligible.shape != signal.shape or eligible.dtype != bool):
+        raise ValueError("eligible must be a bool array shaped like the signal")
     dist = max(1, int(round(min_gap_s * track.fps)))
     best = signal.max(axis=1)
     frames, hands = [], []
     for lo, hi in track.segments():
-        peaks, _ = find_peaks(best[lo:hi], height=threshold, distance=dist)
+        if eligible is None:
+            peaks, _ = find_peaks(best[lo:hi], height=threshold, distance=dist)
+        else:
+            cand, _ = find_peaks(best[lo:hi], height=threshold)             # local maxima on the true values
+            cand = cand[eligible[lo + cand, signal[lo + cand].argmax(axis=1)]]   # only eligible ones compete
+            spikes = np.zeros(hi - lo)                                      # the same suppression, on the survivors
+            spikes[cand] = best[lo + cand]
+            peaks, _ = find_peaks(spikes, height=threshold, distance=dist)
         frames.append(track.frame_ids[lo + peaks])
         hands.append(signal[lo + peaks].argmax(axis=1))
     return np.concatenate(frames), np.concatenate(hands)
