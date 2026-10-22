@@ -65,19 +65,21 @@ MAX_ROWS = 100_000
 _DIGITS = re.compile(r"[0-9]+")
 
 
-def finder_per_hand(punches: Path, clip: str) -> "bool | None":
+def finder_per_hand(punches: Path, clip: str, rule: dict) -> "bool | None":
     """Whether find_punches.py made this CSV with --per-hand, from the <clip>.punches.json
     it wrote beside it. None (unknown) when that file is missing, unreadable, for another
-    clip, or describes other bytes than the CSV now holds: it is recorded, never trusted
-    for anything else, so a stale or hand-made one must not lend the CSV a provenance."""
+    clip or another rule than this run's, or describes other bytes than the CSV now holds:
+    it is recorded, never trusted for anything else, so a stale or hand-made one must not
+    lend the CSV a provenance."""
     side = punches.with_suffix(".json")
     try:
         if not side.is_file() or side.stat().st_size > 64_000:
             return None
         d = json.loads(side.read_text(encoding="utf-8"), parse_constant=lsimport._no_constant)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):   # RecursionError: deeply nested JSON, as lsimport
         return None
-    if (not isinstance(d, dict) or d.get("clip") != clip or not isinstance(d.get("per_hand"), bool)
+    if (not isinstance(d, dict) or d.get("clip") != clip or d.get("rule") != rule
+            or not isinstance(d.get("per_hand"), bool)
             or d.get("csv_sha256") != hashlib.sha256(punches.read_bytes()).hexdigest()):
         return None
     return d["per_hand"]
@@ -173,7 +175,6 @@ def main(argv=None) -> int:
         raise ValueError(f"{a.punches.name} does not name the clip {clip}: classify the CSV "
                          "find_punches.py wrote for this pose")
     rows = read_punches(a.punches, len(pose), pose.fps)
-    per_hand = finder_per_hand(a.punches, clip)
     if a.labels and not rows:   # before anything is written: a stale score file must not outlive this run
         raise ValueError(f"{a.punches.name} holds no punch, so there is nothing to score against labels")
     model, man = classify.load_classifier(a.classifier)
@@ -185,6 +186,7 @@ def main(argv=None) -> int:
         raise ValueError(f"the punch finder's rule uses another wrist-speed variant than the "
                          f"classifier's window ({geom.variant}); re-run one of them to match")
     ex = classify.read_extent(a.extent, geom.variant)
+    per_hand = finder_per_hand(a.punches, clip, rule)
 
     # The same track the finder ran on, so every peak frame it reported exists here.
     raw = pose.to_track(usable_only=False)
@@ -280,9 +282,9 @@ def main(argv=None) -> int:
                 continue
             yt.append(spans[si].label)
             yp.append(int(np.argmax(pred[di])))
-        # Framing marks that drew a detection: bounds that hold whichever maximum punch matching is
-        # chosen (punchfind.framing_bounds). Only the lower bound's detections are certainly on a
-        # framing mark, so only theirs are named.
+        # Framing marks that drew a detection: bounds that hold whichever punch matching is chosen
+        # (punchfind.framing_bounds). Named: the detections the lower bound's matching counted, each
+        # out of every punch's reach and on a framing mark (others like them may exist).
         fb = (punchfind.framing_bounds([d["frame"] for d in rows], spans, framing, tol, point_tol)
               if framing else None)
 
@@ -334,7 +336,7 @@ def main(argv=None) -> int:
             types = [CLASSES[int(np.argmax(pred[k]))] if k in pred else "unclassified" for k in fb["lower_set"]]
             result["framing"] = {"marks": fb["marks"], "flagged_as_punches_at_least": fb["at_least"],
                                  "flagged_as_punches_at_most": fb["at_most"],
-                                 "named_as_no_punch_can_take": {t: types.count(t) for t in sorted(set(types))}}
+                                 "lower_bound_named_as": {t: types.count(t) for t in sorted(set(types))}}
         print(f"  vs labels: the finder found {found} of {len(spans)} labelled punches, and {found} of its "
               f"{len(rows)} detections were real" + (f" ({n_points} point labels, matched within +-{point_tol} frames)"
                                                      if n_points else ""))
@@ -349,8 +351,8 @@ def main(argv=None) -> int:
             fr = result["framing"]
             lo_, hi_ = fr["flagged_as_punches_at_least"], fr["flagged_as_punches_at_most"]
             print(f"  framing marks: {lo_ if lo_ == hi_ else f'{lo_} to {hi_}'} of {fr['marks']} were flagged as "
-                  "punches; the detections no punch could take were named "
-                  + (", ".join(f"{t} {n}" for t, n in fr["named_as_no_punch_can_take"].items()) or "nothing"))
+                  "punches; the detections the lower bound counted were named "
+                  + (", ".join(f"{t} {n}" for t, n in fr["lower_bound_named_as"].items()) or "nothing"))
         if result["labelled_length_s_median"] is not None:
             print(f"  the clip's window is {cut.length_s:.2f} s; your labelled punches are a median "
                   f"{result['labelled_length_s_median']:.2f} s")

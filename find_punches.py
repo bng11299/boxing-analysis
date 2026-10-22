@@ -141,18 +141,19 @@ def main(argv=None) -> int:
         if not spans:
             # Every label a framing mark: there is no punch to find, so recall, F1 and the count
             # ratio are undefined, not 0 (score() writes NaN, which JSON cannot hold). Precision
-            # stays: none of the detections is a labelled punch.
-            s = s | {"recall": None, "f1": None, "count_ratio": None}
+            # stays where there are detections (none is a labelled punch); with none it is 0/0.
+            s = s | {"recall": None, "f1": None, "count_ratio": None,
+                     "precision": s["precision"] if s["n_detected"] else None}
         result = {"clip": clip, "rule": rule, "per_hand": a.per_hand, "tolerance_frames": tol,
                   "point_labels": n_points, "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
                   "score": s}
         if not_punch:
-            # Bounds that hold whichever maximum punch matching is chosen (punchfind.framing_bounds).
+            # Bounds that hold whichever punch matching is chosen (punchfind.framing_bounds).
             fb = punchfind.framing_bounds(det, [s_ for s_ in labelled if s_ not in not_punch], not_punch,
                                           tol, point_tol)
             result["framing"] = {"marks": fb["marks"], "flagged_as_punches_at_least": fb["at_least"],
                                  "flagged_as_punches_at_most": fb["at_most"],
-                                 "frames_no_punch_can_take": [int(det[i]) for i in fb["lower_set"]]}
+                                 "lower_bound_frames": [int(det[i]) for i in fb["lower_set"]]}
         min_shift = int(round(MIN_SHIFT_S * pose.fps))
         if not spans:
             floor = "no chance floor: no punches labelled"

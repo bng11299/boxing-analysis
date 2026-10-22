@@ -306,8 +306,8 @@ check("'unclear' as framing: 2 punches to find, the detection on the framing mar
 check("... and the framing mark is reported as flagged, at its frame (both bounds 1: no punch near it)",
       sf["framing"]["marks"] == 1 and sf["framing"]["flagged_as_punches_at_least"] == 1
       and sf["framing"]["flagged_as_punches_at_most"] == 1 and sf["point_labels"] == 2
-      and len(sf["framing"]["frames_no_punch_can_take"]) == 1
-      and abs(sf["framing"]["frames_no_punch_can_take"][0] - 9.0 * fps) < 0.3 * fps, str(sf["framing"]))
+      and len(sf["framing"]["lower_bound_frames"]) == 1
+      and abs(sf["framing"]["lower_bound_frames"][0] - 9.0 * fps) < 0.3 * fps, str(sf["framing"]))
 # A framing mark next to a punch: the punch takes the one detection there, so the mark's count is 0 to 1.
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
     {"start": int(3.08 * fps), "end": int(3.08 * fps), "label": "jab"},
@@ -384,7 +384,7 @@ find_punches.main(b70 + ["--labels", str(lab70), "--unclear", "not-a-punch"])
 s70 = json.loads((tmp / "o" / "IMG_7070.score.json").read_text(encoding="utf-8"))
 check("the punch may take either detection, so the framing mark beside it is 0 to 1, and none is listed as certain",
       s70["framing"] == {"marks": 2, "flagged_as_punches_at_least": 0, "flagged_as_punches_at_most": 1,
-                         "frames_no_punch_can_take": []}, str(s70["framing"]))
+                         "lower_bound_frames": []}, str(s70["framing"]))
 
 print("find_punches: every label a framing mark")
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
@@ -405,6 +405,15 @@ check("... all 3 marks flagged, by both bounds", sall["framing"]["marks"] == 3
       and sall["framing"]["flagged_as_punches_at_least"] == 3 and sall["framing"]["flagged_as_punches_at_most"] == 3)
 check("... and it says no punches were labelled, instead of printing 0.000 scores",
       "no punches labelled" in buf.getvalue() and "recall 0.000" not in buf.getvalue(), buf.getvalue())
+# The same with no detections at all: precision is 0/0 too.
+pose_yolo.PoseSequence(body(n, fps).xy.astype(np.float32), np.ones((n, N_JOINTS), np.float32), np.ones(n, bool),
+                       fps, 1080, 1920, "IMG_7171.mov", "test").save(tmp / "IMG_7171.pose.npz")
+find_punches.main(["--pose", str(tmp / "IMG_7171.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o"),
+                   "--labels", str(lab), "--unclear", "not-a-punch"])
+s71 = json.loads((tmp / "o" / "IMG_7171.score.json").read_text(encoding="utf-8"))
+check("framing-only labels on a still clip: no detections, so precision is null as well, and the 3 marks drew nothing",
+      s71["score"]["n_detected"] == 0 and s71["score"]["precision"] is None and s71["score"]["recall"] is None
+      and s71["framing"]["flagged_as_punches_at_most"] == 0 and s71["framing"]["marks"] == 3, str(s71))
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

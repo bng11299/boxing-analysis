@@ -286,7 +286,7 @@ def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
 def framing_bounds(det_frames, punch_spans: "list[Span]", framing_spans: "list[Span]",
                    tol: int, point_tol: int) -> dict:
     """How many framing marks (motions labelled as NOT punches) drew a detection, as
-    bounds that hold whichever maximum matching of punches is chosen.
+    bounds that hold whichever matching of punches is chosen (maximum or not).
 
     Punches are matched first, and several equally large matchings can exist; which
     detections they leave free decides how many framing marks are hit. So:
@@ -298,9 +298,11 @@ def framing_bounds(det_frames, punch_spans: "list[Span]", framing_spans: "list[S
 
     Neither is claimed to be reached: the lower bound ignores detections a punch
     COULD take but need not, so it can sit below the true minimum. Where the two
-    agree, the count is exact. Both spans lists are the labels as written; point labels are widened here
-    (`for_matching`). `lower_set` is the indices into `det_frames` of the detections
-    the lower bound used -- the only ones that are certainly on a framing mark.
+    agree, the count is exact. Both spans lists are the labels as written; point
+    labels are widened here (`for_matching`). `lower_set` is the indices into
+    `det_frames` of the detections ONE maximum framing matching used for the lower
+    bound: each is out of every punch's reach and on a framing mark, but where a mark
+    has several such detections, only one is listed.
     """
     det = np.asarray(det_frames)
     punch = for_matching(punch_spans, tol, point_tol)
