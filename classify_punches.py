@@ -209,8 +209,10 @@ def main(argv=None) -> int:
         # threshold. A row that is not one -- no frame here, no speed in that hand, below the
         # threshold, or with a faster neighbouring frame OF THAT HAND -- was not made from this pose
         # with this rule. Judged on the row's own hand, not the faster one: the per-hand finder
-        # reports each hand's own peaks, so the other hand may be faster. Necessary, not sufficient:
-        # a peak the minimum gap suppressed passes, and so does a slower hand's peak in a pooled list.
+        # reports each hand's own peaks, so the other hand may be faster. Necessary, not sufficient: a
+        # peak the minimum gap suppressed passes, and in a POOLED list so do rows the pooled finder could
+        # not emit: a slower hand's own peak, a faster hand's peak that is not a peak of the two hands'
+        # max, and the second hand on an exact speed tie.
         h_ = sig[:, hand]
         if (i is None or not h_[i] > 0 or not h_[i] >= rule["threshold"]
                 or (i > 0 and h_[i - 1] > h_[i]) or (i + 1 < len(h_) and h_[i + 1] > h_[i])):

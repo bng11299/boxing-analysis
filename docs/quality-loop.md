@@ -1017,9 +1017,18 @@ no force-push).
     peaks and the other hand may be faster.
   - **Kept #22's**, plus #14's "that hand has speed" clause, which #22's lacked; it matters only
     for a rule whose threshold is 0.
-  - **Cost:** for a pooled list, a slower hand's own peak now passes where #14 refused it.
-    #14's comment already called the check "necessary, not sufficient". The per_hand sidecar is
-    not used to choose the check, because it is recorded, not trusted.
+  - **Cost:** #14's accepted rows are a strict subset of the merge's. For a pooled list, three
+    kinds of row the pooled finder cannot emit now pass where #14 refused them:
+    - a slower hand's own peak;
+    - a faster hand's peak that is not a peak of the two hands' max curve (left [0, 5, 3] and
+      right [6, 1, 0]: the max curve [6, 5, 3] has no peak at frame 1);
+    - the second hand on an exact speed tie.
+
+    #14's comment already called the check "necessary, not sufficient". (Correction, from the
+    review: the reason first given here for not using the per_hand sidecar, "recorded, not
+    trusted", argues only against LOOSENING by it. Applying #14's pooled check when the sidecar
+    says pooled would fail safe. It was not done, because Brendan asked for #22's check; it is an
+    open option.)
 - **The read sites:** `read_clip_window` at the pipeline's read and at the perfect-finder reading,
   as #14 had them. The IoU line keeps #22's exclusion of point labels.
 - **#14's duplicate-row guard** (`read_punches`) merged without conflict. Per-hand rows at one
@@ -1038,14 +1047,22 @@ no force-push).
   | X8 | perfect-finder read back to `cut_span(clip_window)` | **survived** | killed |
   | X9 | IoU includes point labels | killed | killed |
   | X10 | allow duplicate (frame, hand) rows | killed | killed |
+  | X11 | local peak judged on the faster hand's curve, threshold on its own (found by the review) | **survived**: in the slower-hand fixture both hands peak on one frame | killed: the right hand's punches 2 frames later, so at its peak the left is faster AND on its slope; accepted, while a row on the right's own rising slope is still refused |
 
   - **Why X7 and X8 survived:** #14's frame-rate tests call `read_clip_window` directly, so no
     script-level test pinned either read site. A spy on `classify.read_clip_window` now runs
     classify on a clip with fewer than 5 punches (the training cut, where the two reads differ).
     It asserts that every finder row goes through it, and that each named labelled punch does too
     (3 + 2 calls).
-- **Tests:** hands 73, classify 258 (232 + 19 from #14 + 7 new), pipeline 260, labels 50, ingest
+- **Tests:** hands 73, classify 262 (232 + 19 from #14 + 11 new), pipeline 260, labels 50, ingest
   109, env 36.
+- **Review of the merge (82ff682, code-reviewer agent): SHIP**, no blocking findings. It diffed the
+  merge against both parents: nothing was lost except the deliberate lines. It found the X11
+  survivor and the incomplete cost statement above, both fixed in the follow-up commit. Left open:
+  - applying #14's pooled check when the sidecar says pooled (above);
+  - for clips under 5 punches, the printed window length is `cut.length_s` (8/24 s, "0.33 s") where
+    the docstring says 0.375 s, and the provenance writes `"per": "clip"` beside
+    `source: "training"`. Both predate the merge.
 - **Re-measured on the merged code:** every number in iteration 3's table is unchanged, including
   the framing bounds and per_hand. Both clips have far more than 5 punches, so they use the clip's
   own cut, which `read_clip_window` reads exactly as before. #14's change is to the under-5

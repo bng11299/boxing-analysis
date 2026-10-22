@@ -1129,6 +1129,39 @@ args_sl = ["--pose", str(tmp / "IMG_5151.pose.npz"), "--punches", str(tmp / "sl"
 check("a per-hand row is accepted when the other hand is faster at its frame (judged on its own hand)",
       accepted(lambda: classify_punches.main(args_sl))
       and len(list(csv.DictReader((tmp / "sl" / "IMG_5151.classified.csv").open(encoding="utf-8")))) == len(sl_rows))
+# The same with the right hand's punches 2 frames later: at the right hand's own peak the left is faster AND
+# on its slope, so the faster hand's curve has a faster neighbour there. Judged on the row's own hand, the row
+# is a peak and is accepted; judged on the faster hand's curve it would be refused.
+xyo = body(n, fps, punches=[3.0, 8.0, 13.0], hand=0).xy.copy()
+xyo[:, 10] = base_r + 0.5 * (body(n, fps, punches=[3.0 + 2 / fps, 8.0 + 2 / fps, 13.0 + 2 / fps],
+                                  hand=1).xy[:, 10] - base_r)
+pose_yolo.PoseSequence(xyo.astype(np.float32), cf, np.ones(n, bool), fps, 1080, 1920, "IMG_5252.mov", "test").save(
+    tmp / "IMG_5252.pose.npz")
+find_punches.main(["--pose", str(tmp / "IMG_5252.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "so"),
+                   "--per-hand"])
+so_csv = tmp / "so" / "IMG_5252.punches.csv"
+so_rows = list(csv.DictReader(so_csv.open(encoding="utf-8")))
+tr52 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_5252.pose.npz").to_track(usable_only=False), 3)
+sg52 = punchfind.wrist_signal(tr52, "relative")
+best52 = sg52.max(axis=1)
+row52 = {int(f_): k for k, f_ in enumerate(tr52.frame_ids)}
+offset = [r for r in so_rows if r["hand"] == "right" and sg52[row52[int(r["frame"])]].argmax() == 0
+          and (best52[row52[int(r["frame"])] - 1] > best52[row52[int(r["frame"])]]
+               or best52[row52[int(r["frame"])] + 1] > best52[row52[int(r["frame"])]])]
+check("control: right-hand rows where the left is faster and the faster hand's curve has a faster neighbour",
+      len(offset) >= 3, str([(r["frame"], r["hand"]) for r in so_rows]))
+args_so = ["--pose", str(tmp / "IMG_5252.pose.npz"), "--punches", str(so_csv), "--classifier", str(mpath),
+           "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox", "--out-dir", str(tmp / "so")]
+check("a per-hand row is accepted when the other hand is faster and on its slope there (local peak of its own hand)",
+      accepted(lambda: classify_punches.main(args_so)))
+good_so = so_csv.read_text(encoding="utf-8")
+fo = int(offset[0]["frame"])
+rising = [f_ for f_ in range(fo - 6, fo) if sg52[row52[f_], 1] >= 1.0 and sg52[row52[f_ + 1], 1] > sg52[row52[f_], 1]]
+check("control: that right-hand punch is above the threshold and still rising just before its peak", bool(rising))
+so_csv.write_text(good_so.replace(f"{fo},{fo / fps:.3f},right,",
+                                  f"{rising[-1]},{rising[-1] / fps:.3f},right,"), encoding="utf-8")
+raises("... while a row on that hand's own rising slope is still refused", lambda: classify_punches.main(args_so))
+so_csv.write_text(good_so, encoding="utf-8")
 
 # Both pipeline read sites go through classify.read_clip_window: on a clip with fewer than 5 punches the
 # cut is the training window, which only read_clip_window reads with cut_window's own frames (#14).
