@@ -15,15 +15,17 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi import overlay, pose_yolo  # noqa: E402
-from boxingvi.video import probe  # noqa: E402
+from boxingvi.video import fingerprint, probe  # noqa: E402
 
 DEFAULT_OUT = Path("results/ingest")
 
 
-def main(argv=None, predict=None) -> int:
+def main(argv=None, predict=None, track=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--video", type=Path)
@@ -37,6 +39,11 @@ def main(argv=None, predict=None) -> int:
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--max-frames", type=int)
     ap.add_argument("--no-overlay", action="store_true")
+    ap.add_argument("--track", action="store_true",
+                    help="two-boxer footage: keep EVERY person with a ByteTrack id (-> <clip>.tracks.npz) "
+                         "instead of one boxer per frame")
+    ap.add_argument("--track-conf", type=float, default=0.1,
+                    help="detection floor with --track; ByteTrack re-uses low-score boxes (config/bytetrack_50fps.yaml)")
     a = ap.parse_args(argv)
 
     if a.hash_weights:
@@ -44,11 +51,15 @@ def main(argv=None, predict=None) -> int:
         return 0
     if not a.video:
         ap.error("--video is required")
-    if predict is None:  # tests inject one; real runs need pinned weights
+    injected = track if a.track else predict
+    if injected is None:  # tests inject one; real runs need pinned weights
         if not a.weights:
             ap.error("--weights is required")
         model = pose_yolo.load_yolo(a.weights, a.weights_sha256, a.device)
-        predict = pose_yolo.yolo_predictor(model, a.conf, a.device)
+        if a.track:
+            track = pose_yolo.yolo_tracker(model, a.track_conf, a.device)
+        else:
+            predict = pose_yolo.yolo_predictor(model, a.conf, a.device)
     name = a.weights.name if a.weights else "injected"
 
     info = probe(a.video)
@@ -61,7 +72,24 @@ def main(argv=None, predict=None) -> int:
           f"{t.n_irregular} irregular, intervals {t.min_gap:.2f}-{t.max_gap:.2f}x the median, "
           f"drift {t.max_drift:.2f} intervals")
     a.out_dir.mkdir(parents=True, exist_ok=True)
+    if a.track:
+        table = pose_yolo.extract_tracks(a.video, track, name, a.max_frames, info)
+        table.video_fp = fingerprint(a.video)      # binds the table to THIS recording's content
+        npz = a.out_dir / f"{a.video.stem}.tracks.npz"
+        table.save(npz)
+        ids = table.ids()
+        counts = {i: int((table.track_id == i).sum()) for i in ids[:6]}
+        people = np.bincount(table.frame, minlength=table.n_frames)
+        print(f"{len(ids)} track ids over {table.n_frames} frames; most-seen (id: frames) {counts}; "
+              f"people per frame: median {int(np.median(people))}, max {int(people.max(initial=0))}, "
+              f"none in {int((people == 0).sum())} frames -> {npz}")
+        if not a.no_overlay:
+            mp4 = a.out_dir / f"{a.video.stem}.tracks.overlay.mp4"
+            print(f"overlay: {overlay.render_tracks_overlay(a.video, table, mp4, a.min_conf, a.max_frames, info)} "
+                  f"frames -> {mp4}")
+        return 0
     pose = pose_yolo.extract(a.video, predict, name, a.max_frames, info)
+    pose.video_fp = fingerprint(a.video)
     npz = a.out_dir / f"{a.video.stem}.pose.npz"
     pose.save(npz)
     n = len(pose)
