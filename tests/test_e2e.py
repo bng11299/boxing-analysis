@@ -323,5 +323,63 @@ back = np.frombuffer(raw, np.uint8).reshape(7, 5 * 3 + 1)[:, 1:].reshape(7, 5, 3
 check("signature, size, CRC and pixels round-trip", b[:8] == b"\x89PNG\r\n\x1a\n" and (w_, h_) == (5, 7)
       and ihdr_ok and (back == img).all())
 
+print("perfect-finder readings: the safe reader, and #16's population")
+from boxingvi import classify  # noqa: E402
+from boxingvi.data import N_JOINTS  # noqa: E402
+from boxingvi.pose_yolo import PoseSequence  # noqa: E402
+from boxingvi.poseswitch import HeldOutClip  # noqa: E402
+
+GEOM_ = classify.WindowGeometry(duration_s=0.375, lead_in_s=0.125, fps=24.0, torso_px=200.0,
+                                hip_x=0.5, hip_y=0.55, variant="relative", n_clips=100)
+EXT_ = {"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8}
+
+
+def synth_pose(fps_: float, seconds: float = 12.0) -> PoseSequence:
+    """A standing body whose wrists punch at 1 Hz; every joint detected and confident."""
+    n_ = int(seconds * fps_)
+    t_ = np.arange(n_) / fps_
+    xy_ = np.tile(np.linspace(500.0, 700.0, N_JOINTS)[None, :, None], (n_, 1, 2)).astype(np.float32)
+    xy_[:, :, 1] += 300.0
+    xy_[:, 0, 0] += 0.001 * np.arange(n_)                       # frame index coded into the nose's x
+    burst = np.exp(-((t_ % 1.0) - 0.5) ** 2 / 0.005) * 120.0    # one fast extension a second
+    xy_[:, 9, 0] += burst                                        # left wrist
+    xy_[:, 10, 0] += np.roll(burst, int(0.5 * fps_))            # right wrist, half a second later
+    return PoseSequence(xy=xy_, conf=np.ones((n_, N_JOINTS), np.float32), detected=np.ones(n_, bool),
+                        fps=fps_, width=1920, height=1080, source="synthetic", model="none")
+
+
+bad_reader = []
+for f_ in (25.0, 29.97, 59.94):
+    pose_ = synth_pose(f_)
+    # Two clips (< MIN_CLIP_PUNCHES), so the cut is the training fallback.
+    clips_ = [HeldOutClip("V5", i_, int((2 + 3 * i_) * f_), int((2 + 3 * i_) * f_ + 0.6 * f_), 0,
+                          np.zeros((25, N_JOINTS, 3), np.float32)) for i_ in range(2)]
+    rows_, cut_ = ev.perfect_finder_rows("V5", pose_, clips_, GEOM_, EXT_)
+    tr_ = punchfind.bridge(pose_.to_track(usable_only=False), int(round(punchfind.BRIDGE_S * f_)))
+    torso_ = punchfind.body_scale(tr_)
+    sig_ = punchfind.wrist_signal(tr_, GEOM_.variant)
+    for r_, c_ in zip(rows_, clips_):
+        pk_ = classify_punches.span_peak(tr_, sig_, c_.start, c_.end)
+        ref_ = classify.cut_window(tr_, pk_, GEOM_, torso_).keypoints
+        if cut_ is None or cut_.source != "training" or r_[4] is None or r_[4].shape != ref_.shape \
+                or not np.array_equal(r_[4], ref_, equal_nan=True):
+            bad_reader.append((f_, c_.index, None if cut_ is None else cut_.source,
+                               None if r_[4] is None else r_[4].shape, ref_.shape))
+check("the perfect finder's Y_clip under a training-cut fallback is cut_window's 9 frames, frame for frame, "
+      "at 25, 29.97 and 59.94 fps", not bad_reader, str(bad_reader[:3]))
+
+vis_ = np.zeros((25, N_JOINTS, 3), np.float32)
+vis_[:5, :, 2] = 1.0                                      # every joint kept on 5 frames
+one_ = np.zeros((25, N_JOINTS, 3), np.float32)
+one_[:1, :, 2] = 1.0                                      # ... on 1 frame only
+kp_ = np.zeros((25, N_JOINTS, 3), np.float32)
+rows_ = [("V5", 0, 1, vis_, kp_, 0),     # low confidence (no frame passes 0.3) but seen with every joint
+         ("V5", 1, 2, vis_, kp_, 5),     # seen both ways
+         ("V5", 2, 3, one_, kp_, 5),     # all-joint view on one frame only
+         ("V5", 3, 4, vis_, None, 5)]    # no cut
+kept_ = [r_[1] for r_ in ev.reference_keep(rows_)]
+check("gate 4's population is #16's window: a low-confidence but all-joint-visible punch is kept, "
+      "one seen on a single frame or with no cut is not", kept_ == [0, 1], str(kept_))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

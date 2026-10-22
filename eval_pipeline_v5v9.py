@@ -109,6 +109,41 @@ def check_alignment(video: str, al: dict) -> None:
                          f"sharpness {al['ratio']}); the finder's frames cannot be scored against them")
 
 
+def perfect_finder_rows(v: str, pose, clips: list, geom, ex: dict) -> "tuple[list[tuple], object]":
+    """The perfect-finder readings, exactly as eval_pose_switch.py makes them, and the clip's
+    cut: one (video, span index, label, Y_all keypoints, Y_clip keypoints or None, frames
+    seen under the old 0.3 rule) per clip. Y_clip goes through `classify.read_clip_window`,
+    the pipeline's own reader: a training-cut fallback is cut_window's frames (clip_window
+    + cut_span read 8 of its 9 at 25, 29.97 and 59.94 fps)."""
+    track = punchfind.bridge(pose.to_track(usable_only=False), int(round(punchfind.BRIDGE_S * pose.fps)))
+    torso = punchfind.body_scale(track)
+    sig = punchfind.wrist_signal(track, geom.variant)
+    row_of = {int(f): i for i, f in enumerate(track.frame_ids)}
+    peaks = []
+    for c in clips:
+        pk = classify_punches.span_peak(track, sig, c.start, c.end)
+        i = row_of.get(pk)
+        peaks.append((pk, int(np.argmax(sig[i]))) if i is not None and sig[i].max() > 0 else None)
+    cut = classify.clip_cut(track, sig, [p for p in peaks if p is not None], ex, geom)
+    rows = []
+    for k, (c, p) in enumerate(zip(clips, peaks)):
+        y_all = poseswitch.yolo_clip(pose, c.start, c.end, None)
+        y_clip = (classify.read_clip_window(track, p[0], cut, geom, torso)[0].keypoints
+                  if p is not None else None)
+        seen = int((poseswitch.yolo_clip(pose, c.start, c.end)[..., 2] > 0).any(axis=1).sum())
+        rows.append((v, k, c.label, y_all, y_clip, seen))
+    return rows, cut
+
+
+def reference_keep(ref_rows: list) -> list:
+    """The punches pose_switch.json's `window` block is read on: all_seen (YOLO saw >= 2
+    frames with every joint kept) and every cut exists. Y_fix / Y_ext are not read here;
+    their cuts exist wherever Y_clip's does (same peak), which gate 4's count confirms.
+    The old 0.3-rule count (`seen`, r[5]) is NOT a condition: eval_pose_switch.py stopped
+    applying it to this block, so requiring it here scored a different population."""
+    return [r for r in ref_rows if int((r[3][..., 2] > 0).any(axis=1).sum()) >= 2 and r[4] is not None]
+
+
 def check_reference(ref: dict, n: int, acc_all: float, acc_clip: float, sha: str) -> None:
     """Gate 4: the perfect-finder readings computed here are pose_switch.json's, to the bit."""
     w = ref.get("window") or {}
@@ -491,23 +526,8 @@ def main(argv=None) -> int:
         al = poseswitch.align(pose, clips)
         check_alignment(v, al)
 
-        # The perfect-finder readings, exactly as eval_pose_switch.py makes them.
-        track = punchfind.bridge(pose.to_track(usable_only=False), int(round(punchfind.BRIDGE_S * pose.fps)))
-        torso = punchfind.body_scale(track)
-        sig = punchfind.wrist_signal(track, geom.variant)
-        row_of = {int(f): i for i, f in enumerate(track.frame_ids)}
-        peaks = []
-        for c in clips:
-            pk = classify_punches.span_peak(track, sig, c.start, c.end)
-            i = row_of.get(pk)
-            peaks.append((pk, int(np.argmax(sig[i]))) if i is not None and sig[i].max() > 0 else None)
-        cut = classify.clip_cut(track, sig, [p for p in peaks if p is not None], ex, geom)
-        for k, (c, p) in enumerate(zip(clips, peaks)):
-            y_all = poseswitch.yolo_clip(pose, c.start, c.end, None)
-            y_clip = (classify.cut_span(track, *classify.clip_window(p[0], cut, pose.fps), geom, torso).keypoints
-                      if p is not None else None)
-            seen = int((poseswitch.yolo_clip(pose, c.start, c.end)[..., 2] > 0).any(axis=1).sum())
-            ref_rows.append((v, k, c.label, y_all, y_clip, seen))
+        rows_v, cut = perfect_finder_rows(v, pose, clips, geom, ex)
+        ref_rows.extend(rows_v)
 
         # The pipeline, through its own entry points, into this run's folder. Old outputs go first,
         # so everything read below was written by this run.
@@ -526,10 +546,7 @@ def main(argv=None) -> int:
                   "pipeline_cut": json.loads((punches_dir / f"{v}.classified.json").read_text(encoding="utf-8"))["cut"]}
 
     # Gate 4: the perfect-finder readings, pooled as pose_switch.json pools them.
-    # eval_pose_switch.py's own selection: YOLO saw >= 2 frames under the old 0.3 rule (`seen`) AND
-    # with every joint (`seen_all`), and every cut exists. Y_fix / Y_ext are not read here; their
-    # cuts exist wherever Y_clip's does (same peak), which gate 4's count then confirms.
-    keep = [r for r in ref_rows if r[5] >= 2 and int((r[3][..., 2] > 0).any(axis=1).sum()) >= 2 and r[4] is not None]
+    keep = reference_keep(ref_rows)
     pred_all = np.argmax(classify.predict_proba(model, [r[3] for r in keep], man["t_out"]), axis=1)
     pred_clip = np.argmax(classify.predict_proba(model, [r[4] for r in keep], man["t_out"]), axis=1)
     lab = np.array([r[2] for r in keep])

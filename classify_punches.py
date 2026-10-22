@@ -70,13 +70,15 @@ def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
     Every frame must lie in this clip and every time must equal frame / this clip's
     fps. That catches a CSV from a clip at another frame rate or a longer clip; it
     cannot catch one from another clip of the same rate and length, which is why
-    main() also requires the file names to name the same clip."""
+    main() also requires the file names to name the same clip. The finder reports
+    each hand's peak once, so a repeated (frame, hand) row is refused: five copies
+    of one punch would otherwise pass the five-punch gate and set the clip's tempo."""
     with path.open(newline="", encoding="utf-8") as f:
         r = csv.reader(f)
         header = next(r, None)
         if header != PUNCH_HEADER:
             raise ValueError(f"{path.name}: not a find_punches.py CSV (header {header!r})")
-        rows = []
+        rows, seen = [], set()
         for i, row in enumerate(r, start=2):
             if len(rows) >= MAX_ROWS:
                 raise ValueError(f"{path.name}: more than {MAX_ROWS} rows")
@@ -97,6 +99,10 @@ def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
             if d["peak_on_interpolated_frame"] not in ("yes", "no"):
                 raise ValueError(f"{path.name} line {i}: interpolated flag {d['peak_on_interpolated_frame']!r}")
             d["frame"] = int(d["frame"])
+            if (d["frame"], d["hand"]) in seen:
+                raise ValueError(f"{path.name} line {i}: frame {d['frame']} {d['hand']} is listed twice; "
+                                 "the finder reports each peak once")
+            seen.add((d["frame"], d["hand"]))
             rows.append(d)
     return rows
 
@@ -171,20 +177,26 @@ def main(argv=None) -> int:
     sig = punchfind.wrist_signal(track, geom.variant)
 
     row_of = {int(f): i for i, f in enumerate(track.frame_ids)}
+    best = sig.max(axis=1)
     peaks = []
     for d in rows:
         hand = 0 if d["hand"] == "left" else 1
         i = row_of.get(d["frame"])
-        # The finder reported this hand's speed peak at this frame. If this pose has no frame
-        # there, or the other hand is the faster one, the CSV was not made from this pose.
-        if i is None or not sig[i, hand] > 0 or int(np.argmax(sig[i])) != hand:
+        # The finder (punchfind.detect) reports peaks of the FASTER hand's speed at or above the rule's
+        # threshold, naming the faster hand. A row that is not one -- no frame here, the other hand
+        # faster, below the threshold, or with a faster neighbouring frame -- was not made from this
+        # pose with this rule. Necessary, not sufficient: a peak the minimum gap suppressed still passes.
+        if (i is None or not sig[i, hand] > 0 or int(np.argmax(sig[i])) != hand
+                or not best[i] >= rule["threshold"]
+                or (i > 0 and best[i - 1] > best[i]) or (i + 1 < len(best) and best[i + 1] > best[i])):
             raise ValueError(f"{a.punches.name}: frame {d['frame']} is not a {d['hand']}-hand speed peak in "
                              f"this pose; it was not made from {a.pose.name} with this rule")
         peaks.append((d["frame"], hand))
     # One length for the whole clip, from its punches' own extents; each punch read around its own peak.
     cut = classify.clip_cut(track, sig, peaks, ex, geom)
-    spans_read = [classify.clip_window(p, cut, pose.fps) for p, _ in peaks]
-    wins = [classify.cut_span(track, s_, e_, geom, torso) for s_, e_ in spans_read]
+    reads = [classify.read_clip_window(track, p, cut, geom, torso) for p, _ in peaks]
+    wins = [w_ for w_, _ in reads]
+    spans_read = [s_ for _, s_ in reads]
     ok = [i for i, w in enumerate(wins) if w.keypoints is not None]
     probs = classify.predict_proba(model, [wins[i].keypoints for i in ok], man["t_out"])
     pred = {i: p for i, p in zip(ok, probs)}
@@ -225,8 +237,9 @@ def main(argv=None) -> int:
               f"(chance for these proportions {agree['chance']:.1%}); a consistency check, not accuracy")
     # Provenance for whatever reads the CSV next (report_punches.py): which model named
     # these punches, from which finder rule, extent rule, stance and cut, and the CSV's own hash.
+    csv_sha256 = hashlib.sha256(out.read_bytes()).hexdigest()
     (a.out_dir / f"{clip}.classified.json").write_text(json.dumps({
-        "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+        "clip": clip, "csv_sha256": csv_sha256,
         "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule, "extent": ex,
         "cut": None if cut is None else {"per": "clip", **cut._asdict()},
         "pose_frames": len(pose), "fps": pose.fps}, indent=1, allow_nan=False), encoding="utf-8")
@@ -266,11 +279,14 @@ def main(argv=None) -> int:
             if i is None or not sig[i].max() > 0:   # span_peak fell back to the span's middle: there is no peak
                 by_window.append(classify.Window(None, 0, "no wrist speed inside the labelled punch"))
             else:
-                by_window.append(classify.cut_span(track, *classify.clip_window(pk, cut, pose.fps), geom, torso))
+                by_window.append(classify.read_clip_window(track, pk, cut, geom, torso)[0])
         ious = [punchfind.span_iou(spans_read[di], (spans[si].start, spans[si].end)) for si, di in pairs]
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
+        # csv_sha256: the classified CSV this score describes. A later run without --labels
+        # rewrites the CSV but not this file; the report refuses the score once they differ.
         result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol, "matching": "nearest",
-                  "classifier_sha256": man["sha256"], "cut": {"per": "clip", **cut._asdict()},
+                  "classifier_sha256": man["sha256"], "csv_sha256": csv_sha256,
+                  "cut": {"per": "clip", **cut._asdict()},
                   "matched_detections": type_scores(yt, yp),
                   "matched_unclassifiable": matched_unclassified,
                   "labelled_punch_by_clip_window_at_its_peak": window_scores,
