@@ -13,14 +13,20 @@ Trust boundaries: the video is untrusted (see `video.py`); the model checkpoint
 is a pickle, so it is refused unless its sha256 is pinned and matches, computed on
 the exact bytes read. Ultralytics reopens the file afterwards, so a swap between
 the check and the load is possible for an attacker who can already write to the
-weights directory -- keep that directory user-private. Ultralytics is imported
-lazily so the rest of the repo (and the tests) need neither it nor a GPU.
+weights directory -- keep that directory user-private. The pose file is untrusted
+too: `PoseSequence.load` reads every array header and refuses the file before any
+array is allocated (see `_read_pose_npz`). Ultralytics is imported lazily so the
+rest of the repo (and the tests) need neither it nor a GPU.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import tokenize
+import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +48,13 @@ USABLE_MIN_JOINTS = 8   # of 17; below this the pose is a guess, not a measureme
 REQUIRED_JOINTS = (L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST)
 PERSON_IOU_KEEP = 0.3   # a box overlapping last frame's by this much is "the same boxer"
 CONTINUITY_BONUS = 2.0  # ... and its area counts double, so a bigger bystander can't steal the track
+# ~9 h at 60 fps, the same bound as video.MAX_TIMING_PACKETS: a pose has one row per
+# frame. That bounds what a pose file may cost to load: ~410 MB for xy + conf at
+# float32 (what `extract` writes), ~820 MB at float64. The longest real one (V4) is
+# 35,363 frames.
+MAX_POSE_FRAMES = 2_000_000
+MAX_POSE_TEXT = 4096    # characters in `source` / `model`; a 'U' scalar's size is in its header
+_READ_CHUNK = 1 << 24   # array data is read in 16 MB pieces straight into its final buffer
 
 
 _FP = re.compile(r"[0-9a-f]{64}")
@@ -218,17 +231,158 @@ class PoseSequence:
 
     @classmethod
     def load(cls, path) -> "PoseSequence":
-        """Load a sequence, with the same raw checks as `PoseTable.load` (dtype and shape before
-        conversion; `detected` must be a 1-D bool array; strings are 0-d strings; a missing field
-        is a ValueError), then the constructor's cross-field checks."""
-        with np.load(path, allow_pickle=False) as z:
-            fps = _scalar(z, "fps", whole=False)
-            if not fps > 0:
-                raise ValueError(f"fps must be positive, got {fps!r}")
-            return cls(xy=_float_array(z, "xy"), conf=_float_array(z, "conf"), detected=_bool_vector(z, "detected"),
-                       fps=fps, width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
-                       source=_text(z, "source"), model=_text(z, "model"),
-                       video_fp=_text(z, "video_fp") if "video_fp" in z.files else "")
+        """Load a file written by `save`. The file is untrusted: a ~2 KB npz whose
+        array headers claim 10^12 frames made `np.load` allocate before any check ran
+        (MemoryError; a smaller claim silently took hundreds of MB). Every header is
+        now read and checked first -- keys, zip compression method, dtypes, agreeing
+        shapes, the frame cap -- through a byte cap, and only then is any array
+        allocated. Never unpickles. A file that cannot be opened raises OSError;
+        anything wrong inside it, or a read that fails part-way, ValueError."""
+        p = Path(path)
+        with open(p, "rb") as fh:
+            try:
+                z = _read_pose_npz(fh, p.name)
+            except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError,
+                    OSError) as e:  # zipfile's ways of saying "corrupt"; encrypted is Runtime
+                raise ValueError(f"{p.name}: not a readable pose file ({type(e).__name__})") from e
+        # The headers were bounded above; these are the same field checks as
+        # `PoseTable.load` (kind and shape before conversion), then the constructor's.
+        fps = _scalar(z, "fps", whole=False)
+        if not fps > 0:
+            raise ValueError(f"fps must be positive, got {fps!r}")
+        return cls(xy=_float_array(z, "xy"), conf=_float_array(z, "conf"),
+                   detected=_bool_vector(z, "detected"), fps=fps,
+                   width=_scalar(z, "width", whole=True, lo=1),
+                   height=_scalar(z, "height", whole=True, lo=1),
+                   source=_text(z, "source"), model=_text(z, "model"),
+                   video_fp=_text(z, "video_fp") if "video_fp" in z else "")
+
+
+# What `save` writes, and the dtype kinds accepted for each: float coordinates and
+# confidence, a bool mask, a numeric fps, integer sizes, unicode text. Everything
+# else -- object (pickle), structured, bytes, complex -- is refused from the header.
+_POSE_KINDS = {"xy": "f", "conf": "f", "detected": "b", "fps": "fiu",
+               "width": "iu", "height": "iu", "source": "U", "model": "U",
+               "video_fp": "U"}
+# Members a pose file may lack: files written before fingerprints have no video_fp,
+# and load as "" (never bound to a video).
+_POSE_OPTIONAL = frozenset({"video_fp"})
+
+
+# How `np.savez` (stored) and `np.savez_compressed` (deflate) write members. zipfile
+# decompresses deflate in bounded steps, but bz2 and lzma with no output limit: a
+# 2 KB bz2 member reached 584 MB just to yield the 8-byte .npy magic.
+_POSE_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+# The most a header may take: 8 bytes of magic and version, a 4-byte length, and
+# numpy's own 10,000-byte header limit -- which numpy checks only AFTER reading the
+# length a header claims (up to 4 GB in format 2.0), so the stream is capped here.
+_NPY_HEADER_MAX = 8 + 4 + 10_000
+# Deflate's ceiling (258 bytes from a 2-bit code, with block overhead). A header that
+# promises more data than its zip entry could expand to is refused before `np.empty`:
+# without this, a 1.3 KB file claiming exactly the frame cap at float64 allocated
+# 544 MB and only then found the data missing.
+_DEFLATE_MAX_RATIO = 1032
+
+
+class _Capped:
+    """A stream that yields at most `left` bytes, then reports end of file."""
+
+    def __init__(self, raw, left: int) -> None:
+        self.raw, self.left = raw, left
+
+    def read(self, n: int = -1) -> bytes:
+        data = self.raw.read(self.left if n is None or n < 0 else min(n, self.left))
+        self.left -= len(data)
+        return data
+
+
+def _npy_header(member, key: str, name: str):
+    """(shape, fortran_order, dtype) from a member's .npy header, read through a cap,
+    with the dtype checked against what `save` writes for `key`. Leaves `member`
+    positioned at the first byte of array data (numpy reads exact sizes)."""
+    capped = _Capped(member, _NPY_HEADER_MAX)
+    try:
+        version = np.lib.format.read_magic(capped)
+        if version == (1, 0):
+            shape, fortran, dtype = np.lib.format.read_array_header_1_0(capped)
+        elif version == (2, 0):
+            shape, fortran, dtype = np.lib.format.read_array_header_2_0(capped)
+        else:  # 3.0 exists only for structured dtypes with non-latin-1 names, refused anyway
+            raise ValueError(f"{name}: {key} uses .npy format {version}, not 1.0 or 2.0")
+    except (tokenize.TokenError, SyntaxError) as e:  # numpy re-tokenizes a header it can't eval
+        raise ValueError(f"{name}: {key} has an unparseable .npy header") from e
+    max_item = 4 * MAX_POSE_TEXT if dtype.kind == "U" else 8  # 'U' is 4 bytes a character
+    if (dtype.kind not in _POSE_KINDS[key] or dtype.hasobject or dtype.fields is not None
+            or dtype.subdtype is not None or dtype.itemsize > max_item):
+        raise ValueError(f"{name}: {key} has dtype {dtype.str!r}; a pose file's {key} "
+                         f"must be of kind {_POSE_KINDS[key]!r}")
+    return shape, fortran, dtype
+
+
+def _read_pose_npz(fh, name: str) -> "dict[str, np.ndarray]":
+    """Validate every member's .npy header, then read the arrays -- in that order,
+    from one open file, so what was checked is what is read."""
+    with zipfile.ZipFile(fh) as zf:
+        names = set(zf.namelist())
+        missing = [k for k in _POSE_KINDS
+                   if k + ".npy" not in names and k not in _POSE_OPTIONAL]
+        if missing:
+            raise ValueError(f"{name}: not a pose file, missing {', '.join(missing)}")
+        keys = [k for k in _POSE_KINDS if k + ".npy" in names]
+        for k in keys:  # before any member is opened: opening one decompresses
+            if zf.getinfo(k + ".npy").compress_type not in _POSE_COMPRESSION:
+                raise ValueError(f"{name}: {k} uses zip compression method "
+                                 f"{zf.getinfo(k + '.npy').compress_type}; a pose file is "
+                                 f"stored or deflated (np.savez / np.savez_compressed)")
+        heads = {}
+        for k in keys:
+            with zf.open(k + ".npy") as m:
+                heads[k] = _npy_header(m, k, name)
+        dshape = heads["detected"][0]
+        if len(dshape) != 1 or type(dshape[0]) is not int or dshape[0] < 0:  # (True,) parses
+            raise ValueError(f"{name}: detected has shape {dshape}, expected (frames,)")
+        f = dshape[0]
+        want = {"xy": (f, N_JOINTS, 2), "conf": (f, N_JOINTS), "detected": (f,)}
+        for k in keys:
+            if heads[k][0] != want.get(k, ()):  # tuple == compares lengths and every dim
+                raise ValueError(f"{name}: {k} has shape {heads[k][0]}, expected "
+                                 f"{want.get(k, ())} for a {f}-frame pose")
+        if f > MAX_POSE_FRAMES:  # before anything is allocated
+            raise ValueError(f"{name}: claims {f:,} frames; the cap is {MAX_POSE_FRAMES:,} "
+                             f"(~9 h at 60 fps)")
+        size = os.fstat(fh.fileno()).st_size
+        for k in keys:  # what the member could hold at most, before allocating it
+            info = zf.getinfo(k + ".npy")
+            packed = min(info.compress_size, size)  # a declared size can lie; the file can't
+            room = min(info.file_size, packed if info.compress_type == zipfile.ZIP_STORED
+                       else packed * _DEFLATE_MAX_RATIO)
+            need = heads[k][2].itemsize * int(np.prod(heads[k][0], dtype=np.int64))
+            if need > room:
+                raise ValueError(f"{name}: {k} promises {need:,} bytes of data; its "
+                                 f"{packed:,}-byte zip entry can hold at most {room:,}")
+        out = {}
+        for k in keys:
+            with zf.open(k + ".npy") as m:
+                if _npy_header(m, k, name) != heads[k]:  # rewritten since validated
+                    raise ValueError(f"{name}: {k} changed while being read")
+                out[k] = _read_npy_data(m, *heads[k], k, name)
+        return out
+
+
+def _read_npy_data(member, shape, fortran: bool, dtype, key: str, name: str) -> np.ndarray:
+    """Read exactly the bytes the (already validated) header promises, straight into
+    one buffer of that size. Short data is refused; trailing bytes are ignored, as
+    `np.load` ignores them."""
+    arr = np.empty(shape[::-1] if fortran else shape, dtype=dtype)
+    buf = arr.reshape(-1).view(np.uint8)  # C-contiguous, so a view, not a copy
+    pos = 0
+    while pos < buf.size:
+        chunk = member.read(min(_READ_CHUNK, buf.size - pos))
+        if not chunk:
+            raise ValueError(f"{name}: {key} is truncated ({pos} of {buf.size} bytes)")
+        buf[pos:pos + len(chunk)] = np.frombuffer(chunk, np.uint8)
+        pos += len(chunk)
+    return arr.T if fortran else arr
 
 
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
