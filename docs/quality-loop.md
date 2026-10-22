@@ -826,8 +826,9 @@ per-hand finder option, measured against the pooled rule on own footage AND V6; 
   detections at 88 and 112, a punch click at 100 (reach 88-112), a framing click at 120 (reach
   108-132). The greedy gives the punch 88 and reported 1 to 1. A punch matching that takes 112 is
   just as large and leaves the mark nothing, so the true minimum is 0.
-- **The B2 crash was fixed in classify_punches.py only, not "in both scripts".** find_punches.py
-  still crashed when every label was a framing mark: `score()` returns `count_ratio = NaN` with no
+- **B2 read as fixing the all-framing crash, but find_punches.py still crashed.** (Iteration 2's
+  "in both scripts" qualified `point_labels`; `labelled_length_s_median` exists in classify only.)
+  find_punches.py crashed when every label was a framing mark: `score()` returns `count_ratio = NaN` with no
   punch spans, and `json.dumps(allow_nan=False)` raised after printing precision and recall 0.000.
   No score.json was written.
 - **"6 of 6 mutants killed" missed one.** In every fixture `at_most == marks`, so the mutant
@@ -942,6 +943,13 @@ final code. Every finder and type number reproduces iteration 2 exactly:
   | M17 | classify: RecursionError from a nested sidecar not caught | yes (classify crashes: RecursionError) |
   | M18 | classify: sidecar rule not checked | yes (classify 1) |
   | M19 | find_punches: precision 0, not null, with no detections and no punches | yes (hands 1) |
+- **Final review (c60fa9b): SHIP**, no blocking findings. Its re-runs of M5, M17, M18 and M19
+  reproduced the results above. Left open (non-blocking):
+  - find_punches still reports precision 0.0 via `score()` when punches are labelled but nothing was
+    detected (0/0, as in the framing-only case). Override it in the report, not in `score()`.
+  - `find_punches.load_rule` accepts NaN/Infinity (no `parse_constant`); this predates the range.
+  - an always-true `sx is not None` conjunct in one classify check.
+  - this entry's misquote of iteration 2, corrected above.
 - **Merge state.** PR #22 is CONFLICTING with its base after #14's fixes (e2459d5, 9f33f3d). A trial
   merge in a throwaway clone conflicts in `classify_punches.py` and this log. Not merged here: no
   gate needed it. At the stack step, keep #22's per-hand peak check, #14's duplicate-row guard
