@@ -1028,7 +1028,7 @@ no force-push).
     review: the reason first given here for not using the per_hand sidecar, "recorded, not
     trusted", argues only against LOOSENING by it. Applying #14's pooled check when the sidecar
     says pooled would fail safe. It was not done, because Brendan asked for #22's check; it is an
-    open option.)
+    open option.) Done in iteration 6, at Brendan's request.
 - **The read sites:** `read_clip_window` at the pipeline's read and at the perfect-finder reading,
   as #14 had them. The IoU line keeps #22's exclusion of point labels.
 - **#14's duplicate-row guard** (`read_punches`) merged without conflict. Per-hand rows at one
@@ -1059,7 +1059,7 @@ no force-push).
 - **Review of the merge (82ff682, code-reviewer agent): SHIP**, no blocking findings. It diffed the
   merge against both parents: nothing was lost except the deliberate lines. It found the X11
   survivor and the incomplete cost statement above, both fixed in the follow-up commit. Left open:
-  - applying #14's pooled check when the sidecar says pooled (above);
+  - applying #14's pooled check when the sidecar says pooled (above; done in iteration 6);
   - for clips under 5 punches, the printed window length is `cut.length_s` (8/24 s, "0.33 s") where
     the docstring says 0.375 s, and the provenance writes `"per": "clip"` beside
     `source: "training"`. Both predate the merge.
@@ -1067,3 +1067,48 @@ no force-push).
   the framing bounds and per_hand. Both clips have far more than 5 punches, so they use the clip's
   own cut, which `read_clip_window` reads exactly as before. #14's change is to the under-5
   fallback only.
+
+### Iteration 6 -- the pooled check, when the sidecar says pooled (2026-10-21)
+Brendan's call, on iteration 5's open option. When the verified sidecar says `per_hand: false`,
+classify_punches also applies #14's pooled check. Otherwise it keeps the own-hand check.
+- **The checks are now two functions,** so each case can be tested on three-frame arrays:
+  - `own_hand_peak`: every row, any finder. That hand has speed, reaches the threshold, and no
+    neighbouring frame of that hand is faster.
+  - `pooled_peak`: only when `finder_per_hand` is False. The hand is the faster one (`np.argmax`,
+    so the left on an exact tie, as `punchfind.detect` names it), and the threshold and the local
+    peak are judged on the two hands' max.
+- **Why it is safe to let the sidecar choose:** the sidecar only TIGHTENS. True and None
+  (missing, stale, forged, another clip or rule) both get the own-hand check, which every finder
+  passes, so a bad sidecar can never loosen the check. A forged `false` needs the CSV's exact
+  sha256 and could at worst refuse the CSV. `finder_per_hand`'s docstring says so; it no longer
+  says "never trusted for anything else".
+- **Tests (classify 262 to 274):**
+  - Unit cases, each passing the own check and refused by the pooled one:
+    - the review's left [0, 5, 3] / right [6, 1, 0], a faster hand's peak that is not a peak of
+      the max;
+    - a slower hand's own peak;
+    - an exact tie, refused for the right hand;
+    - plus the threshold, the strict neighbourhood, and the first and last rows.
+  - Through the script, on IMG_5151 found by the POOLED finder (left only), plus a right-hand row
+    at one of the right's own peaks, the sidecar re-hashed to the edited CSV:
+    - refused with a verified pooled sidecar, by the pooled check's own message;
+    - accepted with a per-hand sidecar;
+    - accepted with no sidecar.
+  - A control that the pooled finder's own list, with its sidecar, passes.
+- **Mutants: 20 of 20 killed.** X1-X11 were retargeted at `own_hand_peak` and re-run:
+
+  | # | mutant | killed by |
+  |---|---|---|
+  | P1 | pooled check never applied | the pooled-sidecar refusal |
+  | P2 | pooled check applied to every list | 4: per-hand rows where the other hand is faster |
+  | P3 | an unknown sidecar treated as pooled | the no-sidecar acceptance |
+  | P4 | faster-hand clause dropped | the slower-hand unit case (3) |
+  | P5 | a tie accepted for either hand | the tie case |
+  | P6 | local peak on the max dropped | the [0, 5, 3] / [6, 1, 0] case (3) |
+  | P7, P8 | a faster previous / next frame of the max allowed | the [0, 5, 3] case; the neighbourhood case |
+  | P9 | threshold on the max dropped | the unit threshold case only. In `main` it is redundant: the own check runs first, and the argmax hand's speed IS the max |
+
+- **Real data:** the stricter check accepted every row of the pooled finder's real output. That is
+  41 rows on IMG_4406 and 42 on IMG_4395, at both point tolerances, each with a verified
+  `per_hand: false` sidecar, so the check ran. Every number in iteration 3's table is unchanged.
+- **Tests:** hands 73, classify 274, pipeline 260, labels 50, ingest 109, env 36.

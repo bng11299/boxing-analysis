@@ -1163,6 +1163,76 @@ so_csv.write_text(good_so.replace(f"{fo},{fo / fps:.3f},right,",
 raises("... while a row on that hand's own rising slope is still refused", lambda: classify_punches.main(args_so))
 so_csv.write_text(good_so, encoding="utf-8")
 
+print("the pooled finder's own check, applied when the verified sidecar says pooled")
+
+
+def sg(left, right):
+    return np.array([left, right], dtype=float).T
+
+
+own, pooled = classify_punches.own_hand_peak, classify_punches.pooled_peak
+s_ = sg([0, 5, 3], [6, 1, 0])   # the left is faster at frame 1 and at its own peak; the max [6, 5, 3] is not
+check("a faster hand's own peak that is not a peak of the two hands' max: either finder's check passes it, "
+      "the pooled one refuses it", own(s_, 1, 0, 1.0) and not pooled(s_, 1, 0, 1.0))
+s_ = sg([0, 6, 0], [0, 3, 0])
+check("a slower hand's own peak: passed per hand, refused pooled; the faster hand there passes both",
+      own(s_, 1, 1, 1.0) and not pooled(s_, 1, 1, 1.0) and own(s_, 1, 0, 1.0) and pooled(s_, 1, 0, 1.0))
+s_ = sg([0, 4, 0], [0, 4, 0])
+check("an exact tie: the pooled finder names the left (np.argmax), so a right-hand row is refused pooled",
+      pooled(s_, 1, 0, 1.0) and not pooled(s_, 1, 1, 1.0) and own(s_, 1, 1, 1.0))
+s_ = sg([0, 6, 0], [0, 3, 0])
+check("the pooled check still needs the threshold and a strict neighbourhood",
+      not pooled(s_, 1, 0, 6.5) and pooled(s_, 1, 0, 6.0) and not pooled(sg([0, 6, 7], [0, 0, 0]), 1, 0, 1.0))
+check("edges: a peak on the first or last row is judged on its one neighbour",
+      pooled(sg([6, 3], [0, 0]), 0, 0, 1.0) and pooled(sg([3, 6], [0, 0]), 1, 0, 1.0)
+      and not pooled(sg([3, 6], [0, 0]), 0, 0, 1.0))
+check("own-hand check: no speed, below threshold, or a faster neighbour of that hand are refused",
+      not own(sg([0, 0, 0], [0, 0, 0]), 1, 0, 0.0) and not own(sg([0, 2, 0], [0, 0, 0]), 1, 0, 2.5)
+      and not own(sg([0, 2, 3], [9, 9, 9]), 1, 0, 1.0) and own(sg([0, 2, 0], [9, 9, 9]), 1, 0, 1.0))
+
+# Through the script: IMG_5151 (both hands together, the right at half reach), found by the POOLED finder,
+# which names only the faster left hand. A right-hand row at one of the right's own peaks is added.
+find_punches.main(["--pose", str(tmp / "IMG_5151.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "pl")])
+pl_csv, pl_side = tmp / "pl" / "IMG_5151.punches.csv", tmp / "pl" / "IMG_5151.punches.json"
+pl_good, pl_side_good = pl_csv.read_text(encoding="utf-8"), pl_side.read_text(encoding="utf-8")
+pl_rows = list(csv.DictReader(pl_csv.open(encoding="utf-8")))
+r_extra = slower[0]   # a right-hand per-hand row of the same pose: the right's own peak, the left faster there
+check("control: the pooled list names only the left hand, and lacks the right's peak at that frame",
+      {r["hand"] for r in pl_rows} == {"left"}
+      and (r_extra["frame"], "right") not in {(r["frame"], r["hand"]) for r in pl_rows}, str(pl_rows))
+args_pl = ["--pose", str(tmp / "IMG_5151.pose.npz"), "--punches", str(pl_csv), "--classifier", str(mpath),
+           "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox", "--out-dir", str(tmp / "pl")]
+check("control: the pooled finder's own list, with its sidecar, passes the pooled check",
+      accepted(lambda: classify_punches.main(args_pl)))
+with_extra = pl_good + f"{r_extra['frame']},{r_extra['time_s']},right,{r_extra['peak_speed_bl_per_s']},no\n"
+
+
+def pooled_case(per_hand_value):
+    """The pooled list plus the right-hand row; the sidecar re-hashed to it and saying `per_hand_value`
+    (None: no sidecar). Returns the refusal message, or '' if accepted."""
+    pl_csv.write_text(with_extra, encoding="utf-8")
+    if per_hand_value is None:
+        pl_side.unlink()
+    else:
+        pl_side.write_text(json.dumps(json.loads(pl_side_good) | {
+            "per_hand": per_hand_value, "csv_sha256": hashlib.sha256(pl_csv.read_bytes()).hexdigest()}),
+            encoding="utf-8")
+    try:
+        return refusal(lambda: classify_punches.main(args_pl))
+    finally:
+        pl_csv.write_text(pl_good, encoding="utf-8")
+        pl_side.write_text(pl_side_good, encoding="utf-8")
+
+
+m_pooled = pooled_case(False)
+check("a verified pooled sidecar: a slower hand's own peak is refused, naming the pooled finder",
+      "says the pooled finder made this list" in m_pooled, m_pooled)
+check("... the same row with a per-hand sidecar is accepted (each hand's own peaks)", pooled_case(True) == "")
+check("... and with no sidecar (unknown) it is accepted too: a missing sidecar never tightens or loosens",
+      pooled_case(None) == "")
+check("control: the files are restored", pl_csv.read_text(encoding="utf-8") == pl_good
+      and pl_side.read_text(encoding="utf-8") == pl_side_good)
+
 # Both pipeline read sites go through classify.read_clip_window: on a clip with fewer than 5 punches the
 # cut is the training window, which only read_clip_window reads with cut_window's own frames (#14).
 calls, real_read = [], classify.read_clip_window

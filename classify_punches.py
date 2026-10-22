@@ -65,12 +65,34 @@ MAX_ROWS = 100_000
 _DIGITS = re.compile(r"[0-9]+")
 
 
+def own_hand_peak(sig: np.ndarray, i: int, hand: int, threshold: float) -> bool:
+    """Could either finder (punchfind.detect, pooled or per hand) have reported `hand` at track
+    row i? Judged on that hand's OWN speed: it moves, reaches the threshold, and no neighbouring
+    frame of that hand is faster. The other hand may be faster: the per-hand finder reports each
+    hand's own peaks. Necessary, not sufficient: a peak the minimum gap suppressed passes."""
+    h = sig[:, hand]
+    return bool(h[i] > 0 and h[i] >= threshold
+                and not (i > 0 and h[i - 1] > h[i]) and not (i + 1 < len(h) and h[i + 1] > h[i]))
+
+
+def pooled_peak(sig: np.ndarray, i: int, hand: int, threshold: float) -> bool:
+    """Could the POOLED finder have reported `hand` at track row i? It reports peaks of the two
+    hands' max speed at or above the threshold, naming the faster hand (np.argmax: the left on
+    an exact tie). This refuses what own_hand_peak lets through in a pooled list: a slower hand's
+    own peak, a faster hand's peak that is not a peak of the max, and the right hand on a tie.
+    (With `hand` the argmax, the max's threshold test is the hand's own; it is kept as #14 had it.)"""
+    best = sig.max(axis=1)
+    return bool(int(np.argmax(sig[i])) == hand and best[i] >= threshold
+                and not (i > 0 and best[i - 1] > best[i]) and not (i + 1 < len(best) and best[i + 1] > best[i]))
+
+
 def finder_per_hand(punches: Path, clip: str, rule: dict) -> "bool | None":
     """Whether find_punches.py made this CSV with --per-hand, from the <clip>.punches.json
     it wrote beside it. None (unknown) when that file is missing, unreadable, for another
-    clip or another rule than this run's, or describes other bytes than the CSV now holds:
-    it is recorded, never trusted for anything else, so a stale or hand-made one must not
-    lend the CSV a provenance."""
+    clip or another rule than this run's, or describes other bytes than the CSV now holds,
+    so a stale or hand-made one cannot lend the CSV a provenance. It is recorded, and used
+    only to TIGHTEN the row check (False: the pooled finder's check too); True and None get
+    the check every finder passes, so a forged or missing sidecar can never loosen it."""
     side = punches.with_suffix(".json")
     try:
         if not side.is_file() or side.stat().st_size > 64_000:
@@ -205,19 +227,16 @@ def main(argv=None) -> int:
     for d in rows:
         hand = 0 if d["hand"] == "left" else 1
         i = row_of.get(d["frame"])
-        # The finder (punchfind.detect) reports speed peaks of the named hand at or above the rule's
-        # threshold. A row that is not one -- no frame here, no speed in that hand, below the
-        # threshold, or with a faster neighbouring frame OF THAT HAND -- was not made from this pose
-        # with this rule. Judged on the row's own hand, not the faster one: the per-hand finder
-        # reports each hand's own peaks, so the other hand may be faster. Necessary, not sufficient: a
-        # peak the minimum gap suppressed passes, and in a POOLED list so do rows the pooled finder could
-        # not emit: a slower hand's own peak, a faster hand's peak that is not a peak of the two hands'
-        # max, and the second hand on an exact speed tie.
-        h_ = sig[:, hand]
-        if (i is None or not h_[i] > 0 or not h_[i] >= rule["threshold"]
-                or (i > 0 and h_[i - 1] > h_[i]) or (i + 1 < len(h_) and h_[i + 1] > h_[i])):
+        # A row neither finder could have reported (own_hand_peak) was not made from this pose with
+        # this rule. When the verified sidecar says the pooled finder made the list, a row it could
+        # not have reported (pooled_peak) is refused too.
+        if i is None or not own_hand_peak(sig, i, hand, rule["threshold"]):
             raise ValueError(f"{a.punches.name}: frame {d['frame']} is not a {d['hand']}-hand speed peak in "
                              f"this pose; it was not made from {a.pose.name} with this rule")
+        if per_hand is False and not pooled_peak(sig, i, hand, rule["threshold"]):
+            raise ValueError(f"{a.punches.name}: frame {d['frame']} {d['hand']} is not a peak of the faster "
+                             f"hand's speed, and {a.punches.with_suffix('.json').name} says the pooled finder "
+                             "made this list, which reports only those")
         peaks.append((d["frame"], hand))
     # One length for the whole clip, from its punches' own extents; each punch read around its own peak.
     cut = classify.clip_cut(track, sig, peaks, ex, geom)
