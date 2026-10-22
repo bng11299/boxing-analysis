@@ -207,6 +207,13 @@ def summary_lines(report: dict) -> "list[str]":
     return out
 
 
+def y_clip(track, peak_frame: int, cut, geom, torso: float) -> np.ndarray:
+    """Y_clip's keypoints: exactly what the pipeline reads under the clip's cut. A
+    training-cut fallback (too few punches) is cut_window's own frames; the old
+    clip_window + cut_span read held 8 of its 9 frames at 25, 29.97 and 59.94 fps."""
+    return classify.read_clip_window(track, peak_frame, cut, geom, torso)[0].keypoints
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, required=True)
@@ -275,7 +282,7 @@ def main(argv=None) -> int:
                 e = classify.punch_extent(track, sig, pk, pk_hand[1], ex, geom)
                 ext_kp = classify.cut_span(track, e.start, e.end, geom, torso).keypoints
                 iou = punchfind.span_iou((e.start, e.end), (c.start + o, c.end + o))
-                long_kp = classify.cut_span(track, *classify.clip_window(pk, clip_cut, pose.fps), geom, torso).keypoints
+                long_kp = y_clip(track, pk, clip_cut, geom, torso)
             y = poseswitch.yolo_clip(pose, c.start + o, c.end + o)
             y_all = poseswitch.yolo_clip(pose, c.start + o, c.end + o, None)
             rows.append({"video": v, "label": c.label, "A": c.alphapose, "Y": y, "Y_all": y_all,

@@ -280,5 +280,26 @@ check("through the CLI too: A vs Y_all on all 20 punches, the legacy rule on the
       and res.get("n_legacy_blanked") == 4 and res.get("n_yolo_missed") == 0,
       json.dumps({k: res.get(k) for k in ("n_legacy_blanked", "n_yolo_missed")}))
 
+print("eval_pose_switch.y_clip: a training-cut fallback reads cut_window's own frames")
+from boxingvi.data import Track  # noqa: E402
+
+# The fallback cut, exactly as classify.clip_cut builds it for a clip with too few punches.
+span_ = (GEOM.n_frames - 1) / GEOM.fps
+few_ = classify.ClipCut(span_, min(1.0, GEOM.lead_in_s / span_), 0, 0, False, "training")
+bad_ = []
+for f_ in (25.0, 29.97, 59.94):
+    n_ = int(16 * f_)
+    xy_ = np.tile(np.linspace(400.0, 600.0, N_JOINTS)[None, :, None], (n_, 1, 2))
+    xy_[:, :, 1] += 300.0
+    xy_[:, 0, 0] += 0.001 * np.arange(n_)          # each frame's index coded into the nose's x
+    tr_ = Track(np.arange(n_), xy_, f_, conf=np.ones((n_, N_JOINTS)))
+    for p_ in range(int(0.5 * f_), int(15 * f_), 7):
+        got_ = eps.y_clip(tr_, p_, few_, GEOM, 100.0)
+        ref_ = classify.cut_window(tr_, p_, GEOM, 100.0).keypoints
+        if got_.shape != ref_.shape or not np.array_equal(got_, ref_, equal_nan=True):
+            bad_.append((f_, p_, got_.shape, ref_.shape))
+check("Y_clip under a training-cut fallback is cut_window's window, frame for frame, at 25, 29.97 and "
+      "59.94 fps (clip_window + cut_span read 8 of its 9 frames there)", not bad_, str(bad_[:3]))
+
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
