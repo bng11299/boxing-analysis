@@ -13,6 +13,7 @@ or every frame-size read below is misaligned (a silent, plausible-looking skew).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -77,6 +78,28 @@ class VideoInfo:
     @property
     def fps(self) -> float:
         return float(self.fps_frac)
+
+
+FINGERPRINT_EDGE = 4 * 1024 * 1024   # bytes read from each end of the file
+
+
+def fingerprint(path) -> str:
+    """Content identity of a video file: sha256 hex of (file size as 8 bytes big-endian,
+    the first 4 MiB, the last 4 MiB). Cheap enough for a 2 GB recording (8 MiB read), and
+    a different recording differs in size or in the first/last 4 MiB (container header and
+    the final packets) in practice; it is NOT a hash of every byte, so it detects the wrong
+    file, not a deliberately edited middle. A file under 8 MiB is hashed from both ends,
+    which then overlap: still deterministic. Pose tables store it (`PoseTable.video_fp`) so
+    a table renamed onto another recording of the same size, rate and length is refused."""
+    p = Path(path)
+    size = p.stat().st_size
+    h = hashlib.sha256()
+    h.update(size.to_bytes(8, "big"))
+    with p.open("rb") as f:
+        h.update(f.read(FINGERPRINT_EDGE))
+        f.seek(max(0, size - FINGERPRINT_EDGE))
+        h.update(f.read(FINGERPRINT_EDGE))
+    return h.hexdigest()
 
 
 def _tool(name: str) -> str:

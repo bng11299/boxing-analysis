@@ -20,6 +20,7 @@ lazily so the rest of the repo (and the tests) need neither it nor a GPU.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +28,7 @@ import numpy as np
 
 from .data import N_JOINTS, Track
 from .punchfind import L_SHOULDER, L_WRIST, R_SHOULDER, R_WRIST
-from .video import VideoInfo, iter_frames, probe
+from .video import VideoInfo, fingerprint, iter_frames, probe
 
 USABLE_MIN_CONF = 0.3   # same default as the overlay, so "drawn" and "usable" agree
 USABLE_MIN_JOINTS = 8   # of 17; below this the pose is a guess, not a measurement
@@ -41,6 +42,112 @@ USABLE_MIN_JOINTS = 8   # of 17; below this the pose is a guess, not a measureme
 REQUIRED_JOINTS = (L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST)
 PERSON_IOU_KEEP = 0.3   # a box overlapping last frame's by this much is "the same boxer"
 CONTINUITY_BONUS = 2.0  # ... and its area counts double, so a bigger bystander can't steal the track
+
+
+_FP = re.compile(r"[0-9a-f]{64}")
+
+
+def _check_fp(fp) -> None:
+    """A stored video fingerprint is empty (older files, never bound) or a sha256 hex digest."""
+    if not isinstance(fp, str) or (fp and not _FP.fullmatch(fp)):
+        raise ValueError("video_fp must be empty or a 64-character lowercase sha256 hex digest")
+
+
+_INT64_MAX = float(2 ** 53)       # beyond this a float cannot hold every whole number exactly
+
+
+def _field(z, key: str) -> np.ndarray:
+    try:
+        return z[key]
+    except KeyError:
+        raise ValueError(f"not a pose file: the field {key!r} is missing") from None
+
+
+def _whole_array(z, key: str, lo: int = 0) -> np.ndarray:
+    """A stored integer array (frame numbers, track ids), VALIDATED BEFORE any conversion: an
+    integer dtype, or a float dtype whose every value is finite and a whole number. A stored
+    -0.5 or 1.9 is refused, never truncated to 0 or 1 (`astype` would have done exactly that
+    and produced a plausible, wrong identity). Values must be >= `lo`."""
+    a = _field(z, key)
+    if a.ndim != 1:
+        raise ValueError(f"{key} must be a 1-D array")
+    if a.dtype.kind in "iu":
+        if a.dtype.kind == "u" and a.size and int(a.max()) > np.iinfo(np.int64).max:
+            raise ValueError(f"{key} holds a value beyond the integer range")
+    elif a.dtype.kind == "f":
+        if not np.isfinite(a).all():
+            raise ValueError(f"{key} must be finite")
+        if (a != np.floor(a)).any():
+            raise ValueError(f"{key} must be whole numbers, not fractions")
+        if a.size and np.abs(a).max() > _INT64_MAX:
+            raise ValueError(f"{key} holds a value beyond the integer range")
+    else:
+        raise ValueError(f"{key} must be an integer array, got dtype {a.dtype}")
+    out = a.astype(np.int64)
+    if out.size and out.min() < lo:
+        raise ValueError("a negative track id: -1 means unidentified and is never a person"
+                         if key == "track_id" else f"{key} holds a value below {lo}")
+    return out
+
+
+def _float_array(z, key: str) -> np.ndarray:
+    a = _field(z, key)
+    if a.dtype.kind != "f":
+        raise ValueError(f"{key} must be a floating-point array, got dtype {a.dtype}")
+    return a
+
+
+def _text(z, key: str) -> str:
+    """A stored string (source, model, video_fp): a 0-d unicode array, checked BEFORE str()
+    (a number or a vector would otherwise become plausible-looking text)."""
+    a = _field(z, key)
+    if a.shape != () or a.dtype.kind != "U":
+        raise ValueError(f"{key} must be a single string, got shape {a.shape} dtype {a.dtype}")
+    return str(a.item())
+
+
+def _bool_vector(z, key: str) -> np.ndarray:
+    a = _field(z, key)
+    if a.ndim != 1 or a.dtype.kind != "b":
+        raise ValueError(f"{key} must be a 1-D bool array, got shape {a.shape} dtype {a.dtype}")
+    return a
+
+
+def _scalar(z, key: str, whole: bool, lo: float = 0.0) -> "int | float":
+    """A stored scalar, validated before conversion: one finite number, whole when `whole`
+    (a width of 640.7 is refused, not read as 640), and >= `lo`."""
+    a = _field(z, key)
+    if a.shape != () or a.dtype.kind not in "iuf":
+        raise ValueError(f"{key} must be a single number")
+    x = a.item()
+    if isinstance(x, float) and not np.isfinite(x):
+        raise ValueError(f"{key} must be finite")
+    if whole and x != int(x):
+        raise ValueError(f"{key} must be a whole number, got {x!r}")
+    if not x >= lo:
+        raise ValueError(f"{key} must be at least {lo:g}, got {x!r}")
+    return int(x) if whole else float(x)
+
+
+def verify_binding(pose, video, check_name: bool = True) -> bool:
+    """Is this pose table / sequence the one extracted from THIS video file?
+
+    Size, frame rate and frame count agree between unrelated recordings (a camera's fixed
+    settings), so they identify nothing. Two checks do: the file NAME recorded at extraction
+    (`source`), and, when the table carries one, the content fingerprint (`video.fingerprint`).
+    Raises ValueError on a mismatch of either. Returns True when the content fingerprint was
+    checked and matched, False when the table has none (files written before it existed):
+    those are accepted on the name alone and the caller should report them as unbound.
+    `check_name=False` skips the name (a PoseSequence in a hand-made test fixture)."""
+    video = Path(video)
+    if check_name and pose.source != video.name:
+        raise ValueError(f"the pose table was extracted from {pose.source!r}, not {video.name!r}")
+    if not pose.video_fp:
+        return False
+    if pose.video_fp != fingerprint(video):
+        raise ValueError(f"the pose table's video fingerprint does not match {video.name!r}: "
+                         "it was extracted from a different recording")
+    return True
 
 
 @dataclass
@@ -60,8 +167,12 @@ class PoseSequence:
     height: int
     source: str = ""
     model: str = ""
+    video_fp: str = ""     # video.fingerprint of the source file; "" = not recorded
 
     def __post_init__(self) -> None:
+        _check_fp(self.video_fp)
+        if self.detected.ndim != 1:
+            raise ValueError(f"detected must be a 1-D per-frame mask, got shape {self.detected.shape}")
         f = len(self.detected)
         if self.xy.shape != (f, N_JOINTS, 2) or self.conf.shape != (f, N_JOINTS):
             raise ValueError(f"shape mismatch: xy {self.xy.shape}, conf {self.conf.shape}, "
@@ -103,14 +214,21 @@ class PoseSequence:
     def save(self, path) -> None:
         np.savez_compressed(path, xy=self.xy, conf=self.conf, detected=self.detected,
                             fps=self.fps, width=self.width, height=self.height,
-                            source=self.source, model=self.model)
+                            source=self.source, model=self.model, video_fp=self.video_fp)
 
     @classmethod
     def load(cls, path) -> "PoseSequence":
+        """Load a sequence, with the same raw checks as `PoseTable.load` (dtype and shape before
+        conversion; `detected` must be a 1-D bool array; strings are 0-d strings; a missing field
+        is a ValueError), then the constructor's cross-field checks."""
         with np.load(path, allow_pickle=False) as z:
-            return cls(xy=z["xy"], conf=z["conf"], detected=z["detected"],
-                       fps=float(z["fps"]), width=int(z["width"]), height=int(z["height"]),
-                       source=str(z["source"]), model=str(z["model"]))
+            fps = _scalar(z, "fps", whole=False)
+            if not fps > 0:
+                raise ValueError(f"fps must be positive, got {fps!r}")
+            return cls(xy=_float_array(z, "xy"), conf=_float_array(z, "conf"), detected=_bool_vector(z, "detected"),
+                       fps=fps, width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
+                       source=_text(z, "source"), model=_text(z, "model"),
+                       video_fp=_text(z, "video_fp") if "video_fp" in z.files else "")
 
 
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
@@ -203,8 +321,10 @@ class PoseTable:
     height: int
     source: str = ""
     model: str = ""
+    video_fp: str = ""      # video.fingerprint of the source file; "" = not recorded
 
     def __post_init__(self) -> None:
+        _check_fp(self.video_fp)
         n = len(self.frame)
         if (self.track_id.shape != (n,) or self.box.shape != (n, 4)
                 or self.xy.shape != (n, N_JOINTS, 2) or self.conf.shape != (n, N_JOINTS)):
@@ -217,6 +337,8 @@ class PoseTable:
             raise ValueError("pose table contains non-finite coordinates")
         if not np.all((self.conf >= 0) & (self.conf <= 1)):
             raise ValueError("joint confidence must lie in [0, 1]")
+        if n and self.track_id.min() < 0:      # -1 is "no id yet" and is dropped at extraction
+            raise ValueError("a negative track id: -1 means unidentified and is never a person")
         if len(set(zip(self.frame.tolist(), self.track_id.tolist()))) != n:
             raise ValueError("one track id appears twice in one frame")
 
@@ -235,15 +357,29 @@ class PoseTable:
     def save(self, path) -> None:
         np.savez_compressed(path, frame=self.frame, track_id=self.track_id, box=self.box, xy=self.xy,
                             conf=self.conf, n_frames=self.n_frames, fps=self.fps, width=self.width,
-                            height=self.height, source=self.source, model=self.model)
+                            height=self.height, source=self.source, model=self.model, video_fp=self.video_fp)
 
     @classmethod
     def load(cls, path) -> "PoseTable":
+        """Load a table. A file is untrusted, so each stored field is read through a helper that
+        checks its raw dtype and shape BEFORE converting it, and a missing field is a ValueError:
+        frame and track_id are 1-D integer (or finite whole-float) arrays in range, box / xy / conf
+        are float arrays, n_frames / width / height are 0-d whole numbers >= 1, fps is a 0-d finite
+        number > 0, source / model / video_fp are 0-d strings. A fraction is refused, not truncated
+        into a different frame or id. Cross-field consistency (matching lengths, frames inside the
+        video, finite coordinates, confidence in [0, 1], no repeated id in a frame) is then checked
+        by the constructor."""
         with np.load(path, allow_pickle=False) as z:
-            return cls(frame=z["frame"].astype(np.int64), track_id=z["track_id"].astype(np.int64),
-                       box=z["box"], xy=z["xy"], conf=z["conf"], n_frames=int(z["n_frames"]),
-                       fps=float(z["fps"]), width=int(z["width"]), height=int(z["height"]),
-                       source=str(z["source"]), model=str(z["model"]))
+            frame, track_id = _whole_array(z, "frame"), _whole_array(z, "track_id")
+            fps = _scalar(z, "fps", whole=False)
+            if not fps > 0:
+                raise ValueError(f"fps must be positive, got {fps!r}")
+            return cls(frame=frame, track_id=track_id,
+                       box=_float_array(z, "box"), xy=_float_array(z, "xy"), conf=_float_array(z, "conf"),
+                       n_frames=_scalar(z, "n_frames", whole=True, lo=1), fps=fps,
+                       width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
+                       source=_text(z, "source"), model=_text(z, "model"),
+                       video_fp=_text(z, "video_fp") if "video_fp" in z.files else "")
 
 
 TRACKER_CONFIG = Path(__file__).resolve().parents[2] / "config" / "bytetrack_50fps.yaml"

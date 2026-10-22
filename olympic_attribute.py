@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi import olympic  # noqa: E402
-from boxingvi.pose_yolo import PoseTable  # noqa: E402
+from boxingvi.pose_yolo import PoseTable, verify_binding  # noqa: E402
 from boxingvi.video import probe  # noqa: E402
 
 DEFAULT_OUT = Path("results/olympic_attribution.json")
@@ -74,6 +74,10 @@ def main(argv=None) -> int:
         if not f.is_file():
             continue
         table = PoseTable.load(f)
+        try:
+            bound = verify_binding(table, t.video)     # file name; content fingerprint when the table has one
+        except ValueError as e:
+            raise ValueError(f"{f.name}: {e}") from e
         info = probe(t.video)
         if (table.width, table.height) != (info.width, info.height) or abs(table.fps - info.fps) > 1e-6:
             raise ValueError(f"{f.name} was not extracted from {t.video.name}")
@@ -81,7 +85,8 @@ def main(argv=None) -> int:
         events = [e for e in events if e.first < table.n_frames]   # a --max-frames run covers a prefix
         attrs = olympic.attribute(events, table)
         every += attrs
-        report[t.name] = summarise(attrs, table) | {"frames_tracked": table.n_frames, "track_ids": len(table.ids())}
+        report[t.name] = summarise(attrs, table) | {"frames_tracked": table.n_frames, "track_ids": len(table.ids()),
+                                                      "video_bound": bound}
     if not report:
         raise ValueError(f"no <GoPro id>.tracks.npz in {a.tracks} matches a task in {a.data}")
     total = summarise(every)

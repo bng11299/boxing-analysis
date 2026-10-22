@@ -190,6 +190,19 @@ def signal_coverage(track: Track, min_conf: float = MIN_CONF, bridge_s: float = 
     return {"frames": total, "left": got[0] / total, "right": got[1] / total}
 
 
+def signal_frames(track: Track, min_conf: float = MIN_CONF, bridge_s: float = BRIDGE_S) -> np.ndarray:
+    """(F, 2) bool: does each hand have a speed in each of the track's frames, by exactly the
+    rule `wrist_signal` and `signal_coverage` use (same runs, same bridging). The union over
+    the two hands (`.any(axis=1)`) is the exposure of a detector that takes the faster hand."""
+    max_gap = int(round(bridge_s * track.fps))
+    out = np.zeros((len(track.frame_ids), 2), dtype=bool)
+    for h in range(2):
+        for lo, hi, ok, _ in _hand_runs(track, h, min_conf, max_gap):
+            for a, b in _runs(ok):
+                out[lo + a:lo + b, h] = True
+    return out
+
+
 def detect(track: Track, signal: np.ndarray, threshold: float,
            min_gap_s: float) -> "tuple[np.ndarray, np.ndarray]":
     """Peaks of the faster hand's speed above `threshold`, at least `min_gap_s`
