@@ -1,0 +1,18 @@
+# ByteTrack for two-boxer footage. Ultralytics' default bytetrack.yaml with one change.
+#
+# track_buffer: how many frames a lost person is kept before their id is retired.
+# Ultralytics builds the tracker with frame_rate=30 regardless of the video, so the
+# buffer is counted in frames: the default 30 is 0.6 s at 50 fps (Olympic Boxing),
+# short enough that a referee stepping in front of a boxer, or a clinch, splits one
+# boxer into several ids. 100 frames is 2 s at 50 fps, 1.7 s at 60.
+#
+# Detection confidence is passed separately (run_ingest.py --track-conf, default 0.1)
+# and must be at or below track_low_thresh: ByteTrack's second association pass
+# exists to recover the low-score boxes of a partly hidden person.
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 100
+match_thresh: 0.8
+fuse_score: True

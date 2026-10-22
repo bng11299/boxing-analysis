@@ -13,6 +13,7 @@ or every frame-size read below is misaligned (a silent, plausible-looking skew).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -77,6 +78,28 @@ class VideoInfo:
     @property
     def fps(self) -> float:
         return float(self.fps_frac)
+
+
+FINGERPRINT_EDGE = 4 * 1024 * 1024   # bytes read from each end of the file
+
+
+def fingerprint(path) -> str:
+    """Content identity of a video file: sha256 hex of (file size as 8 bytes big-endian,
+    the first 4 MiB, the last 4 MiB). Cheap enough for a 2 GB recording (8 MiB read), and
+    a different recording differs in size or in the first/last 4 MiB (container header and
+    the final packets) in practice; it is NOT a hash of every byte, so it detects the wrong
+    file, not a deliberately edited middle. A file under 8 MiB is hashed from both ends,
+    which then overlap: still deterministic. Pose tables store it (`PoseTable.video_fp`) so
+    a table renamed onto another recording of the same size, rate and length is refused."""
+    p = Path(path)
+    size = p.stat().st_size
+    h = hashlib.sha256()
+    h.update(size.to_bytes(8, "big"))
+    with p.open("rb") as f:
+        h.update(f.read(FINGERPRINT_EDGE))
+        f.seek(max(0, size - FINGERPRINT_EDGE))
+        h.update(f.read(FINGERPRINT_EDGE))
+    return h.hexdigest()
 
 
 def _tool(name: str) -> str:
@@ -219,6 +242,29 @@ def iter_frames(path, info: "VideoInfo | None" = None, max_frames: "int | None" 
     if tail:  # a partial frame: decoded size is not the probed size, so every frame is suspect
         raise RuntimeError(f"{path.name}: decoder output is not a whole number of "
                            f"{w}x{h} frames ({len(tail)} stray bytes after frame {n})")
+
+
+_LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+
+def frame_change(path, info: "VideoInfo | None" = None, step: int = 4) -> np.ndarray:
+    """One number per frame: the mean absolute difference between the grey image of frame f and of
+    frame f-1 (NaN for frame 0), on every `step`-th pixel in each direction. The video is decoded
+    once, by `iter_frames`, so entry f is the f-th frame the file holds.
+
+    Why: a camera that drops captured frames still writes regular timestamps (the packet timing
+    `probe` checks is clean), but what is on screen jumps forward in one frame. That jump is the
+    only trace, and it is this number that spikes (see `skips.find_skips`). It is ONE aggregate
+    number per frame: no pixel, crop or thumbnail leaves this function."""
+    if isinstance(step, bool) or not isinstance(step, (int, np.integer)) or step < 1:
+        raise ValueError("step must be a whole number >= 1")
+    out: "list[float]" = []
+    prev = None
+    for frame in iter_frames(path, info):
+        grey = frame[::step, ::step].astype(np.float32) @ _LUMA
+        out.append(float("nan") if prev is None else float(np.abs(grey - prev).mean()))
+        prev = grey
+    return np.array(out, dtype=np.float64)
 
 
 class VideoWriter:
