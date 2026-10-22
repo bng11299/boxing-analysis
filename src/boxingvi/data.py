@@ -351,6 +351,131 @@ def _load_v6(skel: Path, ann: Path):
     return clips, unlabelled, degenerate
 
 
+# --------------------------------------------------------------------------
+# V6 as continuous footage -- for the punch finder, not the classifier
+# --------------------------------------------------------------------------
+#
+# Measured 2026-09-27 against the downloaded source video (vault ISSUES-LOG
+# O54), not assumed:
+#
+#   * V6.npy channel 0 is the 0-based index of the frame in the source video,
+#     decoded at its NATIVE rate. Motion energy of the decoded video correlates
+#     with skeleton motion sharply at lag 0 and ~5x lower at every other lag in
+#     -6..+6 (exact values: results/punch_finder_v6.json). The 208 frames the array lacks against the video's 46,705 are
+#     three gaps with no pose (0-156, 601-648, 46489-46491), not drift.
+#   * V6.xlsx `start`/`end` are video frame ids in the same space, inclusive.
+#     Read as skeleton ROW numbers instead, they would point 157 frames late
+#     before the gap at 601-648 and 205 frames late after it, and the
+#     wrist-speed peak around them vanishes.
+#   * 804 rows, of which 685 carry a label; the other 119 are empty. Four
+#     classes only -- lead/rear hook and lead/rear uppercut. V6 has no jabs or
+#     crosses, so nothing measured on it says anything about straight punches.
+#   * The labels end at frame 44,372; pose continues to 46,704. The unlabelled
+#     tail must be excluded from any score, or every punch in it counts as a
+#     false positive.
+
+# Native frame rates from ffprobe on the downloaded sources (O54). The corpus
+# is NOT 30 fps; anything time-based must be converted per video, from here.
+NATIVE_FPS = {
+    "V1": 24.0, "V2": 24000 / 1001, "V3": 24000 / 1001, "V4": 24000 / 1001,
+    "V5": 30000 / 1001, "V6": 24000 / 1001, "V7": 30000 / 1001,
+    "V8": 30000 / 1001, "V9": 24000 / 1001, "V10": 25.0,
+}
+SOURCE_SIZE = (1920, 1080)  # every source video, width x height
+
+
+@dataclass
+class Track:
+    """Continuous single-person pose. `xy` is (F, 17, 2) in PIXELS.
+
+    `frame_ids` are video frame indices, strictly increasing; a jump of more
+    than one is a gap in the pose, and nothing may be differenced across it.
+    """
+
+    frame_ids: np.ndarray
+    xy: np.ndarray
+    fps: float
+    source: str = ""
+
+    def __post_init__(self) -> None:
+        f = np.asarray(self.frame_ids)
+        if f.ndim != 1 or len(f) < 2:
+            raise ValueError("a track needs a 1-D frame-id array of length >= 2")
+        if self.xy.shape != (len(f), N_JOINTS, 2):
+            raise ValueError(f"expected xy ({len(f)}, {N_JOINTS}, 2), got {self.xy.shape}")
+        if not np.all(np.diff(f) > 0):
+            raise ValueError("frame ids must be strictly increasing")
+        if not np.all(np.isfinite(self.xy)):
+            raise ValueError("track contains non-finite coordinates")
+        if not (np.isfinite(self.fps) and self.fps > 0):
+            raise ValueError(f"fps must be positive, got {self.fps!r}")
+
+    def segments(self) -> "list[tuple[int, int]]":
+        """[lo, hi) row ranges of consecutive frame ids."""
+        breaks = np.flatnonzero(np.diff(self.frame_ids) != 1) + 1
+        edges = np.r_[0, breaks, len(self.frame_ids)]
+        return [(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:])]
+
+
+@dataclass(frozen=True)
+class Span:
+    """One labelled punch: inclusive video frame ids."""
+
+    start: int
+    end: int
+    label: int
+
+
+def load_v6_track(skel: Path) -> Track:
+    arr = np.load(Path(skel) / "V6.npy", allow_pickle=False)
+    if arr.ndim != 4 or arr.shape[1:] != (1, N_JOINTS, 3):
+        raise ValueError(f"V6: expected (F, 1, {N_JOINTS}, 3), got {arr.shape}")
+    ids = arr[:, 0, :, 0]
+    # Channel 0 is one frame id repeated over the 17 joints. If that ever stops
+    # holding, it is not a frame id and the alignment above does not apply.
+    if not np.all(ids == ids[:, :1]) or not np.all(ids[:, 0] == np.round(ids[:, 0])):
+        raise ValueError("V6 channel 0 is not a per-frame integer frame id")
+    if ids[0, 0] < 0:
+        raise ValueError("V6 frame ids must be non-negative")
+    xy = arr[:, 0, :, 1:3].astype(np.float64)
+    # Elsewhere in this file (0, 0) marks a dropped joint. Read as a position it
+    # would be a jump across the whole frame -- a fake punch. V6 has none today;
+    # if a re-release does, it must be handled deliberately, not differenced.
+    if np.any(np.all(xy == 0, axis=-1)):
+        raise ValueError("V6 has joints at exactly (0, 0) -- dropped joints, "
+                         "which the continuous loader does not handle")
+    w, h = SOURCE_SIZE
+    return Track(frame_ids=ids[:, 0].astype(np.int64),
+                 xy=xy * np.array([w, h]), fps=NATIVE_FPS["V6"], source="V6")
+
+
+def load_v6_spans(ann: Path) -> "list[Span]":
+    """Labelled V6 punches, sorted by start. Empty rows are dropped, not errors;
+    a row with a label but unusable frames IS an error, because silently losing
+    it would shrink the ground truth and flatter recall."""
+    import pandas as pd
+
+    df = pd.read_excel(Path(ann) / "V6.xlsx")
+    ccol = _class_column(df)
+    scol, ecol = _numeric_columns_left_of(df, ccol)
+    spans = []
+    for i, row in df.iterrows():
+        name = _normalise_label(row[ccol])
+        s = pd.to_numeric(row[scol], errors="coerce")
+        e = pd.to_numeric(row[ecol], errors="coerce")
+        if name is None:
+            if np.isfinite(s) or np.isfinite(e):
+                raise ValueError(f"V6 row {i}: frames without a punch label")
+            continue
+        if (not (np.isfinite(s) and np.isfinite(e)) or s < 0 or e < s
+                or s != int(s) or e != int(e)):
+            raise ValueError(f"V6 row {i}: unusable span {s!r}..{e!r}")
+        spans.append(Span(int(s), int(e), CLASSES.index(name)))
+    if not spans:
+        raise ValueError("V6: no labelled spans")
+    return sorted(spans, key=lambda sp: (sp.start, sp.end))
+
+
 def load_corpus(root: Path, include_v6: bool = False) -> "list[Clip]":
     """Load the released BoxingVI corpus into `Clip`s.
 
