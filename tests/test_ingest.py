@@ -346,6 +346,52 @@ raises("a Track with NaN confidence is refused",
                      conf=np.full((3, N_JOINTS), np.nan)))
 check("a Track with no confidence (V6) is still accepted",
       Track(np.arange(3), np.zeros((3, N_JOINTS, 2)), 30.0).conf is None)
+for tag_, over_, why_ in (("fps", {"fps": np.float64("nan")}, "finite"), ("width", {"width": np.float64(640.5)}, ("whole number", "width has dtype '<f8'")),
+                          ("height0", {"height": np.int64(0)}, "at least 1")):
+    pth_ = tmp / f"badscalar_{tag_}.npz"
+    np.savez(pth_, **({"xy": ps.xy, "conf": ps.conf, "detected": ps.detected, "fps": 60.0, "width": W, "height": H,
+                       "source": "x", "model": "x"} | over_))
+    try:
+        PoseSequence.load(pth_)
+        msg_ = "did not raise"
+    except ValueError as e_:
+        msg_ = str(e_)
+    why_ = why_ if isinstance(why_, tuple) else (why_,)  # the header check (#24) may fire first
+    check(f"a pose file with a bad {tag_} is refused before conversion, for that reason",
+          any(w_ in msg_ for w_ in why_), msg_)
+seq_fields = {"xy": ps.xy, "conf": ps.conf, "detected": ps.detected, "fps": 60.0, "width": W, "height": H,
+              "source": "x", "model": "x"}
+
+
+def seq_refusal(tag, over=None, drop=None):
+    pth_ = tmp / f"seq_{tag}.npz"
+    np.savez(pth_, **({k_: v_ for k_, v_ in seq_fields.items() if k_ != drop} | (over or {})))
+    try:
+        PoseSequence.load(pth_)
+        return "did not raise"
+    except ValueError as e_:
+        return str(e_)
+
+
+m_ = seq_refusal("mask2d", {"detected": np.ones((len(ps.detected), 17), bool)})
+check("a (F, 17) bool mask where the (F,) frame mask belongs is refused on load", "1-D bool" in m_ or "detected has shape (12, 17)" in m_, m_)
+m_ = seq_refusal("detint", {"detected": ps.detected.astype(np.int64)})
+check("an integer 'detected' is refused on load",
+      "1-D bool" in m_ or "detected has dtype '<i8'" in m_, m_)
+try:
+    PoseSequence(np.zeros_like(ps.xy), ps.conf, np.ones((len(ps.detected), 17), bool), 60.0, W, H)
+    m_ = "did not raise"
+except ValueError as e_:
+    m_ = str(e_)
+check("... and at construction (finite coordinates, so only the shape rule can refuse it)", "1-D per-frame mask" in m_, m_)
+m_ = seq_refusal("numsrc", {"source": np.int64(5)})
+check("a numeric source is refused, not turned into text", "source must be a single string" in m_ or "source has dtype '<i8'" in m_, m_)
+m_ = seq_refusal("vecmodel", {"model": np.array(["a", "b"])})
+check("a vector model is refused, not str()'d", "model must be a single string" in m_ or "model has shape (2,)" in m_, m_)
+m_ = seq_refusal("nodet", drop="detected")
+check("a missing 'detected' is a ValueError naming it", "'detected' is missing" in m_ or "missing detected" in m_, m_)
+m_ = seq_refusal("nosrc", drop="source")
+check("a missing 'source' is a ValueError naming it", "'source' is missing" in m_ or "missing source" in m_, m_)
 pickled = tmp / "evil.npz"
 np.savez(pickled, xy=np.array([{"a": 1}], dtype=object))
 raises("a pickled array in a pose file is refused (allow_pickle off)",
@@ -581,6 +627,40 @@ with np.load(f, allow_pickle=False) as z:
     check("... and identical to what np.load reads from the same file",
           all(np.array_equal(getattr(back, k), z[k], equal_nan=True)
               for k in ("xy", "conf", "detected")))
+import dataclasses  # noqa: E402
+fp_ps = video.fingerprint(clip)
+bound_ps = dataclasses.replace(ps, video_fp=fp_ps)
+bound_ps.save(tmp / "bound.pose.npz")
+check("a PoseSequence's video_fp round-trips; one written without it loads as ''",
+      PoseSequence.load(tmp / "bound.pose.npz").video_fp == fp_ps and PoseSequence.load(f).video_fp == "")
+raises("a malformed fingerprint on a PoseSequence is refused", lambda: dataclasses.replace(ps, video_fp="xyz"))
+try:
+    overlay.render_overlay(clip, dataclasses.replace(ps, video_fp="0" * 64), tmp / "fpno.mp4")
+    fp_msg = ""
+except ValueError as e:
+    fp_msg = str(e)
+check("the overlay refuses a pose whose fingerprint is another recording's", "fingerprint" in fp_msg, fp_msg)
+check("... and draws one whose fingerprint matches", overlay.render_overlay(clip, bound_ps, tmp / "fpok.mp4") == N)
+
+print("PoseSequence.load: video_fp through the bounded reader")
+legacy_ = pose_npz(tmp / "legacy_nofp.npz")  # no video_fp member at all
+check("a pose file with no video_fp member (written before fingerprints) loads as ''",
+      PoseSequence.load(legacy_).video_fp == "")
+rt_fp = PoseSequence.load(pose_npz(tmp / "fp_rt.npz", video_fp=fp_ps))
+check("a video_fp member read through the bounded reader round-trips exactly",
+      rt_fp.video_fp == fp_ps and np.array_equal(rt_fp.xy, ps.xy, equal_nan=True))
+refuses("a malformed video_fp in a pose file is refused",
+        lambda: PoseSequence.load(pose_npz(tmp / "fp_bad.npz", video_fp="XYZ")), "video_fp")
+refuses("a numeric video_fp is refused from its header",
+        lambda: PoseSequence.load(pose_npz(tmp / "fp_num.npz", video_fp=np.float64(1.0))),
+        "video_fp")
+refuses("a video_fp vector is refused from its header",
+        lambda: PoseSequence.load(pose_npz(tmp / "fp_vec.npz",
+                                           video_fp=np.array([fp_ps, fp_ps]))), "video_fp")
+refuses("an oversized video_fp header is refused before allocation",
+        lambda: PoseSequence.load(pose_npz(tmp / "fp_big.npz",
+                                           video_fp=npy_header_only((), "<U100000"))),
+        "video_fp")
 none = tmp / "none.mp4"
 none.write_bytes(b"")
 raises("extract on an unreadable video fails loudly", lambda: pose_yolo.extract(none, predict_all))
@@ -701,6 +781,7 @@ check("end to end: pose file and overlay both written",
       rc == 0 and (d / "clip.pose.npz").is_file() and (d / "clip.overlay.mp4").is_file())
 rt = PoseSequence.load(d / "clip.pose.npz")
 check("the written pose is the full video, fully detected", len(rt) == N and rt.detected.all())
+check("... and carries the fingerprint of the video it came from", rt.video_fp == video.fingerprint(clip))
 d2 = tmp / "outdir2"
 run_ingest.main(["--video", str(clip), "--out-dir", str(d2), "--no-overlay"], predict=predict_all)
 check("--no-overlay writes no video", not (d2 / "clip.overlay.mp4").exists())
