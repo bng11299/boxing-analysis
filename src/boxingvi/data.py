@@ -390,12 +390,15 @@ class Track:
 
     `frame_ids` are video frame indices, strictly increasing; a jump of more
     than one is a gap in the pose, and nothing may be differenced across it.
+    `conf` is (F, 17) joint confidence in [0, 1] when the pose model gives one
+    (YOLO11-pose), and None when the source has none (BoxingVI's V6).
     """
 
     frame_ids: np.ndarray
     xy: np.ndarray
     fps: float
     source: str = ""
+    conf: "np.ndarray | None" = None
 
     def __post_init__(self) -> None:
         f = np.asarray(self.frame_ids)
@@ -403,6 +406,10 @@ class Track:
             raise ValueError("a track needs a 1-D frame-id array of length >= 2")
         if self.xy.shape != (len(f), N_JOINTS, 2):
             raise ValueError(f"expected xy ({len(f)}, {N_JOINTS}, 2), got {self.xy.shape}")
+        if self.conf is not None and (
+                self.conf.shape != (len(f), N_JOINTS)
+                or not np.all((self.conf >= 0) & (self.conf <= 1))):  # NaN fails both
+            raise ValueError(f"conf must be ({len(f)}, {N_JOINTS}) in [0, 1]")
         if not np.all(np.diff(f) > 0):
             raise ValueError("frame ids must be strictly increasing")
         if not np.all(np.isfinite(self.xy)):
