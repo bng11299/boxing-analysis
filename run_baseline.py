@@ -148,13 +148,16 @@ def run_learned(xtr, ytr, xva, yva, epochs=30, seed=0, static=False,
 
 
 def run_stgcnpp(xtr, ytr, xva, yva, epochs=30, seed=0, t_out=50,
-                pretrained=None, spec=None, balanced=False):
+                pretrained=None, spec=None, balanced=False, save_to=None):
     """ST-GCN++, from scratch or fine-tuned from a PYSKL checkpoint.
 
     Both variants get the same optimiser -- AdamW with the backbone at 1e-3 and
     the fresh head at 1e-2 -- so the only thing separating them is where the
     backbone weights started. That is the comparison that tests whether the
     random forest wins for lack of data.
+
+    `save_to` writes the trained state_dict there, after scoring, so the saved
+    model is exactly the one the returned numbers describe (train_classifier.py).
     """
     import torch
     from torch.utils.data import DataLoader, TensorDataset
@@ -219,6 +222,8 @@ def run_stgcnpp(xtr, ytr, xva, yva, epochs=30, seed=0, t_out=50,
     if provenance:
         r["pretrained_from"] = {"path": Path(pretrained).name,
                                 "spec": (spec or {}).get("url"), **provenance}
+    if save_to is not None:
+        torch.save(model.state_dict(), save_to)
     return r
 
 
