@@ -33,6 +33,29 @@ Two further numbers are DESCRIPTIVE and no rate here divides by them:
                                      (whole video, both boxers, unattributed labels included), never a
                                      like-for-like comparison with the rates above
 Unexplained bursts are candidates; nothing about missed labels follows until the sample is classified.
+
+  python olympic_completeness.py --data data/olympic --tracks results/ingest/olympic --credited [--min-punches N]
+
+CREDITED FRAGMENTS (ADR-0012 Option 2): no linking, no ring, no identity. The test runs on every track id
+credited with at least N (default 1) labelled punches, each id being one person for its whole length
+(ByteTrack never gives one id to two people by design; an id switch inside a fragment is the tracker's
+residual error). Same matching (a fragment's own labels first, then the unattributed ones, each label
+once), same exposure, same rates, same seeded sample, which also carries what you need to FIND the
+person: track_id, the fragment's box centre and height at the burst frame (pixels) and the time as
+m:ss.s. Writes results/olympic_completeness_credited.json and ..._credited_sample.csv by default (the
+linking-based files are never overwritten). --reacquire is a linking option and is refused here.
+
+THE STATED LIMITS: this sees only credited fragments. Missed punches outside them (boxer time in
+fragments with no credited punch, punches too close to call) are never seen, so coverage can only lose;
+but fragment-level detections can DUPLICATE one physical punch when two overlapping ids follow the same
+person. So neither a bout-level upper nor a lower bound follows without de-duplication:
+`possible_duplicates` (per video and pooled) counts the unexplained bursts that have an unexplained twin
+in another credited fragment within 0.1 s whose box overlaps (IoU >= 0.3); it is reported, never
+subtracted. A clean result is weak evidence of completeness; a dirty one shows labels are missing inside
+the credited fragments, though the count may include duplicates. A credited fragment can be a non-boxer
+wrongly credited; the fragments with exactly one credited punch are the least certain and are counted.
+Attribution is computed once per video (olympic_link.load_video) and verified against the pose table
+inside the test.
 """
 
 from __future__ import annotations
@@ -52,6 +75,10 @@ from boxingvi import completeness, linking, olympic  # noqa: E402
 DEFAULT_OUT = Path("results/olympic_completeness.json")
 DEFAULT_SAMPLE = Path("results/olympic_completeness_sample.csv")
 SAMPLE_COLUMNS = ["video", "frame", "time_s", "boxer", "hand", "inclusion_prob", "user_label"]
+DEFAULT_OUT_CREDITED = Path("results/olympic_completeness_credited.json")
+DEFAULT_SAMPLE_CREDITED = Path("results/olympic_completeness_credited_sample.csv")
+SAMPLE_COLUMNS_CREDITED = ["video", "frame", "time_s", "time_mss", "track_id", "box_cx", "box_cy", "box_h", "hand",
+                           "inclusion_prob", "user_label"]
 
 
 def _ratio(num, den):
@@ -134,21 +161,148 @@ def totals(ok: "list[dict]") -> dict:
     return tot
 
 
+def video_row_credited(res: dict, n_events: int, video_min: float) -> dict:
+    """One video's UNROUNDED numbers from `completeness.find_bursts_credited` output."""
+    bursts = res["bursts"]
+    frags = [res["fragments"][t] | _boxer_rates(res["fragments"][t]["unexplained"], res["fragments"][t]["bursts"],
+                                                res["fragments"][t]["own_labels_in_exposure"],
+                                                res["fragments"][t]["exposure_min"])
+             for t in sorted(res["fragments"])]
+    return {"video_min": video_min, "labelled_punches": n_events, "labels": res["labels"],
+            "fragments_n": len(frags), "fragments_one_punch": sum(f["credited_punches"] == 1 for f in frags),
+            "bursts": len(bursts), "unexplained": sum(not b.explained for b in bursts),
+            "bursts_by_match": {m: sum(b.match == m for b in bursts) for m in completeness.MATCHES},
+            "bursts_hand_agrees": {"agree": sum(b.hand_agrees is True for b in bursts),
+                                   "disagree": sum(b.hand_agrees is False for b in bursts)},
+            "possible_duplicates": sum(b.possible_duplicate for b in bursts),
+            "possible_duplicate_pairs": res["possible_duplicate_pairs"],
+            "exposure_frames": sum(f["exposure_frames"] for f in frags),
+            "exposure_min": sum(f["exposure_min"] for f in frags),
+            "own_labels_in_exposure": sum(f["own_labels_in_exposure"] for f in frags),
+            "own_labels_outside_exposure": sum(f["own_labels_outside_exposure"] for f in frags),
+            "segments": sum(f["segments"] for f in frags), "short_segments": sum(f["short_segments"] for f in frags),
+            "bodyless_segments": sum(f["bodyless_segments"] for f in frags), "fragments": frags}
+
+
+def totals_credited(ok: "list[dict]") -> dict:
+    """Pool the per-video rows: counts and unrounded minutes summed, every rate divided once at the end.
+    The exposure is summed over fragments (two fragments on screen together are two people)."""
+    keys = ("labelled_punches", "fragments_n", "fragments_one_punch", "bursts", "unexplained", "possible_duplicates",
+            "possible_duplicate_pairs", "exposure_frames",
+            "exposure_min", "own_labels_in_exposure", "own_labels_outside_exposure", "segments", "short_segments",
+            "bodyless_segments")
+    tot = {"videos": len(ok), "video_min": sum(v["video_min"] for v in ok)} | {k: sum(v[k] for v in ok) for k in keys}
+    tot["bursts_by_match"] = {m: sum(v["bursts_by_match"][m] for v in ok) for m in completeness.MATCHES}
+    lab = {k: sum(v["labels"][k] for v in ok) for k in ok[0]["labels"]}
+    tot["labels"] = lab | {"unattributed_share": _ratio(lab["unattributed"], lab["total"]),
+                           "matched_to_a_burst": lab["matched_own"] + lab["matched_unattributed"]}
+    tot |= _boxer_rates(tot["unexplained"], tot["bursts"], tot["own_labels_in_exposure"], tot["exposure_min"])
+    tot["labels_per_video_boxer_min"] = _ratio(lab["total"], 2 * tot["video_min"])
+    return tot
+
+
+def _main_credited(a, rule, only) -> int:
+    videos, unexplained, failed = {}, {}, []
+    for t in olympic.find_tasks(a.data):
+        vid = t.video.stem
+        if (only is not None and vid not in only) or not (a.tracks / f"{vid}.tracks.npz").is_file():
+            continue
+        try:
+            table, _, events, attrs = olympic_link.load_video(t, a.tracks)
+            res = completeness.find_bursts_credited(table, events, attrs, rule, video=vid, min_punches=a.min_punches)
+        except (ValueError, FileNotFoundError, RuntimeError) as e:
+            videos[t.name] = {"error": str(e)}
+            failed.append(t.name)
+            print(f"{t.name}: FAILED, {e}")
+            continue
+        unexplained[vid] = [b for b in res["bursts"] if not b.explained]
+        row = video_row_credited(res, len(events), table.n_frames / table.fps / 60)
+        row["video_bound"] = bool(table.video_fp)
+        videos[t.name] = row
+        print(f"{t.name}: {row['fragments_n']} credited fragments, {row['bursts']} bursts, {row['unexplained']} unexplained "
+              f"in {row['exposure_min']:.1f} exposure min")
+    ok = [v for v in videos.values() if "error" not in v]
+    if not ok:
+        raise ValueError(f"nothing to test in {a.tracks} against {a.data}")
+    tot = totals_credited(ok)
+    sample, population = completeness.random_sample(unexplained, a.sample_size, a.seed)
+    prob = len(sample) / population if population else None
+    lab = tot["labels"]
+    summary = (f"CREDITED FRAGMENTS (min {a.min_punches} credited punch(es)): {tot['fragments_n']} fragments, "
+               f"{tot['fragments_one_punch']} with exactly one credited punch (least certain); {tot['bursts']} bursts in "
+               f"{_num(tot['exposure_min'])} exposure minutes (summed over fragments), {tot['unexplained']} unexplained, "
+               f"{tot['possible_duplicates']} of them with a possible twin in another fragment ({tot['possible_duplicate_pairs']} "
+               f"pairs), i.e. "
+               f"{_num(tot['unexplained_per_exposure_min'])} per exposure minute; {_num(tot['bursts_per_exposure_min'])} bursts and "
+               f"{_num(tot['own_labels_in_exposure_per_exposure_min'])} own labels (span touching the exposure) per exposure minute; "
+               f"labels: {lab['owned']} owned ({lab['owned_outside_exposure']} outside the exposure), {lab['unattributed']} of "
+               f"{lab['total']} ({_pct(lab['unattributed_share'])}) unattributed, {lab['credited_to_excluded']} credited to an excluded "
+               f"fragment; {lab['matched_to_a_burst']} matched to a burst ({lab['matched_own']} own, {lab['matched_unattributed']} "
+               f"unattributed). Different population: {_num(tot['labels_per_video_boxer_min'])} labels per whole-video boxer-minute. "
+               f"LIMITS: {completeness.BIAS_CREDITED} Unexplained bursts are candidates: nothing about missed labels follows "
+               f"until the sample is classified. -> {a.out}; sample of {len(sample)} of {population} -> {a.sample_out}")
+    out_json = json.dumps(
+        {"mode": "credited_fragments", "linking": None, "min_punches": a.min_punches, "rule": rule,
+         "tolerance_s": completeness.TOL_S, "bias": completeness.BIAS_CREDITED,
+         "matching": "one-to-one; optimal within each phase (most matches, then least total gap), a fragment's own labels first, "
+                     "then the unattributed labels, so not necessarily the global maximum; ties to the burst that sorts first "
+                     "(frame, track id); a label credited to an excluded fragment explains nothing; hand not required",
+         "exposure": "frames of processed segments of a credited fragment with a valid signal for at least one hand, bridged "
+                     "frames included; summed over fragments",
+         "videos": _round(videos), "all": _round(tot),
+         "sample": {"n": len(sample), "population_unexplained": population, "inclusion_prob": prob,
+                    "design": "simple random sample without replacement over all unexplained bursts",
+                    "seed": a.seed, "file": str(a.sample_out)}},
+        indent=1, allow_nan=False)
+    sample_rows = [[b.video, b.frame, f"{b.time_s:.2f}", completeness.mss(b.time_s), b.track_id, f"{b.box[0]:.1f}",
+                    f"{b.box[1]:.1f}", f"{b.box[2]:.1f}", b.hand, f"{prob:.6f}", ""] for b in sample]
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    a.out.write_text(out_json, encoding="utf-8")
+    a.sample_out.parent.mkdir(parents=True, exist_ok=True)
+    with a.sample_out.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(SAMPLE_COLUMNS_CREDITED)
+        w.writerows(sample_rows)
+    print(summary)
+    return 1 if failed else 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, required=True)
     ap.add_argument("--tracks", type=Path, required=True)
     ap.add_argument("--rule", type=Path, default=find_punches.DEFAULT_RULE)
-    ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    ap.add_argument("--sample-out", type=Path, default=DEFAULT_SAMPLE)
+    ap.add_argument("--out", type=Path, default=None,
+                    help=f"default {DEFAULT_OUT}, or {DEFAULT_OUT_CREDITED} with --credited")
+    ap.add_argument("--sample-out", type=Path, default=None,
+                    help=f"default {DEFAULT_SAMPLE}, or {DEFAULT_SAMPLE_CREDITED} with --credited")
     ap.add_argument("--sample-size", type=int, default=completeness.SAMPLE_N)
     ap.add_argument("--seed", type=int, default=completeness.SAMPLE_SEED)
     ap.add_argument("--reacquire", action="store_true",
                     help="link across gaps of up to 60 s (see olympic_link.py --reacquire); off = as first specified")
     ap.add_argument("--only", nargs="+", metavar="ID")
+    ap.add_argument("--credited", action="store_true",
+                    help="ADR-0012 Option 2: test only fragments (track ids) credited with a labelled punch; no linking")
+    ap.add_argument("--min-punches", type=int, default=None, metavar="N",
+                    help="with --credited: the fewest credited punches a fragment needs (default 1)")
     a = ap.parse_args(argv)
+    if a.credited and a.reacquire:
+        ap.error("--reacquire is a linking option; --credited does no linking")
+    if a.min_punches is not None and not a.credited:
+        ap.error("--min-punches needs --credited")
+    if a.credited and (a.min_punches is not None and a.min_punches < 1):
+        ap.error("--min-punches must be a whole number >= 1")
+    a.min_punches = 1 if a.min_punches is None else a.min_punches
+    if a.out is None:
+        a.out = DEFAULT_OUT_CREDITED if a.credited else DEFAULT_OUT
+    if a.sample_out is None:
+        a.sample_out = DEFAULT_SAMPLE_CREDITED if a.credited else DEFAULT_SAMPLE
+    if a.out == a.sample_out:
+        ap.error("--out and --sample-out are the same file")
 
     rule = find_punches.load_rule(a.rule)
+    if a.credited:
+        return _main_credited(a, rule, {olympic_link._check_video_id(v) for v in a.only} if a.only else None)
     params = linking.LinkParams(reacquire_s=linking.REACQUIRE_ON_S if a.reacquire else 0.0)
     only = {olympic_link._check_video_id(v) for v in a.only} if a.only else None
     videos, unexplained, failed = {}, {}, []
