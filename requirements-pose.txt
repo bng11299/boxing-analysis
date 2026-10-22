@@ -1,3 +1,7 @@
 # Pose step only; the rest of the repo needs none of this.
-# On the CUDA machine, install the CUDA build of torch FIRST, then this.
+# Install with scripts\setup-env.ps1, never a bare `pip install -r`: torch and
+# torchvision must come from the PyTorch index as ONE build (+cpu or +cu130).
+# ultralytics needs torchvision; left to PyPI, pip picks the newest (0.29.x),
+# which requires torch>=2.14 and replaces the CUDA torch with a CPU-only one.
 ultralytics==8.4.171
+torchvision==0.28.0
