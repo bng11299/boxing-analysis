@@ -1079,9 +1079,10 @@ classify_punches also applies #14's pooled check. Otherwise it keeps the own-han
     peak are judged on the two hands' max.
 - **Why it is safe to let the sidecar choose:** the sidecar only TIGHTENS. True and None
   (missing, stale, forged, another clip or rule) both get the own-hand check, which every finder
-  passes, so a bad sidecar can never loosen the check. A forged `false` needs the CSV's exact
-  sha256 and could at worst refuse the CSV. `finder_per_hand`'s docstring says so; it no longer
-  says "never trusted for anything else".
+  passes, so a bad sidecar can never loosen the check. A forged `false` could at worst refuse the
+  CSV. The sha256 catches a stale sidecar but authenticates nothing: anyone holding the CSV can
+  compute it, so the safety is that `false` only tightens. `finder_per_hand`'s docstring says so;
+  it no longer says "never trusted for anything else".
 - **Tests (classify 262 to 274):**
   - Unit cases, each passing the own check and refused by the pooled one:
     - the review's left [0, 5, 3] / right [6, 1, 0], a faster hand's peak that is not a peak of
@@ -1111,4 +1112,26 @@ classify_punches also applies #14's pooled check. Otherwise it keeps the own-han
 - **Real data:** the stricter check accepted every row of the pooled finder's real output. That is
   41 rows on IMG_4406 and 42 on IMG_4395, at both point tolerances, each with a verified
   `per_hand: false` sidecar, so the check ran. Every number in iteration 3's table is unchanged.
-- **Tests:** hands 73, classify 274, pipeline 260, labels 50, ingest 109, env 36.
+- **Review of b9bebaf (code-reviewer agent): FIX FIRST, 1 blocking, a test gap; the code was
+  correct.**
+  - **Nothing tested that a row on a plateau is accepted.** `find_peaks` reports the middle of a
+    flat top, whose neighbour is EQUAL. So `>` to `>=` in any of the four neighbour clauses would
+    refuse genuine finder output, the worst failure this check can have, and all 274 still passed.
+  - **The fix:** a 3-long and a 2-long plateau, with the row taken from scipy's own `find_peaks`
+    (what `detect` calls), must pass both checks.
+  - **Mutants Q1-Q4 (`>` to `>=` in each neighbour clause): 4 of 4 killed**, each by the plateau
+    cases.
+- **What the reviewer verified by construction:** no false refusal of genuine output.
+  - A fuzz of `detect` on 20,000 random tracks with gaps, quantised speeds (so plateaus and ties),
+    thresholds 0-3 and gaps 0-0.2 s: of 36,434 pooled and 79,956 per-hand rows, 0 refused by
+    either check.
+  - 150 synthetic poses through `find_punches.main` and `classify_punches.main`, at 24, 30 and
+    60 fps, pooled with verified sidecars and per hand: 0 of 1,796 rows refused.
+  - **Why none can be:** `find_peaks` never reports the first or last sample of the segment it is
+    given, so the neighbour comparison never crosses a frame-id gap.
+- **Also from the review:**
+  - The hash wording no longer reads as authentication: it detects staleness only.
+  - The edges test is renamed for what it guards, no wrap-around at the first and last rows.
+  - **Noted, not changed:** both checks accept a row on a track's or segment's first or last row,
+    which the finder never emits. Tightening that is possible but out of scope.
+- **Tests:** hands 73, classify 276, pipeline 260, labels 50, ingest 109, env 36.

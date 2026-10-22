@@ -90,9 +90,10 @@ def finder_per_hand(punches: Path, clip: str, rule: dict) -> "bool | None":
     """Whether find_punches.py made this CSV with --per-hand, from the <clip>.punches.json
     it wrote beside it. None (unknown) when that file is missing, unreadable, for another
     clip or another rule than this run's, or describes other bytes than the CSV now holds,
-    so a stale or hand-made one cannot lend the CSV a provenance. It is recorded, and used
-    only to TIGHTEN the row check (False: the pooled finder's check too); True and None get
-    the check every finder passes, so a forged or missing sidecar can never loosen it."""
+    so a stale one cannot lend the CSV a provenance. (The hash detects staleness; it
+    authenticates nothing, since anyone holding the CSV can compute it.) It is recorded, and
+    used only to TIGHTEN the row check (False: the pooled finder's check too); True and None
+    get the check every finder passes, so a forged or missing sidecar can never loosen it."""
     side = punches.with_suffix(".json")
     try:
         if not side.is_file() or side.stat().st_size > 64_000:

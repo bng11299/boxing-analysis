@@ -1183,7 +1183,15 @@ check("an exact tie: the pooled finder names the left (np.argmax), so a right-ha
 s_ = sg([0, 6, 0], [0, 3, 0])
 check("the pooled check still needs the threshold and a strict neighbourhood",
       not pooled(s_, 1, 0, 6.5) and pooled(s_, 1, 0, 6.0) and not pooled(sg([0, 6, 7], [0, 0, 0]), 1, 0, 1.0))
-check("edges: a peak on the first or last row is judged on its one neighbour",
+from scipy.signal import find_peaks  # noqa: E402 -- what punchfind.detect calls
+
+for left, right in (([0, 4, 4, 4, 0], [0, 1, 1, 1, 0]), ([0, 4, 4, 0], [0, 1, 1, 0])):
+    s_ = sg(left, right)
+    pk_pooled, pk_own = find_peaks(s_.max(axis=1))[0], find_peaks(s_[:, 0])[0]
+    check(f"a flat-topped peak {left}: the row find_peaks reports (equal neighbours) passes both checks",
+          len(pk_pooled) == 1 and list(pk_pooled) == list(pk_own)
+          and own(s_, int(pk_pooled[0]), 0, 1.0) and pooled(s_, int(pk_pooled[0]), 0, 1.0), str(pk_pooled))
+check("the first and last rows are judged on their one neighbour (no wrap-around to the other end)",
       pooled(sg([6, 3], [0, 0]), 0, 0, 1.0) and pooled(sg([3, 6], [0, 0]), 1, 0, 1.0)
       and not pooled(sg([3, 6], [0, 0]), 0, 0, 1.0))
 check("own-hand check: no speed, below threshold, or a faster neighbour of that hand are refused",
