@@ -124,7 +124,7 @@ def main(argv=None) -> int:
         return classify.cut_span(track, e.start, e.end, geom, torso).keypoints
 
     def clip_window(peak: int, c: classify.ClipCut):
-        return classify.cut_span(track, *classify.clip_window(peak, c, track.fps), geom, torso).keypoints
+        return classify.read_clip_window(track, peak, c, geom, torso)[0].keypoints
 
     # The labelled punches' peaks (a perfect finder), and every punch the finder detected (the pipeline).
     peaks = {}
