@@ -244,6 +244,29 @@ def iter_frames(path, info: "VideoInfo | None" = None, max_frames: "int | None" 
                            f"{w}x{h} frames ({len(tail)} stray bytes after frame {n})")
 
 
+_LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+
+def frame_change(path, info: "VideoInfo | None" = None, step: int = 4) -> np.ndarray:
+    """One number per frame: the mean absolute difference between the grey image of frame f and of
+    frame f-1 (NaN for frame 0), on every `step`-th pixel in each direction. The video is decoded
+    once, by `iter_frames`, so entry f is the f-th frame the file holds.
+
+    Why: a camera that drops captured frames still writes regular timestamps (the packet timing
+    `probe` checks is clean), but what is on screen jumps forward in one frame. That jump is the
+    only trace, and it is this number that spikes (see `skips.find_skips`). It is ONE aggregate
+    number per frame: no pixel, crop or thumbnail leaves this function."""
+    if isinstance(step, bool) or not isinstance(step, (int, np.integer)) or step < 1:
+        raise ValueError("step must be a whole number >= 1")
+    out: "list[float]" = []
+    prev = None
+    for frame in iter_frames(path, info):
+        grey = frame[::step, ::step].astype(np.float32) @ _LUMA
+        out.append(float("nan") if prev is None else float(np.abs(grey - prev).mean()))
+        prev = grey
+    return np.array(out, dtype=np.float64)
+
+
 class VideoWriter:
     """H.264 mp4 writer fed raw RGB frames. Use as a context manager."""
 
