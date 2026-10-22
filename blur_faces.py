@@ -47,7 +47,7 @@ from boxingvi.video import probe  # noqa: E402
 DET_CONF = 0.10  # lower than ingest's 0.25: a false person only adds blur, a missed one leaks a face
 
 
-def main(argv=None, predict=None, location_kwargs=None) -> int:
+def main(argv=None, predict=None, location_kwargs=None, detect_faces=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--video", type=Path, required=True)
@@ -58,12 +58,19 @@ def main(argv=None, predict=None, location_kwargs=None) -> int:
     ap.add_argument("--det-conf", type=float, default=DET_CONF, help="person detection threshold")
     ap.add_argument("--expect-persons", type=int, default=0,
                     help="frames with fewer people than this are blurred whole")
+    ap.add_argument("--face-detector", choices=("centerface", "none"), default="centerface",
+                    help="face boxes that, where they agree with the keypoints, replace the "
+                         "box floor for that person (deface's CenterFace, pinned by sha256)")
+    ap.add_argument("--face-thresh", type=float, default=faceblur.FACE_DET_THRESH,
+                    help="face detection threshold")
     ap.add_argument("--allow-outside-participant-root", action="store_true",
                     help="NOT for participant footage: write outside ~/comps-participant-data/")
     ap.add_argument("--overwrite", action="store_true")
     a = ap.parse_args(argv)
     if not 0 < a.det_conf < 1:
         ap.error("--det-conf must lie in (0, 1)")
+    if not 0 < a.face_thresh < 1:
+        ap.error("--face-thresh must lie in (0, 1)")
     if a.expect_persons < 0:
         ap.error("--expect-persons must be >= 0")
 
@@ -91,7 +98,11 @@ def main(argv=None, predict=None, location_kwargs=None) -> int:
         os.environ["YOLO_OFFLINE"] = "1"
         model = pose_yolo.load_yolo(a.weights, a.weights_sha256, a.device)
         predict = pose_yolo.yolo_predictor(model, a.det_conf, a.device, missing_conf=0.0)
+        if a.face_detector == "centerface" and detect_faces is None:
+            detect_faces = faceblur.load_centerface(a.face_thresh)
     name = a.weights.name if a.weights else "injected"
+    face_model = ("centerface (deface 1.5.0)" if a.face_detector == "centerface"
+                  and detect_faces is not None else None)
 
     def recheck(path):  # the folder may have changed during a long first pass
         faceblur.check_output_location(path, input_path=a.video, overwrite=a.overwrite, **loc)
@@ -103,7 +114,9 @@ def main(argv=None, predict=None, location_kwargs=None) -> int:
         r = faceblur.blur_video(a.video, out, predict, info=info, expect_persons=a.expect_persons,
                                 model_name=name, progress=print, recheck=recheck,
                                 report_extra={"outside_participant_root":
-                                              a.allow_outside_participant_root})
+                                              a.allow_outside_participant_root},
+                                detect_faces=detect_faces if face_model else None,
+                                face_model=face_model or "")
     except faceblur.UnsafeOutput as e:
         print(f"REFUSED at the end, nothing written: {e}", file=sys.stderr)
         return 2

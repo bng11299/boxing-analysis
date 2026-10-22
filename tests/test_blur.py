@@ -564,6 +564,113 @@ for t in range(1000):
 check("every planted face is covered and destroyed under every degradation", not bad,
       f"{len(bad)} bad, e.g. {bad[:3]}")
 
+print("hybrid: a face detector's tight box only where it AGREES with the keypoints")
+
+
+def fdet(cx, cy, r=FACE, score=0.9):
+    """A CenterFace-like detection hugging a planted face (cheek to cheek, brow to chin)."""
+    return [cx - r + 2, cy - r, cx + r - 2, cy + r, score]
+
+
+one = scene([A])
+p = faceblur.plan_frame(pred_of([person(*A)]), W, H, face_dets=[fdet(*A)])
+out = faceblur.apply_plan(one, p)
+m = faceblur.blurred_mask(p, H, W)
+floor_only = faceblur.plan_frame(pred_of([person(*A)]), W, H)
+check("agreed face: mode 'detected', the face destroyed",
+      p.mode == "detected" and p.agreed == 1 and destroyed(one, out, *A), str(p))
+check("... only the face box is mosaicked: the neck, shoulders and guard stay visible",
+      not m[A[1] + FACE + 6:A[1] + 120, A[0] - 30:A[0] + 30].any()
+      and m.sum() < 0.6 * faceblur.blurred_mask(floor_only, H, W).sum(),
+      f"{m.sum()} px vs {faceblur.blurred_mask(floor_only, H, W).sum()} px with the floor")
+p = faceblur.plan_frame(pred_of([person(*A)]), W, H, face_dets=[fdet(A[0] + 25, A[1] + 45)])
+out = faceblur.apply_plan(scene([A]), p)
+check("a decoy box on the glove (nose and eyes not inside it): fallback, face destroyed",
+      p.mode == "keypoints" and p.agreed == 0 and destroyed(scene([A]), out, *A), str(p))
+check("... and the decoy is still blurred (an unclaimed face box only adds)",
+      faceblur.blurred_mask(p, H, W)[A[1] + 45, A[0] + 25])
+noface_kp = person(*A)
+noface_kp[2][list(faceblur.FACE_JOINTS)] = 0.1
+p = faceblur.plan_frame(pred_of([noface_kp]), W, H, face_dets=[fdet(*A)])
+check("a detection but no confident face keypoints: no agreement, the box floor",
+      p.mode == "box" and p.agreed == 0 and covered(p, *A), str(p))
+one_pt = person(*A, conf=0.05)
+one_pt[2][faceblur.NOSE] = 0.9
+p = faceblur.plan_frame(pred_of([one_pt]), W, H, face_dets=[fdet(*A)])
+check("one confident face point (head not measurable): no agreement, fallback",
+      p.agreed == 0 and covered(p, *A), str(p))
+p = faceblur.plan_frame(pred_of([person(*A)]), W, H, face_dets=[[A[0] - 3, A[1] - 6, A[0] + 3, A[1] + 4, 0.9]])
+check("a box hugging only the nose and eyes (narrower than half the head): fallback",
+      p.agreed == 0 and covered(p, *A), str(p))
+p = faceblur.plan_frame(pred_of([person(*A)]), W, H, face_dets=[fdet(A[0] + 14, A[1])])
+out = faceblur.apply_plan(scene([A]), p)
+check("a box beside the face (eyes not all inside it): fallback, face destroyed",
+      p.agreed == 0 and destroyed(scene([A]), out, *A), str(p))
+p = faceblur.plan_frame(pred_of([person(*A), person(*B)]), W, H, face_dets=[fdet(*A)])
+out = faceblur.apply_plan(two, p)
+check("two people, only A detected: A gets the tight box, B the floor, both destroyed",
+      p.agreed == 1 and p.mode == "keypoints" and destroyed(two, out, *A) and destroyed(two, out, *B),
+      str(p))
+C = (240, 190)
+three = scene([A, C])
+p = faceblur.plan_frame(pred_of([person(*A)]), W, H, face_dets=[fdet(*A), fdet(*C, r=10)])
+check("a detected face with no person around it (YOLO missed them) is blurred too",
+      destroyed(three, faceblur.apply_plan(three, p), *C, r=10), str(p))
+for name, junk in (("NaN", [[np.nan, 0, 10, 10, 0.9]]), ("score above 1", [fdet(*A, score=1.5)]),
+                  ("wrong shape", [[1, 2, 3]]), ("garbage", "not detections")):
+    p = faceblur.plan_frame(pred_of([person(*A)]), W, H, face_dets=junk)
+    check(f"malformed detections ({name}): ignored -- the fallback, never less",
+          p.agreed == 0 and p.mode == "keypoints" and covered(p, *A), str(p))
+# Review D1: arms up, YOLO's face points AND a CenterFace box both on the raised glove,
+# the real face undetected. Agreement dropped the arms-up floor: 0% of the head.
+glove_det = [118.0, 36.0, 142.0, 66.0, 0.6]
+p = faceblur.plan_frame((up_box[None], up_k[None], up_c[None]), W3, H3, face_dets=[glove_det])
+out = faceblur.apply_plan(up_scene, p)
+check("arms up, face points and a face box both on the glove: the real head is still covered (was 0%)",
+      covered(p, 130, 160, 15, H3, W3) and destroyed(up_scene, out, 130, 160, 15), str(p))
+# Review D2: in guard the glove at the cheek fools both models; the real face is
+# missed. A confident wrist inside the face box vetoes the agreement.
+decoy = person(*A)
+gx, gy = A[0] + 16, A[1] + 6  # glove beside the face
+decoy[1][list(faceblur.FACE_JOINTS)] = [(gx, gy + 2), (gx - 5, gy - 3), (gx + 5, gy - 3), (gx - 10, gy), (gx + 10, gy)]
+decoy[1][faceblur.R_WRIST] = (gx, gy)
+p = faceblur.plan_frame(pred_of([decoy]), W, H, face_dets=[fdet(gx, gy)])
+out = faceblur.apply_plan(scene([A]), p)
+check("guard, face points and a face box on the glove, wrist inside the box: no agreement, head covered",
+      p.agreed == 0 and destroyed(scene([A]), out, *A), str(p))
+profile = person(*A)
+profile[2][faceblur.R_EYE] = 0.1  # three-quarter view: nose, one eye, ears
+p = faceblur.plan_frame(pred_of([profile]), W, H, face_dets=[fdet(*A)])
+check("a three-quarter face (one eye) never drops the floor, even with a matching box",
+      p.agreed == 0 and covered(p, *A), str(p))
+rng_h = np.random.default_rng(11)
+hy_bad = []
+for t in range(1000):
+    centres = [(int(60 + 100 * i + rng_h.integers(-6, 6)), int(40 + rng_h.integers(0, 30)))
+               for i in range(int(rng_h.integers(1, 4)))]
+    people, dets = [], []
+    for c in centres:
+        b, kx, _ = person(*c)
+        people.append((b, kx, rng_h.uniform(0, 1, N_JOINTS)))  # keypoints right, confidence random
+        kind = rng_h.choice(["face", "decoy", "none", "tiny", "shifted"])
+        if kind == "face":
+            dets.append(fdet(*c, score=rng_h.uniform(0.2, 1)))
+        elif kind == "decoy":
+            dets.append(fdet(c[0] + rng_h.integers(-30, 30), c[1] + rng_h.integers(20, 120)))
+        elif kind == "tiny":
+            dets.append([c[0] - 2, c[1] - 2, c[0] + 2, c[1] + 2, 0.9])
+        elif kind == "shifted":
+            dx, dy = rng_h.integers(-14, 15, 2)
+            dets.append(fdet(c[0] + dx, c[1] + dy))
+    p = faceblur.plan_frame(pred_of(people), W, H, int(rng_h.integers(0, 4)),
+                            bool(rng_h.random() < 0.1), dets)
+    frame = scene(centres)
+    outf = faceblur.apply_plan(frame, p)
+    if not all(covered(p, *c) and destroyed(frame, outf, *c) for c in centres):
+        hy_bad.append((t, p.mode, p.agreed, centres))
+check("hybrid, 1000 random scenes (detections right, decoy, missing, tiny or shifted): "
+      "every planted face covered and destroyed", not hy_bad, f"{len(hy_bad)} bad, e.g. {hy_bad[:3]}")
+
 print("where output may go")
 safe = tmp / "safe"
 safe.mkdir()
@@ -820,6 +927,45 @@ faceblur.sha256_file = _shifty_sha
 leaves_nothing("input replaced between the two passes",
                lambda o: faceblur.blur_video(clip, o, make_predict()[0]), RuntimeError)
 faceblur.sha256_file = real_sha
+
+print("hybrid end to end")
+hdir = tmp / "hybrid"
+hdir.mkdir()
+fstate = {"i": 0}
+
+
+def good_faces(frame):
+    i = fstate["i"]
+    fstate["i"] += 1
+    return [fdet(*c) for c in centres[i]]
+
+
+def broken_faces(frame):
+    raise RuntimeError("detector fell over")
+
+
+handed.clear()
+hrep = faceblur.blur_video(clip, hdir / "h.mp4", make_predict(drop_at=-1, raise_at=-1)[0],
+                           detect_faces=good_faces, face_model="fake", writer_factory=SpyWriter)
+check("agreed faces are counted, and every frame handed to the encoder has both faces destroyed",
+      hrep["persons_face_agreed"] == 2 * N and hrep["persons_fallback"] == 0
+      and hrep["frames_by_mode"]["detected"] == N
+      and all(destroyed(frames_in[i], handed[i], *c) for i in range(N) for c in centres[i]),
+      json.dumps({k: hrep[k] for k in ("persons_face_agreed", "persons_fallback", "frames_by_mode")}))
+brep = faceblur.blur_video(clip, hdir / "b.mp4", make_predict(drop_at=-1, raise_at=-1)[0],
+                           detect_faces=broken_faces, face_model="fake")
+check("a face detector that raises on every frame: errors counted, everyone falls back",
+      brep["face_detector_errors"] == N and brep["persons_face_agreed"] == 0
+      and brep["frames_by_mode"]["detected"] == 0 and brep["frames_by_mode"]["full"] == 0,
+      json.dumps({k: brep[k] for k in ("face_detector_errors", "frames_by_mode")}))
+
+try:
+    faceblur.load_centerface(sha256="0" * 64)
+    check("the face-detector model is refused unless its sha256 matches the pin", False, "loaded")
+except ValueError:
+    check("the face-detector model is refused unless its sha256 matches the pin", True)
+except RuntimeError:  # deface not installed here: the refusal path is unreachable, say so
+    print("  SKIP  deface not installed")
 
 print("the CLI")
 cli_dir = tmp / "cli"

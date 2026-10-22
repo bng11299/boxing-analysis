@@ -59,7 +59,7 @@ from pathlib import Path
 import numpy as np
 
 from .data import N_JOINTS
-from .punchfind import L_SHOULDER, R_SHOULDER
+from .punchfind import L_SHOULDER, L_WRIST, R_SHOULDER, R_WRIST
 from .video import VideoInfo, VideoWriter, iter_frames, probe
 
 NOSE, L_EYE, R_EYE, L_EAR, R_EAR = 0, 1, 2, 3, 4
@@ -120,8 +120,17 @@ NEIGHBOUR_S = 0.25     # a person seen within this many seconds must be found he
 MATCH_IOU = 0.1        # ... as a box overlapping theirs by at least this much,
 MATCH_TOP = 0.25       # ... whose top edge is within this much (x their height) of theirs
 MAX_COORD = 1e5        # a coordinate beyond this is not a pixel position
+# Face detector (deface's CenterFace, MIT): its boxes are tight, so where it and the
+# keypoints AGREE on a face only that box is blurred and the guard stays visible. On
+# its own it missed real faces mid-punch and in profile (own footage, 2026-10-21), so
+# it never removes blur by itself.
+FACE_DET_THRESH = 0.2  # deface's default
+FACE_DET_PAD = 1.3     # deface's default mask scale
+DET_MIN_HW = 0.5       # a detection narrower than half the measured head is not the face
+FRONTAL_HALF = 0.6     # agreed frontal face: the box plus a 1.2-head-width square on the face
+CENTERFACE_SHA256 = "09189deaaf8646c5c51a68447e3c744ea1e211798155d4728c20507b9f5aefbc"  # deface 1.5.0
 
-MODES = ("keypoints", "box", "full")
+MODES = ("detected", "keypoints", "box", "full")
 # Folder names of sync clients: distinctive ones match as a prefix ("OneDrive -
 # Contoso"), generic ones only exactly (so "boxing" is not "Box").
 CLOUD_PREFIXES = ("onedrive", "google drive", "dropbox", "icloud drive", "iclouddrive",
@@ -142,13 +151,15 @@ class UnsafeOutput(ValueError):
 @dataclass(frozen=True)
 class FramePlan:
     """What happens to one frame. `regions` are clipped pixel boxes (x0, y0, x1, y1),
-    half-open; empty for mode "full", which blurs everything. Per person, the box
-    patch comes first, then the face patch if any. Mode "keypoints": every person
-    also had a face patch; "box": at least one had only the box patch."""
+    half-open; empty for mode "full", which blurs everything. Mode "detected": every
+    person's face was agreed on by the face detector and the keypoints, so only face
+    boxes are blurred; "keypoints": someone fell back to the box floor + face patch;
+    "box": someone had only the box floor. `agreed` counts persons in the first case."""
     mode: str
     regions: "tuple[tuple[int, int, int, int], ...]"
     persons: int
     reason: str = ""
+    agreed: int = 0
 
 
 class PredictorError:
@@ -349,11 +360,17 @@ def _full(persons: int, reason: str) -> FramePlan:
 
 
 def plan_frame(pred, width: int, height: int, expected_persons: int = 0,
-               neighbour_missing: bool = False) -> FramePlan:
+               neighbour_missing: bool = False, face_dets=None) -> FramePlan:
     """Decide how one frame is blurred. `pred` is the predictor's output, or a
     `PredictorError` instance. `neighbour_missing`: a person in a nearby frame has no
     counterpart here (`missing_vs_neighbours`). `expected_persons`: the operator's
-    --expect-persons; fewer here is a miss."""
+    --expect-persons; fewer here is a miss. `face_dets`: a face detector's boxes for
+    this frame (`validate_face_dets`), or None for none."""
+    if face_dets is not None:
+        try:
+            face_dets = validate_face_dets(face_dets, width, height)
+        except ValueError:
+            face_dets = None  # no detections: less trust, never less blur
     if isinstance(pred, PredictorError):
         return _full(0, "predictor_error")
     if isinstance(pred, InvalidPrediction):
@@ -364,12 +381,14 @@ def plan_frame(pred, width: int, height: int, expected_persons: int = 0,
         return _full(0, "invalid_prediction")
     n = len(boxes)
     try:
-        return _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_missing)
+        return _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_missing,
+                            face_dets)
     except ArithmeticError:  # overflow in a size computation: no partial plan, blur it all
         return _full(n, "invalid_prediction")
 
 
-def _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_missing):
+def _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_missing,
+                 face_dets=None):
     n = len(boxes)
     if n == 0:
         return _full(0, "no_person")
@@ -401,11 +420,35 @@ def _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_miss
             if (math.dist(fi.centre, fj.centre) <= max(fi.half, fj.half)
                     or _inside(fi.centre, boxes[j]) or _inside(fj.centre, boxes[i])):
                 return _full(n, "ambiguous_faces")
-    # The box patch is the FLOOR for every person; a face patch is added on top. No
-    # keypoint can shrink what the box alone would blur, so a confidently wrong
-    # skeleton costs extra blur, never a bare head (blocker report, option 1).
-    regions, any_box = [], False
+    # A person whose face TWO independent models agree on (a face-detector box and
+    # YOLO's confident face keypoints) gets just that face box, padded. Everyone else
+    # gets the box FLOOR with a face patch on top: no keypoint can shrink what the box
+    # alone would blur (blocker report, option 1), and no lone detector can either.
+    dets = np.zeros((0, 5)) if face_dets is None else face_dets
+    used, regions, any_box, agreed = set(), [], False, 0
     for i in range(n):
+        k = _agreeing_face(faces[i], boxes[i], kxy[i], kc[i], dets, used)
+        if k is not None:
+            used.add(k)
+            r = det_region(dets[k], width, height)
+            if r is None:
+                return _full(n, "empty_region")
+            # Never the detector's box alone: with only one side of the face
+            # confident, a box shifted that way "agrees" and misses the other side
+            # (79 of 1000 random scenes). So add the keypoints' own estimate: a tight
+            # square on a frontal face (nose and both eyes), else the head patch.
+            regions += [r, _frontal_square(boxes[i], kxy[i], kc[i], width, height)
+                        or faces[i].region]
+            bw_i, bh_i = boxes[i][2] - boxes[i][0], boxes[i][3] - boxes[i][1]
+            if bh_i >= ARMS_UP_ASPECT * bw_i:
+                # Arms up: the deep floor holds whatever the keypoints AND the face
+                # detector say -- a glove can fool both (review D1, 0% otherwise).
+                floor = box_floor_region(boxes[i], width, height, kxy[i], kc[i])
+                if floor is None:
+                    return _full(n, "empty_region")
+                regions.append(floor)
+            agreed += 1
+            continue
         r = box_floor_region(boxes[i], width, height, kxy[i], kc[i])
         if r is None:  # cannot happen for a validated box; fail closed regardless
             return _full(n, "empty_region")
@@ -414,7 +457,94 @@ def _plan_people(boxes, kxy, kc, width, height, expected_persons, neighbour_miss
             regions.append(faces[i].region)
         else:
             any_box = True
-    return FramePlan("box" if any_box else "keypoints", tuple(regions), n)
+    for k in range(len(dets)):  # a face no person claimed is blurred all the same
+        if k not in used:
+            r = det_region(dets[k], width, height)
+            if r is not None:
+                regions.append(r)
+    mode = "detected" if agreed == n else ("box" if any_box else "keypoints")
+    return FramePlan(mode, tuple(regions), n, agreed=agreed)
+
+
+def validate_face_dets(dets, width: int, height: int) -> np.ndarray:
+    """Face-detector output as (K, 5) float64 [x0, y0, x1, y1, score], clipped to the
+    frame; raise ValueError on anything else (the caller then uses no detections,
+    which only means less trust, never less blur)."""
+    try:
+        d = np.asarray(dets, dtype=np.float64)
+    except (TypeError, ValueError) as e:
+        raise ValueError("face detections are not an array") from e
+    if d.size == 0:
+        return np.zeros((0, 5))
+    if d.ndim != 2 or d.shape[1] < 5 or not np.all(np.isfinite(d[:, :5])):
+        raise ValueError(f"bad face detections {d.shape}")
+    d = d[:, :5].copy()
+    if np.abs(d[:, :4]).max() > MAX_COORD or not np.all((d[:, 4] >= 0) & (d[:, 4] <= 1)):
+        raise ValueError("face detection out of range")
+    d[:, [0, 2]] = d[:, [0, 2]].clip(0, width)
+    d[:, [1, 3]] = d[:, [1, 3]].clip(0, height)
+    return d[(d[:, 2] > d[:, 0]) & (d[:, 3] > d[:, 1])]
+
+
+def det_region(det, width, height):
+    """A detected face box grown FACE_DET_PAD times about its centre (deface's mask
+    scale, as a rectangle, which covers its ellipse)."""
+    x0, y0, x1, y1 = det[:4]
+    cx, cy, hw, hh = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2
+    return _clip_region(cx - FACE_DET_PAD * hw, cy - FACE_DET_PAD * hh,
+                        cx + FACE_DET_PAD * hw, cy + FACE_DET_PAD * hh, width, height)
+
+
+def _frontal_square(box, kxy, kc, width, height):
+    """With nose AND both eyes confident (a frontal face, so their mean is the face's
+    centre), a square FRONTAL_HALF head widths either side of it; else None."""
+    pts = [NOSE, L_EYE, R_EYE]
+    if not all(kc[j] >= FACE_MIN_CONF for j in pts):
+        return None
+    hw = head_width(pts, kxy, box[3] - box[1])
+    if hw is None:
+        return None
+    cx, cy = kxy[pts].mean(axis=0)
+    h = FRONTAL_HALF * hw
+    return _clip_region(cx - h, cy - h, cx + h, cy + h, width, height)
+
+
+def _agreeing_face(face, box, kxy, kc, dets, used):
+    """Index of the detection that agrees with this person's face, or None. Agreement:
+    two or more confident face keypoints, so the head can be measured (`head_width`);
+    every confident nose and eye point INSIDE the detection box itself (a box beside
+    the face, or on a glove, does not contain them); the detection at least
+    DET_MIN_HW of the measured head wide (a box on an eye is not the face); and its
+    centre within the person's box (with the usual slack)."""
+    if face is None or face.region is None or len(dets) == 0:
+        return None
+    pts = [j for j in FACE_JOINTS if kc[j] >= FACE_MIN_CONF]
+    inner = [NOSE, L_EYE, R_EYE]
+    # Frontal faces only (nose AND both eyes): a three-quarter or profile face can be
+    # under-measured, and a tight box then left the chin bare -- the floor catches it.
+    if not all(kc[j] >= FACE_MIN_CONF for j in inner):
+        return None
+    hw = head_width(pts, kxy, box[3] - box[1])
+    if hw is None:
+        return None
+    wrists = [kxy[j] for j in (L_WRIST, R_WRIST) if kc[j] >= BODY_MIN_CONF]
+    best, best_score = None, -1.0
+    for k, (x0, y0, x1, y1, s) in enumerate(dets):
+        if k in used:
+            continue
+        if not all(_inside(kxy[j], (x0, y0, x1, y1)) for j in inner):
+            continue
+        if not _inside(((x0 + x1) / 2, (y0 + y1) / 2), _slack(box)):
+            continue
+        if (x1 - x0) < DET_MIN_HW * hw:
+            continue
+        # A glove fools BOTH models the same way (it looks like a head), so a box
+        # with a confident wrist inside it is not trusted to be the face (review D2).
+        if any(_inside(wr, (x0, y0, x1, y1)) for wr in wrists):
+            continue
+        if s > best_score:
+            best, best_score = k, s
+    return best
 
 
 def _iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -482,7 +612,7 @@ def apply_plan(frame: np.ndarray, plan: FramePlan) -> np.ndarray:
     if plan.mode == "full":
         cell = math.ceil(max(h, w) / FULL_CELLS)
         _mosaic(out, math.ceil(h / cell), math.ceil(w / cell))
-    elif plan.mode in ("keypoints", "box"):
+    elif plan.mode in ("detected", "keypoints", "box"):
         for x0, y0, x1, y1 in plan.regions:
             _mosaic(out[y0:y1, x0:x1], FACE_CELLS, FACE_CELLS)
     else:
@@ -657,11 +787,31 @@ def report_path_for(out: Path) -> Path:
     return out.with_name(out.stem + ".blur.json")
 
 
+def load_centerface(threshold: float = FACE_DET_THRESH, sha256: str = CENTERFACE_SHA256):
+    """deface's CenterFace face detector as detect(frame_rgb) -> (K, 5) boxes+scores,
+    refused unless the model file's sha256 is the pinned one (it is parsed by OpenCV's
+    ONNX importer; same check-then-load caveat as the YOLO weights)."""
+    try:
+        from deface.centerface import CenterFace, default_onnx_path
+    except ImportError as e:
+        raise RuntimeError("deface is not installed (pip install --no-deps deface==1.5.0)") from e
+    if sha256_file(Path(default_onnx_path)) != sha256:
+        raise ValueError("centerface.onnx does not match the pinned sha256; not loading it")
+    cf = CenterFace(onnx_path=default_onnx_path, backend="opencv")
+
+    def detect(frame_rgb):
+        return cf(frame_rgb, threshold=threshold)[0]
+    return detect
+
+
 def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
                expect_persons: int = 0, model_name: str = "", progress=None,
-               writer_factory=VideoWriter, recheck=None, report_extra=None) -> dict:
+               writer_factory=VideoWriter, recheck=None, report_extra=None,
+               detect_faces=None, face_model: str = "") -> dict:
     """Two passes over `video`: predict on every frame (predictions only are kept),
-    then blur and encode. `out` must already have passed `check_output_location`;
+    then blur and encode. `detect_faces(frame) -> (K, 5)`, if given, is a face
+    detector whose boxes replace the box floor for a person only where they agree
+    with the keypoints. `out` must already have passed `check_output_location`;
     `recheck(out)` re-runs that check just before the finished file is moved into
     place. Writes `out` and its `.blur.json` only on success; on any failure neither
     exists and nothing partial is left behind. Returns the report.
@@ -674,7 +824,8 @@ def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
     w, h = info.width, info.height
     source_sha = sha256_file(video)
 
-    preds, boxes = [], []
+    preds, boxes, fdets = [], [], []
+    face_errors = 0
     for i, frame in enumerate(iter_frames(video, info)):
         try:
             p = validate_prediction(predict(frame), w, h)
@@ -686,14 +837,22 @@ def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
             p = PredictorError()
             boxes.append(np.zeros((0, 4)))
         preds.append(p)
+        d = None
+        if detect_faces is not None:
+            try:
+                d = validate_face_dets(detect_faces(frame), w, h)
+            except Exception:  # no detections: less trust, never less blur
+                face_errors += 1
+        fdets.append(d)
         if progress and (i + 1) % 250 == 0:
             progress(f"pass 1: {i + 1} frames")
     if not preds:
         raise ValueError("no frames could be decoded")
     window = max(1, round(info.fps * NEIGHBOUR_S))
     missing = missing_vs_neighbours(boxes, window)
-    plans = [plan_frame(p, w, h, expect_persons, bool(m)) for p, m in zip(preds, missing)]
-    del preds, boxes
+    plans = [plan_frame(p, w, h, expect_persons, bool(m), fd)
+             for p, m, fd in zip(preds, missing, fdets)]
+    del preds, boxes, fdets
 
     report_path = report_path_for(out)
     tmp = out.with_name(f".{out.stem}.{secrets.token_hex(6)}.partial.mp4")
@@ -717,7 +876,7 @@ def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
         full_idx = [i for i, p in enumerate(plans) if p.mode == "full"]
         report = {
             **(report_extra or {}),  # first, so it can never overwrite a core field
-            "tool": "blur_faces", "report_version": 3,
+            "tool": "blur_faces", "report_version": 4,
             "source_sha256": source_sha, "output_sha256": sha256_file(tmp),
             "model": model_name, "width": w, "height": h, "fps": info.fps,
             "variable_frame_rate": info.vfr,
@@ -731,10 +890,15 @@ def blur_video(video, out: Path, predict, *, info: "VideoInfo | None" = None,
                                   sorted(Counter(p.persons for p in plans).items())},
             "per_frame": {"persons": [p.persons for p in plans],
                           "mode": "".join(p.mode[0] for p in plans)},
+            "face_detector": face_model or None,
+            "face_detector_errors": face_errors,
+            "persons_face_agreed": sum(p.agreed for p in plans if p.mode != "full"),
+            "persons_fallback": sum(p.persons - p.agreed for p in plans if p.mode != "full"),
             "params": {"face_min_conf": FACE_MIN_CONF, "pad": PAD, "face_cells": FACE_CELLS,
                        "full_cells": FULL_CELLS, "neighbour_frames": window,
                        "match_iou": MATCH_IOU, "match_top": MATCH_TOP,
                        "box_floor": True, "edge_frac": EDGE_FRAC,
+                       "face_det_pad": FACE_DET_PAD, "det_min_hw": DET_MIN_HW,
                        "expect_persons": expect_persons},
             "audio": "none", "metadata": "stripped",
         }
