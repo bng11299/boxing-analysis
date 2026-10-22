@@ -404,3 +404,68 @@ def split_by_video(clips, held_out: tuple = HELD_OUT_VIDEOS):
     if not train or not val:
         raise ValueError("split produced an empty side")
     return train, val
+
+
+def _group_order(g: str) -> tuple:
+    # V2 before V10: numeric where the id has a number, so the tie-break is the
+    # order a person reading the corpus would expect, not string order.
+    digits = "".join(ch for ch in g if ch.isdigit())
+    return (int(digits) if digits else -1, g)
+
+
+def group_folds(clips, k: int = 3, key=lambda c: c.source) -> list[tuple[str, ...]]:
+    """Partition the groups (videos) into k folds for leave-groups-out CV.
+
+    The assignment is LABEL-BLIND by construction: it reads only how many clips
+    each group has. Groups go largest first to whichever fold currently holds
+    the fewest clips, ties to the lowest fold. Nothing about labels or model
+    scores can move a group between folds, so the folds cannot have been chosen
+    to flatter a result -- the failure a hand-picked split invites.
+
+    Why this exists: the single held-out split (HELD_OUT_VIDEOS) is also the
+    set every design decision was checked against, so it is a validation set
+    doubling as the test set. Cross-validating over every video puts each clip
+    in a test fold exactly once, and most of those clips were never looked at.
+    """
+    sizes: dict[str, int] = {}
+    for c in clips:
+        g = key(c)
+        if not g:
+            raise ValueError("a clip has no group id; folds would silently "
+                             "merge unrelated clips")
+        sizes[g] = sizes.get(g, 0) + 1
+    if not isinstance(k, int) or k < 2:
+        raise ValueError(f"k must be an integer >= 2, got {k!r}")
+    if k > len(sizes):
+        raise ValueError(f"k={k} folds but only {len(sizes)} groups: "
+                         "a fold would be empty")
+
+    folds: list[list[str]] = [[] for _ in range(k)]
+    load = [0] * k
+    for g in sorted(sizes, key=lambda g: (-sizes[g], _group_order(g))):
+        i = min(range(k), key=lambda j: (load[j], j))
+        folds[i].append(g)
+        load[i] += sizes[g]
+    return [tuple(sorted(f, key=_group_order)) for f in folds]
+
+
+def cv_splits(clips, k: int = 3, key=lambda c: c.source):
+    """(held_out_groups, train, test) for each fold of `group_folds`.
+
+    A group is never on both sides of a fold, and every clip lands in exactly
+    one test side. A fold whose training side is missing a class is refused:
+    that model could never predict the class, and its zero would be reported as
+    a finding about the class rather than about the fold.
+    """
+    labels = {c.label for c in clips}
+    out = []
+    for held in group_folds(clips, k, key):
+        held_set = set(held)
+        train = [c for c in clips if key(c) not in held_set]
+        test = [c for c in clips if key(c) in held_set]
+        missing = sorted(labels - {c.label for c in train})
+        if missing:
+            raise ValueError(f"holding out {'/'.join(held)} leaves no training "
+                             f"clips of class(es) {missing}")
+        out.append((held, train, test))
+    return out

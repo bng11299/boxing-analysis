@@ -222,6 +222,137 @@ def run_stgcnpp(xtr, ytr, xva, yva, epochs=30, seed=0, t_out=50,
     return r
 
 
+def run_arms(train, val, a, spec) -> list[dict]:
+    """Every arm, in the fixed order, on one train/test split.
+
+    The single-split run and each CV fold both come through here, so the two
+    protocols cannot drift apart in what they fit or how.
+    """
+    xtr, ytr = to_arrays(train)
+    xva, yva = to_arrays(val)
+    results = run_floors(ytr, yva, a.seed)
+    results += run_interpretable([c.keypoints for c in train], ytr,
+                                 [c.keypoints for c in val], yva, a.seed,
+                                 balanced=a.balanced)
+    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed,
+                               static=True, balanced=a.balanced))
+    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed,
+                               balanced=a.balanced))
+    pp_epochs = a.stgcnpp_epochs or a.epochs
+    if a.stgcnpp in ("scratch", "both"):
+        results.append(run_stgcnpp(xtr, ytr, xva, yva, pp_epochs, a.seed,
+                                   a.t_out, balanced=a.balanced))
+    if a.stgcnpp in ("pretrained", "both"):
+        results.append(run_stgcnpp(xtr, ytr, xva, yva, pp_epochs, a.seed,
+                                   a.t_out, pretrained=a.pretrained, spec=spec,
+                                   balanced=a.balanced))
+    return results
+
+
+CV_INTERVAL_NOTE = (
+    "CV intervals are a paired clip-level bootstrap on pooled out-of-fold "
+    "predictions from K different models. They ignore within-video correlation "
+    "and between-fold training variance, so they are too narrow; read them "
+    "with the per-group gaps and sign test, which treat the group (video, or "
+    "subject for synthetic fixtures) as the unit. The sign test is itself "
+    "optimistic: groups in one fold are scored by the same model, so they are "
+    "not independent, and the effective sample size lies between K and the "
+    "number of groups. One fold per group makes it less optimistic, not exact "
+    "-- those models still share nearly all their training data.")
+
+
+# Per-fold fields worth keeping; predictions are pooled instead. Provenance
+# (which checkpoint bytes were loaded) and the forest's importances are kept
+# per fold, because each fold fits its own models.
+_FOLD_FIELDS = ("accuracy", "train_accuracy", "train_macro_f1",
+                "generalisation_gap", "train_seconds", "params", "t_out",
+                "pretrained_from", "top_features", "confusion")
+# Identical in every fold by construction -- and checked, before being lifted
+# onto the pooled row, because a checkpoint swapped mid-run would otherwise be
+# reported as the first fold's sha256.
+_CONSTANT_FIELDS = ("params", "t_out", "pretrained_from")
+
+
+SINGLE_SPLIT_OUT = "results/baseline.json"
+
+
+def present_class_macro_f1(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Macro F1 over the classes that occur in y_true.
+
+    Two videos hold no rear_hook at all. The plain macro F1 averages over every
+    label seen in either array, so a fold or video missing a class scores an
+    extra zero whenever the model predicts that class once -- a penalty that
+    depends on which videos a fold happens to hold, not on the model. Used for
+    per-fold and per-video scores only; the pooled headline covers every class.
+    """
+    from sklearn.metrics import f1_score
+    return float(f1_score(y_true, y_pred, labels=np.unique(y_true),
+                          average="macro", zero_division=0))
+
+
+def run_cv(clips, a, spec, key):
+    """Leave-groups-out CV.
+
+    Returns (pooled results, pooled labels, pooled group ids, fold records).
+    Out-of-fold predictions are concatenated in fold order, with labels and
+    group ids concatenated in the same order, and every pooled metric and
+    interval is computed on that set: each clip scored once, by a model that
+    never saw its video. Folds inherit split_by_video's caveat: an athlete who
+    appears in two videos can straddle a fold.
+    """
+    from boxingvi.data import cv_splits
+
+    ys: list[np.ndarray] = []
+    groups: list[str] = []
+    preds: dict[str, list] = {}
+    order: list[str] = []
+    folds: list[dict] = []
+    for i, (held, train, test) in enumerate(cv_splits(clips, a.cv, key)):
+        print(f"\n=== fold {i + 1}/{a.cv}: test {'/'.join(held)}  "
+              f"(train {len(train)} / test {len(test)} clips) ===")
+        _, yte = to_arrays(test)
+        res = run_arms(train, test, a, spec)
+        ys.append(yte)
+        groups.extend(key(c) for c in test)
+        rec = {"fold": i, "test_groups": list(held), "n_train_clips": len(train),
+               "n_test_clips": len(test), "models": {}}
+        for r in res:
+            if r["model"] not in preds:
+                preds[r["model"]] = []
+                order.append(r["model"])
+            preds[r["model"]].extend(r["_pred"])
+            m = {f: r[f] for f in _FOLD_FIELDS if f in r}
+            m["macro_f1_all_classes"] = r["macro_f1"]
+            m["macro_f1"] = present_class_macro_f1(yte, np.array(r["_pred"]))
+            rec["models"][r["model"]] = m
+        folds.append(rec)
+
+    y_all = np.concatenate(ys)
+    # Every clip scored exactly once, by every model: enforced here, not only
+    # assumed from how cv_splits is built.
+    if len(y_all) != len(clips) or len(groups) != len(clips):
+        raise RuntimeError(f"CV scored {len(y_all)} clips of {len(clips)}")
+    if {key(c) for c in clips} != set(groups):
+        raise RuntimeError("CV left a group out of every test fold")
+    pooled = []
+    for name in order:
+        if len(preds[name]) != len(y_all):
+            raise RuntimeError(f"{name}: {len(preds[name])} predictions for "
+                               f"{len(y_all)} clips")
+        r = evaluate(name, y_all, np.array(preds[name]))
+        first = folds[0]["models"][name]
+        for f in _CONSTANT_FIELDS:
+            if f in first:
+                if any(fd["models"][name].get(f) != first[f] for fd in folds):
+                    raise RuntimeError(f"{name}: {f} differs between folds")
+                r[f] = first[f]
+        fold_f1 = [f["models"][name]["macro_f1"] for f in folds]
+        r["fold_macro_f1"] = fold_f1
+        r["fold_macro_f1_mean"] = float(np.mean(fold_f1))
+        pooled.append(r)
+    return pooled, y_all, np.array(groups), folds
+
+
 def environment() -> dict:
     import platform
 
@@ -270,7 +401,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="permit writing synthetic numbers to the results file")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", type=Path, default=Path("results/baseline.json"))
+    ap.add_argument("--out", type=Path, default=None,
+                    help="results file (default results/baseline.json, or "
+                         "results/baseline_cv<K>.json with --cv, so a CV run "
+                         "never overwrites the single-split headline)")
     ap.add_argument("--balanced", action="store_true",
                     help="inverse-frequency class weighting on every fitted "
                          "arm, interpretable and learned alike")
@@ -297,6 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="frames each clip is resampled to for ST-GCN++")
     ap.add_argument("--stgcnpp-epochs", type=int, default=None,
                     help="epochs for the ST-GCN++ arm (default: --epochs)")
+    ap.add_argument("--cv", type=int, default=0, metavar="K",
+                    help="leave-videos-out K-fold cross-validation over every "
+                         "video (label-blind folds; see data.group_folds) "
+                         "instead of the single held-out split. 0 (default) "
+                         "keeps the single split, so earlier runs reproduce")
     return ap
 
 
@@ -306,6 +445,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if not (a.data or a.synthetic):
         ap.error("pass --data or --synthetic")
+    if a.cv == 1 or a.cv < 0:
+        ap.error("--cv needs K >= 2 (or 0 for the single split)")
+    if a.cv and a.include_v6:
+        # With --cv every clip reaches the pooled headline, and V6's
+        # segmentation is ours, not the authors' (see data.load_corpus).
+        ap.error("--cv with --include-v6 would put our own V6 segmentation "
+                 "into the headline; run them separately")
+    if a.out is None:
+        a.out = Path(f"results/baseline_cv{a.cv}.json" if a.cv
+                     else SINGLE_SPLIT_OUT)
+    elif a.cv and a.out.resolve() == Path(SINGLE_SPLIT_OUT).resolve():
+        ap.error(f"--cv may not write {SINGLE_SPLIT_OUT}: that file is the "
+                 "single-split headline")
     spec = None
     if a.stgcnpp in ("pretrained", "both"):
         from boxingvi.stgcnpp import PRETRAINED
@@ -324,7 +476,10 @@ def main(argv: list[str] | None = None) -> int:
         from boxingvi.synthetic import make_corpus
         print("SYNTHETIC FIXTURES -- not a result about BoxingVI")
         clips = make_corpus(seed=a.seed)
-        train, val = split_by_subject(clips)
+        # Synthetic clips all share one source, so their groups are subjects.
+        group_key = (lambda c: c.subject)
+        if not a.cv:
+            train, val = split_by_subject(clips)
         split_desc = "subject-disjoint S1-S15 / S16-S20 (synthetic fixtures)"
     else:
         from boxingvi.data import (HELD_OUT_VIDEOS, discover_layout,
@@ -333,7 +488,9 @@ def main(argv: list[str] | None = None) -> int:
         if a.layout_only:
             raise SystemExit("--layout-only requested; stopping after the probe")
         clips = load_corpus(a.data, include_v6=a.include_v6)
-        train, val = split_by_video(clips)
+        group_key = (lambda c: c.source)
+        if not a.cv:
+            train, val = split_by_video(clips)
         # Stated in full, and carried into the results file, because the
         # difference between this and the paper's split is the single most
         # misreadable thing about any number produced here.
@@ -343,33 +500,39 @@ def main(argv: list[str] | None = None) -> int:
               "split, which the release does not carry the subject ids to "
               "reproduce (ISSUES-LOG O10)"
         )
-        print(f"split: {split_desc}")
-
-    xtr, ytr = to_arrays(train)
-    xva, yva = to_arrays(val)
-    disjoint = "subject-disjoint" if a.synthetic else "video-disjoint"
-    print(f"train {len(train)} clips / val {len(val)} clips  "
-          f"({disjoint})  x={xtr.shape}")
+    if a.cv:
+        unit = "subjects" if a.synthetic else "videos"
+        split_desc = (
+            f"leave-{unit}-out {a.cv}-fold cross-validation over all "
+            f"{len({group_key(c) for c in clips})} {unit}; folds assigned from "
+            "clip counts only (data.group_folds), metrics on the pooled "
+            "out-of-fold predictions -- NOT the paper's official split "
+            "(ISSUES-LOG O10)" + (" (synthetic fixtures)" if a.synthetic else ""))
+    print(f"split: {split_desc}")
 
     if a.balanced:
         print("class weighting: ON for every fitted arm "
               "(inverse frequency, n / (k * count_k))")
-    results = run_floors(ytr, yva, a.seed)
-    results += run_interpretable([c.keypoints for c in train], ytr,
-                                 [c.keypoints for c in val], yva, a.seed,
-                                 balanced=a.balanced)
-    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed,
-                               static=True, balanced=a.balanced))
-    results.append(run_learned(xtr, ytr, xva, yva, a.epochs, a.seed,
-                               balanced=a.balanced))
+    folds = None
+    if a.cv:
+        from boxingvi.data import cv_splits
+        try:
+            # Builds the folds (group_folds) and checks no fold is missing a
+            # class; either failure is a CLI error, not a traceback.
+            cv_splits(clips, a.cv, group_key)
+        except ValueError as e:
+            ap.error(f"--cv {a.cv}: {e}")
+        results, y_eval, g_eval, folds = run_cv(clips, a, spec, group_key)
+        n_train, n_eval = None, len(y_eval)
+    else:
+        xtr, _ = to_arrays(train)
+        _, y_eval = to_arrays(val)
+        disjoint = "subject-disjoint" if a.synthetic else "video-disjoint"
+        print(f"train {len(train)} clips / val {len(val)} clips  "
+              f"({disjoint})  x={xtr.shape}")
+        results = run_arms(train, val, a, spec)
+        n_train, n_eval = len(train), len(val)
     pp_epochs = a.stgcnpp_epochs or a.epochs
-    if a.stgcnpp in ("scratch", "both"):
-        results.append(run_stgcnpp(xtr, ytr, xva, yva, pp_epochs, a.seed,
-                                   a.t_out, balanced=a.balanced))
-    if a.stgcnpp in ("pretrained", "both"):
-        results.append(run_stgcnpp(xtr, ytr, xva, yva, pp_epochs, a.seed,
-                                   a.t_out, pretrained=a.pretrained, spec=spec,
-                                   balanced=a.balanced))
 
     print(f"\n{'model':<22}{'acc':>8}{'macroF1':>10}")
     print("-" * 40)
@@ -387,59 +550,106 @@ def main(argv: list[str] | None = None) -> int:
     # be said to use time at all -- and at roughly 0.06 accuracy that claim is
     # small enough that an interval including zero would retire it.
     cis: dict = {}
-    if a.bootstrap:
+    fold_gaps: dict = {}
+    video_gaps: dict = {}
+    for key, label, high, low in interval_comparisons(results):
+        if not (high and low and "_pred" in high and "_pred" in low):
+            continue
+        if folds:
+            # A pooled interval can exclude zero on the strength of one large
+            # fold (V1 is 39% of the corpus), so the direction is also checked
+            # fold by fold and video by video, on both metrics. Videos sharing
+            # a fold share a model, so they are not fully independent either;
+            # see CV_INTERVAL_NOTE.
+            from boxingvi.stats import METRICS, per_group_gaps
+            fold_gaps[key] = {}
+            video_gaps[key] = {}
+            for metric, fm in (("macro_f1", present_class_macro_f1),
+                               ("accuracy", METRICS["accuracy"])):
+                fk = "macro_f1" if metric == "macro_f1" else "accuracy"
+                g = [f["models"][high["model"]][fk]
+                     - f["models"][low["model"]][fk] for f in folds]
+                fold_gaps[key][metric] = {
+                    "gaps": g, "positive": sum(x > 0 for x in g),
+                    "negative": sum(x < 0 for x in g),
+                    "ties": sum(x == 0 for x in g)}
+                video_gaps[key][metric] = per_group_gaps(
+                    y_eval, high["_pred"], low["_pred"], g_eval, fm)
+        if not a.bootstrap:
+            continue
         from boxingvi.stats import bootstrap_gap_ci
-        for key, label, high, low in interval_comparisons(results):
-            if not (high and low and "_pred" in high and "_pred" in low):
-                continue
-            # Both metrics, because they can disagree about whether a claim
-            # survives: the temporal margin is 0.189 macro F1 but 0.061
-            # accuracy, and only the second one ever looked fragile.
-            for metric in ("macro_f1", "accuracy"):
-                ci = bootstrap_gap_ci(
-                    yva, np.array(high["_pred"]), np.array(low["_pred"]),
-                    n_boot=a.bootstrap, seed=a.seed, metric=metric)
-                cis[f"{key}__{metric}"] = ci
-                verdict = ("excludes zero" if ci["excludes_zero"]
-                           else "INCLUDES ZERO -- not a claim")
-                print(f"  {label} [{metric:>9}]: {ci['point']:+.3f}  "
-                      f"95% CI [{ci['ci_low']:+.3f}, {ci['ci_high']:+.3f}]  "
-                      f"-- {verdict}")
+        # Both metrics, because they can disagree about whether a claim
+        # survives: the temporal margin is 0.189 macro F1 but 0.061
+        # accuracy, and only the second one ever looked fragile.
+        for metric in ("macro_f1", "accuracy"):
+            ci = bootstrap_gap_ci(
+                y_eval, np.array(high["_pred"]), np.array(low["_pred"]),
+                n_boot=a.bootstrap, seed=a.seed, metric=metric)
+            cis[f"{key}__{metric}"] = ci
+            verdict = ("excludes zero" if ci["excludes_zero"]
+                       else "INCLUDES ZERO -- not a claim")
+            print(f"  {label} [{metric:>9}]: {ci['point']:+.3f}  "
+                  f"95% CI [{ci['ci_low']:+.3f}, {ci['ci_high']:+.3f}]  "
+                  f"-- {verdict}")
+    if folds:
+        print(f"  NOTE: {CV_INTERVAL_NOTE}")
+        for key, vg in video_gaps.items():
+            v, va = vg["macro_f1"], vg["accuracy"]
+            print(f"  {key}: per-fold macro-F1 "
+                  + " ".join(f"{x:+.3f}" for x in fold_gaps[key]["macro_f1"]["gaps"])
+                  + f" | videos macro-F1 +{v['positive']}/-{v['negative']}/={v['ties']}"
+                  f" p={v['sign_test_p']:.2g}; accuracy +{va['positive']}/"
+                  f"-{va['negative']}/={va['ties']} p={va['sign_test_p']:.2g}")
 
     if a.synthetic and not a.allow_synthetic:
         print("\nnot written: synthetic run without --allow-synthetic")
         return 0
+    payload = {
+        "synthetic": bool(a.synthetic), "seed": a.seed, "epochs": a.epochs,
+        "split": split_desc, "balanced": bool(a.balanced),
+        "n_train_clips": n_train, "n_val_clips": n_eval,
+        "train_videos": (sorted({c.source for c in train}) or None) if not a.cv else None,
+        "val_videos": (sorted({c.source for c in val}) or None) if not a.cv else None,
+        "include_v6": bool(a.include_v6),
+        "gap_st_gcn_minus_random_forest":
+            cis.get("gap_st_gcn_minus_random_forest__macro_f1"),
+        "gap_st_gcn_minus_random_forest_accuracy":
+            cis.get("gap_st_gcn_minus_random_forest__accuracy"),
+        "gap_st_gcn_minus_static_pose":
+            cis.get("gap_st_gcn_minus_static_pose__macro_f1"),
+        "gap_st_gcn_minus_static_pose_accuracy":
+            cis.get("gap_st_gcn_minus_static_pose__accuracy"),
+        "stgcnpp": a.stgcnpp,
+        "gap_stgcnpp_pretrained_minus_random_forest":
+            cis.get("gap_stgcnpp_pretrained_minus_random_forest__macro_f1"),
+        "gap_stgcnpp_pretrained_minus_scratch":
+            cis.get("gap_stgcnpp_pretrained_minus_scratch__macro_f1"),
+        "gap_stgcnpp_scratch_minus_random_forest":
+            cis.get("gap_stgcnpp_scratch_minus_random_forest__macro_f1"),
+        "stgcnpp_epochs": pp_epochs if a.stgcnpp != "off" else None,
+        # A bit-identical reproduction claim is only as good as knowing what
+        # produced the original: library versions and thread count both matter.
+        "environment": environment(),
+        # Every interval on both metrics, keyed "<comparison>__<metric>".
+        "intervals": cis,
+        "results": [{k: v for k, v in r.items()
+                     if not k.startswith("_")} for r in results]}
+    if a.cv:
+        # Added only in CV mode, so a single-split results file keeps exactly
+        # the keys it always had.
+        payload["cv"] = {
+            "k": a.cv,
+            "folds": folds,
+            "fold_gaps": fold_gaps,
+            "video_gaps": video_gaps,
+            # Clip-level resampling treats clips as independent; clips from one
+            # video are not. With nine videos a video-level bootstrap is too
+            # coarse to be informative, so the per-fold signs are the check on
+            # that assumption, not the interval.
+            "interval_note": CV_INTERVAL_NOTE,
+        }
     a.out.parent.mkdir(parents=True, exist_ok=True)
-    a.out.write_text(json.dumps(
-        {"synthetic": bool(a.synthetic), "seed": a.seed, "epochs": a.epochs,
-         "split": split_desc, "balanced": bool(a.balanced),
-         "n_train_clips": len(train), "n_val_clips": len(val),
-         "train_videos": sorted({c.source for c in train}) or None,
-         "val_videos": sorted({c.source for c in val}) or None,
-         "include_v6": bool(a.include_v6),
-         "gap_st_gcn_minus_random_forest":
-             cis.get("gap_st_gcn_minus_random_forest__macro_f1"),
-         "gap_st_gcn_minus_random_forest_accuracy":
-             cis.get("gap_st_gcn_minus_random_forest__accuracy"),
-         "gap_st_gcn_minus_static_pose":
-             cis.get("gap_st_gcn_minus_static_pose__macro_f1"),
-         "gap_st_gcn_minus_static_pose_accuracy":
-             cis.get("gap_st_gcn_minus_static_pose__accuracy"),
-         "stgcnpp": a.stgcnpp,
-         "gap_stgcnpp_pretrained_minus_random_forest":
-             cis.get("gap_stgcnpp_pretrained_minus_random_forest__macro_f1"),
-         "gap_stgcnpp_pretrained_minus_scratch":
-             cis.get("gap_stgcnpp_pretrained_minus_scratch__macro_f1"),
-         "gap_stgcnpp_scratch_minus_random_forest":
-             cis.get("gap_stgcnpp_scratch_minus_random_forest__macro_f1"),
-         "stgcnpp_epochs": pp_epochs if a.stgcnpp != "off" else None,
-         # A bit-identical reproduction claim is only as good as knowing what
-         # produced the original: library versions and thread count both matter.
-         "environment": environment(),
-         # Every interval on both metrics, keyed "<comparison>__<metric>".
-         "intervals": cis,
-         "results": [{k: v for k, v in r.items()
-                      if not k.startswith("_")} for r in results]}, indent=2), encoding="utf-8")
+    a.out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"\nwrote {a.out}")
     return 0
 
