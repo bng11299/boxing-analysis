@@ -817,3 +817,132 @@ per-hand finder option, measured against the pooled rule on own footage AND V6; 
 - **Deferred (not blocking):** recording `per_hand` in the punches CSV / classified sidecar (a CSV
   format change that the output branch reads); a hand-specific local peak for the point perfect-
   finder reading.
+
+### Iteration 3 (review of 9d10d86 by the code-reviewer agent and by Codex: 3 blocking) -- 2026-10-21
+**Iteration 2 got two things wrong, and this corrects the record:**
+- **"They agree everywhere, so '2 of 7' stands as exact" did not follow.** The "lower bound" was the
+  framing count under ONE maximum punch matching, the greedy's. Which detections a maximum matching
+  takes is a tie-break, so it was not a bound. Counterexample (60 fps, tol 6, point_tol 12):
+  detections at 88 and 112, a punch click at 100 (reach 88-112), a framing click at 120 (reach
+  108-132). The greedy gives the punch 88 and reported 1 to 1. A punch matching that takes 112 is
+  just as large and leaves the mark nothing, so the true minimum is 0.
+- **The B2 crash was fixed in classify_punches.py only, not "in both scripts".** find_punches.py
+  still crashed when every label was a framing mark: `score()` returns `count_ratio = NaN` with no
+  punch spans, and `json.dumps(allow_nan=False)` raised after printing precision and recall 0.000.
+  No score.json was written.
+- **"6 of 6 mutants killed" missed one.** In every fixture `at_most == marks`, so the mutant
+  `at_most = len(framing)` survived.
+
+**The fixes:**
+- **`punchfind.framing_bounds`, shared by both scripts.**
+  - *Lower bound:* framing marks matched maximally against only the detections in NO punch span's
+    reach ([start - tol, end + tol] of the widened span). No punch matching can take those, so the
+    bound holds for every matching, maximum or not.
+  - *Upper bound:* framing marks against all detections, unchanged.
+  - The lower bound's detections are reported as `lower_bound_frames` (find_punches) and
+    `lower_bound_named_as` (classify); these keys are new in iteration 4.
+- **`match`'s docstring now says the greedy is optimal in COUNT only.** Which detections it leaves
+  over is a tie-break, not a fact about the footage.
+- **find_punches with no punch spans** writes recall, F1 and count ratio as null, skips the chance
+  floor, and prints "no punches labelled". `score()` is unchanged; the V6 evaluation depends on it.
+- **The `per_hand` record (iteration 2's deferred item).** find_punches writes `<clip>.punches.json`
+  beside the CSV: clip, CSV sha256, rule, per_hand. classify records `finder_per_hand` (provenance)
+  and `finder.per_hand` (score) only when the sidecar matches the CSV's bytes and the clip, and
+  otherwise null. The CSV header is unchanged; a test asserts it, because feat/output-report reads it.
+
+**Tests:** hands 72, classify 228. New cases:
+- the 88/112/100/120 counterexample, at the helper and through both scripts (a jab-cross per-hand
+  fixture, with controls that the greedy takes the jab and each detection is within reach of the
+  intended click);
+- a framing mark with no detection in reach (`at_most < marks`), in both suites;
+- reach boundaries: 112 vs 113 for a point label, 106 vs 107 for a drag;
+- the framing-only run in find_punches, asserting the null scores, no chance floor on a 20 s clip,
+  and the printed line;
+- the sidecar's negative cases.
+
+**Mutants (round 1, on 4e45764; each applied to a copy of the tree; both suites run):**
+
+| # | mutant | killed |
+|---|---|---|
+| M1 | lower bound counted against all detections (lower = upper) | yes (hands 6, classify 2 failures) |
+| M2 | lower bound = what the greedy left (iteration 2's code) | yes (3, 1) |
+| M3 | upper bound = number of marks (the survivor from iteration 2) | yes (3, 1) |
+| M4 | upper bound = lower bound | yes (5, 2) |
+| M5 | punch reach without match's tol | yes (6, 1) |
+| M6 | punch reach on unwidened point labels | yes (5, 1) |
+| M7 | lower-bound set taken from the upper-bound matching | yes (3, 2) |
+| M8 | find_punches: framing-only score left with NaN | yes (hands crashes: NaN not JSON compliant) |
+| M9 | find_punches: chance floor not skipped with no punches | yes (hands 1) |
+| M10 | find_punches: F1 left at 0 with no punches | yes (hands 1) |
+| M11 | find_punches: framing bounds ignore the punches | yes (hands 2) |
+| M12 | classify: framing bounds ignore the punches | yes (classify 2) |
+| M13 | classify: sidecar hash not checked | yes (classify 1) |
+| M14 | classify: sidecar clip not checked | yes (classify 1) |
+| M15 | classify: sidecar per_hand type not checked | yes (classify 1) |
+| M16 | find_punches: sidecar always says pooled | yes (hands 1, classify 3) |
+
+**Re-measured on Brendan's clips** (orthodox; framing as not-a-punch), in-process, on iteration 4's
+final code. Every finder and type number reproduces iteration 2 exactly:
+
+| | IMG_4406 0.2 s | IMG_4395 0.2 s | IMG_4406 0.1 s | IMG_4395 0.1 s | IMG_4406 per hand 0.2 s | IMG_4395 per hand 0.2 s |
+|---|---|---|---|---|---|---|
+| punches found | 35/47 | 35/40 | 28/47 | 27/40 | 40/47 | 40/40 |
+| detections real | 35/41 | 35/42 | 28/41 | 27/42 | 40/59 | 40/57 |
+| type right, matched | 0.886 of 35 | 0.600 of 35 | 0.821 of 28 | 0.667 of 27 | 0.825 of 40 | 0.700 of 40 |
+| framing flagged (sound bounds) | 1 to 1 of 5 | 1 to 1 of 2 | 1 to 1 of 5 | 0 to 0 of 2 | 1 to 1 of 5 | 1 to 1 of 2 |
+| lower-bound detection named | cross | jab | cross | -- | cross | jab |
+| per_hand recorded | false | false | false | false | true | true |
+
+- **The framing counts did not change, and now they are shown, not assumed.** On these clips, the
+  old greedy-leftover count also equals the new lower bound in every column (recomputed side by
+  side). The two framing detections (frames 1557 and 1436) are out of every punch's reach. So
+  "2 of 7 at 0.2 s" (1 of 7 at 0.1 s) is exact. Iteration 2's conclusion was right; its argument
+  was not.
+- **The upper bound is below the mark count in every column** (1 of 5, 1 of 2): on real data it is
+  not the trivial "all marks".
+
+**Review: FIX FIRST** (code-reviewer agent, 1 blocking). See iteration 4.
+
+### Iteration 4 (review of 4e45764: FIX FIRST, 1 blocking) -- 2026-10-21
+- **What the reviewer checked and found correct:**
+  - **Soundness, by brute force.** 6,000 random instances, enumerating every punch matching. The
+    instances covered 0-7 detections with duplicates, points and drags, overlapping spans, spans
+    clipped at frame 0, tol in {0, 2, 6} and point_tol in {0, 3, 6, 12}. No violation of
+    `at_least <= min` or `max <= at_most`.
+  - **The bounds hold for non-maximum matchings too.** The docstring now says so.
+  - **Loose but sound.** The lower bound is loose in about 10% of random cases and the upper in
+    about 14%. Exact min/max over punch matchings is not done (optional).
+  - **Both scripts pass the same spans.**
+  - **Nothing on any local branch reads the renamed keys.**
+- **B1, the sidecar reader crashed on deeply nested JSON.** `"[" * 30000 + "]" * 30000` is 60 KB,
+  under the 64,000-byte cap, and makes `json.loads` raise `RecursionError`. That is not a
+  ValueError, so classify died on a valid CSV. Now caught, as `lsimport.load_export` already does,
+  with a negative test and controls (the input is under the cap; json itself raises).
+- **Also fixed:**
+  - **The lower-bound set overclaimed.** It is ONE maximum framing matching's detections, not every
+    detection that is certainly on a mark (`[118, 122]` around a mark at 120 lists one). Keys
+    renamed to `lower_bound_frames` and `lower_bound_named_as`; docstrings and the printed line now
+    say "the detections the lower bound counted".
+  - **Precision 0/0.** With framing-only labels AND no detections, precision is null, not 0.0.
+    Tested on a still clip.
+  - **Mixed provenance.** The sidecar's rule must equal this run's `--rule`, or `per_hand` is
+    unknown. Tested with a threshold changed by 0.5.
+  - **A vacuous test.** The "holds NaN" half of a sidecar test could not fail: the bool, clip and
+    rule checks reject that file anyway. Dropped, not reworded.
+- **Not done (noted):**
+  - feat/analyse-clip's `OUTPUTS` does not publish `punches.json`, so a standalone classify of a
+    published out-dir records `per_hand` as null. Decide it at that merge.
+  - Exact framing min/max over punch matchings.
+- **Tests:** hands 73, classify 232, pipeline 260, labels 50, ingest 109, env 36.
+- **Mutants (round 2, on the final code, all 19 re-run; M8 and M10 re-targeted at the edited lines):**
+  **19 of 19 killed.** M1-M16 again, with the same suites failing as in round 1, plus:
+
+  | # | mutant | killed |
+  |---|---|---|
+  | M17 | classify: RecursionError from a nested sidecar not caught | yes (classify crashes: RecursionError) |
+  | M18 | classify: sidecar rule not checked | yes (classify 1) |
+  | M19 | find_punches: precision 0, not null, with no detections and no punches | yes (hands 1) |
+- **Merge state.** PR #22 is CONFLICTING with its base after #14's fixes (e2459d5, 9f33f3d). A trial
+  merge in a throwaway clone conflicts in `classify_punches.py` and this log. Not merged here: no
+  gate needed it. At the stack step, keep #22's per-hand peak check, #14's duplicate-row guard
+  (threshold and local-peak checks), and `classify.read_clip_window` at both read sites.
