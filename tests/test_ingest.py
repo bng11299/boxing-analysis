@@ -567,6 +567,16 @@ refuses("an unterminated header is a ValueError, not tokenize.TokenError",
 refuses("a header of 300 nested parentheses is a ValueError too",
         lambda: PoseSequence.load(pose_npz(tmp / "tok2.npz", xy=raw_npy("(" * 300))),
         "unparseable")
+# numpy lets more than TokenError out of a malformed header (fix/corpus-load-cap review B1).
+for _i, (_hdr, _np_raises) in enumerate((
+        ("{'descr': (), 'fortran_order': False, 'shape': (3,)}", "IndexError"),
+        ("{'descr': '<f4', 'fortran_order': False, 'shape': "
+         + "+".join(["1"] * 4000) + ",}", "RecursionError"),
+        ("{'descr': '<f4', 'fortran_order': False, 'shape': " + "-" * 9000 + "1,}",
+         "MemoryError (parser stack)"))):
+    refuses(f"a header on which numpy raises {_np_raises} is a ValueError",
+            lambda _i=_i, _hdr=_hdr: PoseSequence.load(
+                pose_npz(tmp / f"tok{3 + _i}.npz", xy=raw_npy(_hdr))), "unparseable")
 # Exactly at the frame cap, so the cap passes it; the data is simply not there.
 atcap = pose_npz(tmp / "atcap.npz",
                  xy=npy_header_only((pose_yolo.MAX_POSE_FRAMES, N_JOINTS, 2), "<f8"),
