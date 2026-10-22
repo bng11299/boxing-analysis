@@ -1131,7 +1131,15 @@ classify_punches also applies #14's pooled check. Otherwise it keeps the own-han
     given, so the neighbour comparison never crosses a frame-id gap.
 - **Also from the review:**
   - The hash wording no longer reads as authentication: it detects staleness only.
-  - The edges test is renamed for what it guards, no wrap-around at the first and last rows.
+  - **The edges test.** Renamed, and the first rename overclaimed. It said "no wrap-around", but no
+    case could catch one: the re-review's `i > 0` to `i >= 0` mutants (W1 in `own_hand_peak`, W2 in
+    `pooled_peak`) passed all 276.
+    - **The fix:** row 0 of `[6, 3, 9]` must pass both checks. Under W1 and W2 it is compared with
+      `[-1]`, the 9, and refused. W1 and W2 are killed.
+    - **The last row:** it cannot wrap. Without its guard, `i + 1` raises IndexError. Its case
+      (`[3, 6]`, row 1) now runs for both checks.
+    - **No genuine output is affected:** `find_peaks` never reports row 0.
   - **Noted, not changed:** both checks accept a row on a track's or segment's first or last row,
     which the finder never emits. Tightening that is possible but out of scope.
-- **Tests:** hands 73, classify 276, pipeline 260, labels 50, ingest 109, env 36.
+- **Re-review of 88c8ea3: FIX FIRST**, for the overclaiming test name above; Q1-Q4 confirmed killed.
+- **Tests:** hands 73, classify 277, pipeline 260, labels 50, ingest 109, env 36.

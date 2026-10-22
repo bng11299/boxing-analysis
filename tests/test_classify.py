@@ -1191,9 +1191,13 @@ for left, right in (([0, 4, 4, 4, 0], [0, 1, 1, 1, 0]), ([0, 4, 4, 0], [0, 1, 1,
     check(f"a flat-topped peak {left}: the row find_peaks reports (equal neighbours) passes both checks",
           len(pk_pooled) == 1 and list(pk_pooled) == list(pk_own)
           and own(s_, int(pk_pooled[0]), 0, 1.0) and pooled(s_, int(pk_pooled[0]), 0, 1.0), str(pk_pooled))
-check("the first and last rows are judged on their one neighbour (no wrap-around to the other end)",
+check("the first and last rows are judged on their one neighbour, by both checks",
       pooled(sg([6, 3], [0, 0]), 0, 0, 1.0) and pooled(sg([3, 6], [0, 0]), 1, 0, 1.0)
-      and not pooled(sg([3, 6], [0, 0]), 0, 0, 1.0))
+      and not pooled(sg([3, 6], [0, 0]), 0, 0, 1.0)
+      and own(sg([6, 3], [0, 0]), 0, 0, 1.0) and own(sg([3, 6], [0, 0]), 1, 0, 1.0)
+      and not own(sg([3, 6], [0, 0]), 0, 0, 1.0))
+check("... the first row is not compared with the LAST (no wrap-around through index -1)",
+      pooled(sg([6, 3, 9], [0, 0, 0]), 0, 0, 1.0) and own(sg([6, 3, 9], [0, 0, 0]), 0, 0, 1.0))
 check("own-hand check: no speed, below threshold, or a faster neighbour of that hand are refused",
       not own(sg([0, 0, 0], [0, 0, 0]), 1, 0, 0.0) and not own(sg([0, 2, 0], [0, 0, 0]), 1, 0, 2.5)
       and not own(sg([0, 2, 3], [9, 9, 9]), 1, 0, 1.0) and own(sg([0, 2, 0], [9, 9, 9]), 1, 0, 1.0))
