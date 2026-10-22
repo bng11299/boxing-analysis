@@ -643,6 +643,29 @@ profile[2][faceblur.R_EYE] = 0.1  # three-quarter view: nose, one eye, ears
 p = faceblur.plan_frame(pred_of([profile]), W, H, face_dets=[fdet(*A)])
 check("a three-quarter face (one eye) never drops the floor, even with a matching box",
       p.agreed == 0 and covered(p, *A), str(p))
+# The "trust" policy (the middle ground): any detection on the person replaces the
+# floor -- deface's look -- and only a person with NO detection gets the floor.
+p = faceblur.plan_frame(pred_of([person(*A)]), W, H, face_dets=[fdet(*A)], face_policy="trust")
+m = faceblur.blurred_mask(p, H, W)
+check("trust: a detected face gets only its box -- face destroyed, the rest of the body visible",
+      p.mode == "detected" and destroyed(one, faceblur.apply_plan(one, p), *A)
+      and not m[A[1] + FACE + 6:A[1] + 120, A[0] - 30:A[0] + 30].any(), str(p))
+p = faceblur.plan_frame(pred_of([profile]), W, H, face_dets=[fdet(*A)], face_policy="trust")
+check("trust: a three-quarter face with a box is trusted too (no keypoint agreement needed)",
+      p.agreed == 1 and covered(p, *A), str(p))
+p = faceblur.plan_frame(pred_of([person(*A), person(*B)]), W, H, face_dets=[fdet(*A)], face_policy="trust")
+check("trust: the person deface MISSED still gets the floor, both faces destroyed",
+      p.agreed == 1 and destroyed(two, faceblur.apply_plan(two, p), *A)
+      and destroyed(two, faceblur.apply_plan(two, p), *B), str(p))
+p = faceblur.plan_frame((up_box[None], up_k[None], up_c[None]), W3, H3, face_dets=[glove_det],
+                        face_policy="trust")
+check("trust: arms up keeps the deep floor even when the box is trusted",
+      covered(p, 130, 160, 15, H3, W3), str(p))
+try:
+    faceblur.plan_frame(pred_of([person(*A)]), W, H, face_policy="nope")
+    check("an unknown face policy is refused", False, "accepted")
+except ValueError:
+    check("an unknown face policy is refused", True)
 rng_h = np.random.default_rng(11)
 hy_bad = []
 for t in range(1000):
@@ -967,6 +990,112 @@ except ValueError:
 except RuntimeError:  # deface not installed here: the refusal path is unreachable, say so
     print("  SKIP  deface not installed")
 
+print("the deface policy (the default): the face detector alone decides")
+p = faceblur.plan_faces_only([fdet(*A), fdet(*B)], W, H)
+out = faceblur.apply_plan(two, p)
+check("deface: each detected face is mosaicked, nothing else touched",
+      p.mode == "faces" and destroyed(two, out, *A) and destroyed(two, out, *B)
+      and np.array_equal(out[~faceblur.blurred_mask(p, H, W)], two[~faceblur.blurred_mask(p, H, W)]),
+      str(p))
+p = faceblur.plan_faces_only([], W, H)
+check("deface: a frame with NO detected face is left as it is (the accepted residual)",
+      p.mode == "no_face" and np.array_equal(faceblur.apply_plan(two, p), two), str(p))
+for name, junk in (("a detector error", faceblur.DetectorError()), ("NaN", [[np.nan, 0, 10, 10, 0.9]]),
+                   ("garbage", "not detections")):
+    p = faceblur.plan_faces_only(junk, W, H)
+    check(f"deface: {name} is a failure, not a miss -- the whole frame is blurred",
+          p.mode == "full" and destroyed(two, faceblur.apply_plan(two, p), *A), str(p))
+dfdir = tmp / "deface"
+dfdir.mkdir()
+dstate = {"i": 0}
+
+
+def some_faces(frame):  # finds both faces except in frames 5-7, where it finds none
+    i = dstate["i"]
+    dstate["i"] += 1
+    if i == 9:
+        raise RuntimeError("detector fell over")
+    return [] if 5 <= i <= 7 else [fdet(*c) for c in centres[i]]
+
+
+handed.clear()
+drep = faceblur.blur_video(clip, dfdir / "d.mp4", None, detect_faces=some_faces, face_model="fake",
+                           face_policy="deface", writer_factory=SpyWriter)
+codes = drep["per_frame"]["mode"]
+check("deface end to end: no YOLO needed; no-face frames counted and listed; an error frame blurred whole",
+      drep["frames_without_face"] == 3 and drep["no_face_ranges"] == [[5, 7]]
+      and codes[9] == "f" and drep["face_detector_errors"] == 1
+      and codes.count("a") == N - 4, json.dumps({k: drep[k] for k in ("frames_by_mode", "no_face_ranges")}))
+check("... the faces it found are destroyed in every frame it found them",
+      all(destroyed(frames_in[i], handed[i], *c) for i in range(N) if codes[i] == "a" for c in centres[i]))
+check("... and a frame it missed reaches the encoder unblurred (the residual, measured not hidden)",
+      not destroyed(frames_in[6], handed[6], *centres[6][0]))
+check("deface report: face threshold recorded, faces (not persons) counted, deface params only",
+      "faces_per_frame" in drep and "persons_per_frame" not in drep and "box_floor" not in drep["params"]
+      and "face_thresh" in drep["params"], json.dumps(drep["params"]))
+# Review F1: a detector that silently finds nothing (broken, or mis-set) wrote a fully
+# unblurred clip with exit 0. A clip with no face anywhere is refused.
+nodir = tmp / "noface"
+nodir.mkdir()
+try:
+    faceblur.blur_video(clip, nodir / "n.mp4", None, detect_faces=lambda f: np.zeros((0, 5)),
+                        face_model="fake", face_policy="deface")
+    check("deface: a detector that never fires is refused", False, "wrote it")
+except faceblur.NoFacesFound:
+    check("deface: a detector that never fires is refused, and nothing is written",
+          list(nodir.iterdir()) == [], str(list(nodir.iterdir())))
+def one_hit():  # fires on exactly one frame (the near-miss variant of a broken detector)
+    st = {"i": 0}
+
+    def det(frame):
+        st["i"] += 1
+        return [fdet(*A)] if st["i"] == 1 else []
+    return det
+
+
+def raise_once():  # raises on one frame, empty otherwise
+    st = {"i": 0}
+
+    def det(frame):
+        st["i"] += 1
+        if st["i"] == 1:
+            raise RuntimeError("boom")
+        return []
+    return det
+
+
+for name, det in (("fires on one frame only", one_hit()), ("raises once, else empty", raise_once())):
+    try:
+        faceblur.blur_video(clip, nodir / "n.mp4", None, detect_faces=det, face_model="fake",
+                            face_policy="deface")
+        check(f"deface: a detector that {name} is refused (over half the frames faceless)", False, "wrote it")
+    except faceblur.NoFacesFound:
+        check(f"deface: a detector that {name} is refused (over half the frames faceless)",
+              list(nodir.iterdir()) == [])
+quarter = {"i": 0}
+
+
+def misses_a_quarter(frame):  # 25% no-face frames: inside the measured range, passes
+    quarter["i"] += 1
+    return [] if quarter["i"] % 4 == 0 else [fdet(*c) for c in centres[quarter["i"] - 1]]
+
+
+qrep = faceblur.blur_video(clip, nodir / "q.mp4", None, detect_faces=misses_a_quarter, face_model="fake",
+                           face_policy="deface")
+check("deface: a clip with 25% no-face frames passes without the flag",
+      qrep["frames_without_face"] == N // 4 and qrep["allow_no_faces"] is False)
+for p_ in nodir.iterdir():
+    p_.unlink()
+nrep = faceblur.blur_video(clip, nodir / "n.mp4", None, detect_faces=lambda f: np.zeros((0, 5)),
+                           face_model="fake", face_policy="deface", allow_no_faces=True)
+check("... unless --allow-no-faces is passed, which the report records",
+      nrep["allow_no_faces"] is True and nrep["frames_without_face"] == N)
+try:
+    faceblur.blur_video(clip, dfdir / "e.mp4", None, face_policy="deface")
+    check("the deface policy without a face detector is refused", False, "ran")
+except ValueError:
+    check("the deface policy without a face detector is refused", True)
+
 print("the CLI")
 cli_dir = tmp / "cli"
 cli_dir.mkdir()
@@ -976,18 +1105,18 @@ rc = blur_faces.main(["--video", str(clip), "--out", str(cli_dir / "c.mp4")], pr
 check("CLI refuses a folder outside the participant root by default (exit 2, nothing decoded)",
       rc == 2 and state["calls"] == 0 and not (cli_dir / "c.mp4").exists())
 rc = blur_faces.main(["--video", str(clip), "--out", str(cli_dir / "c.mp4"),
-                      "--allow-outside-participant-root"], predict=pred,
+                      "--allow-outside-participant-root", "--face-policy", "agree"], predict=pred,
                      location_kwargs={"forbidden_roots": [], "syncthing_configs": []})
 cli_rep = json.loads((cli_dir / "c.blur.json").read_text()) if rc == 0 else {}
 check("CLI with --allow-outside-participant-root succeeds, and the report says so",
       rc == 0 and (cli_dir / "c.mp4").is_file() and cli_rep.get("outside_participant_root") is True)
 pred, state = make_predict()
 rc = blur_faces.main(["--video", str(clip), "--out", str(vault / "c.mp4"),
-                      "--allow-outside-participant-root"], predict=pred,
+                      "--allow-outside-participant-root", "--face-policy", "agree"], predict=pred,
                      location_kwargs={"forbidden_roots": [vault], "syncthing_configs": []})
 check("CLI override never lifts the denylist (exit 2 BEFORE decoding a frame)",
       rc == 2 and state["calls"] == 0 and not (vault / "c.mp4").exists())
-over = ["--allow-outside-participant-root"]
+over = ["--allow-outside-participant-root", "--face-policy", "agree"]
 rc = blur_faces.main(["--video", str(clip), "--out", str(cli_dir / "c.mp4"), *over], predict=pred,
                      location_kwargs=iso)
 check("CLI refuses to replace an existing output", rc == 2 and state["calls"] == 0)
@@ -998,11 +1127,21 @@ check("CLI refuses to replace an existing report", rc == 2 and state["calls"] ==
 rc = blur_faces.main(["--video", str(clip), "--out", str(clip), *over], predict=pred,
                      location_kwargs=iso)
 check("CLI refuses to write over its input", rc == 2 and state["calls"] == 0)
+rc = blur_faces.main(["--video", str(clip), "--out", str(cli_dir / "z.mp4"), *over, "--face-policy", "deface"],
+                     detect_faces=lambda f: np.zeros((0, 5)), location_kwargs=iso)
+check("CLI (deface default): a clip with no face found anywhere is refused, exit 2, nothing written",
+      rc == 2 and not (cli_dir / "z.mp4").exists())
+try:
+    blur_faces.main(["--video", str(clip), "--out", str(cli_dir / "y.mp4"), *over, "--face-policy", "deface", "--face-thresh", "0.9"],
+                    detect_faces=lambda f: np.zeros((0, 5)), location_kwargs=iso)
+    check("CLI: a deface face threshold above 0.5 is refused", False, "accepted")
+except SystemExit as e:
+    check("CLI: a deface face threshold above 0.5 is refused", e.code == 2 and not (cli_dir / "y.mp4").exists())
 os.environ.pop("YOLO_OFFLINE", None)
 fake_w = tmp / "fake.pt"
 fake_w.write_bytes(b"not a checkpoint")
 try:
-    blur_faces.main(["--video", str(clip), "--out", str(cli_dir / "d.mp4"), *over, "--weights",
+    blur_faces.main(["--video", str(clip), "--out", str(cli_dir / "d.mp4"), *over, "--face-policy", "agree", "--weights",
                      str(fake_w), "--weights-sha256", "0" * 64], location_kwargs=iso)
 except ValueError:
     pass  # the pinned-hash check refuses it; we only need what happened before

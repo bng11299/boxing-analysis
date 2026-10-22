@@ -1115,3 +1115,59 @@ so the guard is mosaicked whenever the face is.
   leaked a face (18 sampled per clip), the hybrid covers it. Agreed frames look like
   deface: face mosaicked, arms, hands and guard visible. Three-quarter and profile faces
   (the bladed stance) keep the fallback.
+
+### Iteration 9 -- pure deface as the default, leak recorded as an accepted residual (Brendan, 2026-10-22)
+
+- **Decision (Brendan, 2026-10-22):** "keep deface. deface only doesn't work amazingly when
+  the face is occluded, so it's fine." Asked again after side-by-sides of the middle ground
+  (deface plus the body-based blur only where deface finds no face) against pure deface:
+  "Use pure deface with the leak rate recorded as an accepted residual in the PR and
+  quality-loop log."
+- **The measured residual, stated plainly:**
+  - **Detector misses:** on own shadowboxing footage, deface (CenterFace, threshold 0.2)
+    found no face in 89 of 2353 frames of IMG_4406 (3.8%) and 843 of 2659 of IMG_4395
+    (31.7%; 724 of the 2540 frames with a person, 28.5%).
+  - **Visible faces among the misses:** in contact sheets of 18 sampled no-face frames per
+    clip, about 6 per clip showed the face substantially visible and unblurred (looking
+    down mid-combination, profile while punching, half behind a glove); the rest were
+    occluded, turned away or out of frame.
+  - **Estimated leak rate (eyeballed sample, not a measurement of every frame):** roughly
+    1% (IMG_4406) and 9% (IMG_4395) of frames with a person show an unblurred, visible
+    face.
+  - **Unmeasured:** sparring footage, with more profile, motion blur, two boxers and
+    clinches.
+  - **Disagreement on record:** the reviewer's assessment differs from the stated reason. Not
+    all misses are occluded faces; some are visible faces in profile or mid-punch.
+- **Protocol note (stated once, per the provenance/disclosure rule's spirit):** amendment
+  O57 promises the second annotator face-blurred clips only. A visible face reaching the
+  annotator is a deviation from the approved procedure; whether that needs reporting to
+  the HSRRC is Brendan's call with Hector.
+- **Change:**
+  - `--face-policy {deface (default), agree, trust}`. deface means `plan_faces_only`: every
+    CenterFace box grown 1.3x and mosaicked, and a frame with no detection is left
+    untouched.
+  - A detector error or malformed output still blurs the whole frame. No YOLO is needed.
+  - The report counts `frames_without_face` and lists `no_face_ranges`; the CLI prints them
+    on every run and warns above 30%.
+  - **Review F1:** a detector that (nearly) never fires is broken, not the accepted miss
+    rate. Over 50% faceless frames is refused before anything is written, unless
+    `--allow-no-faces` (recorded). `--face-thresh` above 0.5 is refused under deface, and
+    the threshold is recorded in the report.
+  - `MODE_CODES` replaces first letters, because "faces" and "full" collided.
+  - agree/trust (the earlier fail-closed paths, and the middle ground) remain as options.
+- **Test:** 177 checks. New for the deface policy:
+  - faces mosaicked, nothing else touched;
+  - a no-face frame passes through unchanged, counted (the residual, tested so it stays
+    visible);
+  - errors and malformed output blur the whole frame;
+  - a never-firing, a one-hit and a raise-once detector are all refused; 25% faceless
+    passes;
+  - the threshold cap; no YOLO needed.
+- **Review:** FIX FIRST twice (F1, then its one-hit near-miss), then the remaining change
+  was the fraction-based refusal, applied. agree/trust are unchanged from the approved
+  round.
+- **Real check (own footage, default policy):** IMG_4406 3.8% no-face, IMG_4395 31.7% (under
+  the 50% refusal, over the 30% warning). At deface's miss frames the output is
+  pixel-for-pixel the same residual as the deface CLI (sheet compared). These runs started
+  on the code before the F1 refusal, which changes only refusals and report fields, not
+  pixels.
