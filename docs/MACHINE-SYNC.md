@@ -36,6 +36,20 @@ cd ~\repos\boxing-comps
 .\scripts\setup-env.ps1 -NoPose       # on SLOTMACHINE: CPU torch, no ultralytics
 ```
 
+Both machines also get the face blur (`requirements-blur.txt`: deface 1.5.0 and
+opencv-python 5.0.0.93), with or without `-NoPose`. It is installed with
+`--no-deps` because deface declares scikit-image, imageio and an unpinned
+opencv-python that could replace pinned packages; its CenterFace detector needs
+only cv2 and numpy. The default `--face-policy deface` needs no YOLO, so the blur
+runs on SLOTMACHINE as well. `-CheckOnly` fails unless deface imports and its
+`centerface.onnx` hashes to `CENTERFACE_SHA256` in `src/boxingvi/faceblur.py`; the
+model is parsed only after that, and must find no face in a black frame. On the
+laptop the same OpenCV pin is a constraint on ultralytics, so a rebuild there may
+move cv2 to 5.0.0.93 from whatever it had; ultralytics resizes frames with cv2, so
+re-run `python tests/test_ingest.py` there afterwards, and treat pose output from
+before and after the rebuild as possibly not byte-identical. `-CheckOnly` also
+fails if `opencv-python-headless` or a contrib build shares the `cv2` folder.
+
 It ends with `ENVIRONMENT OK` or a list of what is wrong. Run it the same way
 each time on a machine: `-NoPose` after a full run leaves the pose packages in
 place but stops checking them, so a broken torchvision would go unreported. Never run a bare

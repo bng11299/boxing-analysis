@@ -13,6 +13,12 @@
     pins torch==2.13.0+cpu, and ultralytics left to PyPI pulls torchvision 0.29,
     which requires torch>=2.14 -- either would quietly replace the CUDA build.
 
+    The face blur (requirements-blur.txt: deface and the OpenCV that parses its
+    model) is installed on every machine, with or without the pose step, and with
+    --no-deps: deface declares scikit-image, imageio and an unpinned opencv-python,
+    and its CenterFace detector needs none of them. That OpenCV pin is also a
+    constraint, so ultralytics gets the same cv2 instead of the newest.
+
     It ends by running scripts\check_env.py, which imports every package and, on
     CUDA, computes a tensor on the GPU. An install that exits 0 proves nothing
     until the import is checked (ISSUES-LOG 2026-08-30).
@@ -25,7 +31,8 @@
     617.14 supports up to CUDA 13.4; torch 2.13 ships cu126, cu130, cu132).
 
 .PARAMETER NoPose
-    Skip requirements-pose.txt (ultralytics). The pose step then cannot run here.
+    Skip requirements-pose.txt (ultralytics). The pose step then cannot run here;
+    the face blur's default policy (deface) still can.
 
 .PARAMETER CheckOnly
     Install nothing; report whether the existing .venv is good. Exit 1 if not.
@@ -63,6 +70,18 @@ function Get-RequirementsWithout([string]$RequirementsPath, [string[]]$Names) {
     # Every line except the pins for $Names (exact names: torchaudio is kept for torch).
     $alt = ($Names | ForEach-Object { [regex]::Escape($_) }) -join '|'
     return @(Get-Content -LiteralPath $RequirementsPath | Where-Object { $_ -notmatch "^\s*($alt)\s*==" })
+}
+
+function Get-ConstraintLines([Collections.IDictionary]$Pins, [string]$BlurRequirementsPath) {
+    # What pip may not change: the torch (and torchvision) build, and the face blur's
+    # OpenCV, which ultralytics would otherwise resolve to the newest opencv-python.
+    $lines = @($Pins.Keys | ForEach-Object { "$_==$($Pins[$_])" })
+    return $lines + @("opencv-python==$(Get-Pin $BlurRequirementsPath 'opencv-python')")
+}
+
+function Get-BlurInstallArgs([string]$BlurRequirementsPath, [string]$ConstraintsPath) {
+    # --no-deps: none of deface's declared dependencies (see requirements-blur.txt).
+    return @('-m', 'pip', 'install', '--no-deps', '-r', $BlurRequirementsPath, '-c', $ConstraintsPath)
 }
 
 function Resolve-TorchBuild([string]$Mode, [string]$Tag, [scriptblock]$HasNvidiaGpu) {
@@ -136,6 +155,7 @@ function Invoke-Main {
         Invoke-Checked (Find-PyLauncher) @('-3.13', '-m', 'venv', $venv)
     }
     $poseReq = Join-Path $repo 'requirements-pose.txt'
+    $blurReq = Join-Path $repo 'requirements-blur.txt'
     # torch and torchvision: ONE build, from the PyTorch index only (--index-url
     # replaces PyPI for this command, so nothing same-named can be mixed in).
     $pins = [ordered]@{ torch = "$(Get-Pin $req 'torch')+$build" }
@@ -152,13 +172,17 @@ function Invoke-Main {
     $rest = Join-Path $tmp "boxing-comps-req-$PID.txt"
     $restPose = Join-Path $tmp "boxing-comps-pose-$PID.txt"
     try {
-        Set-Content -LiteralPath $con -Value @($pins.Keys | ForEach-Object { "$_==$($pins[$_])" }) -Encoding ASCII
+        Set-Content -LiteralPath $con -Value (Get-ConstraintLines $pins $blurReq) -Encoding ASCII
         Set-Content -LiteralPath $rest -Value (Get-RequirementsWithout $req @('torch', 'torchvision')) -Encoding ASCII
         Invoke-Checked $py @('-m', 'pip', 'install', '-r', $rest, '-c', $con)
         if (-not $NoPose) {
             Set-Content -LiteralPath $restPose -Value (Get-RequirementsWithout $poseReq @('torch', 'torchvision')) -Encoding ASCII
             Invoke-Checked $py @('-m', 'pip', 'install', '-r', $restPose, '-c', $con)
         }
+        # Last, so its exact OpenCV pin wins over whatever an existing venv holds.
+        # No unit test sees this line run; the check_env.py run below is what fails
+        # (deface not installed) if it is ever dropped.
+        Invoke-Checked $py (Get-BlurInstallArgs $blurReq $con)
     } finally {
         Remove-Item -LiteralPath $con, $rest, $restPose -ErrorAction SilentlyContinue
     }
