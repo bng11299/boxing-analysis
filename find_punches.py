@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -121,7 +122,12 @@ def main(argv=None) -> int:
             n_interp += interp
             w.writerow([int(fr), f"{fr / pose.fps:.3f}", "left" if h == 0 else "right",
                         f"{sig[i, h]:.3f}", "yes" if interp else "no"])
-    print(f"  -> {out}" + (f"  ({n_interp} peak(s) on an interpolated frame, flagged)" if n_interp else ""))
+    # Which finder made the list, beside it rather than in it: the CSV's header is read downstream.
+    (a.out_dir / f"{clip}.punches.json").write_text(json.dumps({
+        "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(), "rule": rule,
+        "per_hand": a.per_hand}, indent=1, allow_nan=False), encoding="utf-8")
+    print(f"  -> {out} (+ .json: the rule, pooled or per hand)"
+          + (f"  ({n_interp} peak(s) on an interpolated frame, flagged)" if n_interp else ""))
 
     if a.labels:
         labelled = load_labels(a.labels, len(pose), pose.fps)
@@ -132,35 +138,41 @@ def main(argv=None) -> int:
         spans = punchfind.for_matching([s_ for s_ in labelled if s_ not in not_punch], tol, point_tol)
         n_points = sum(s_.start == s_.end for s_ in labelled if s_ not in not_punch)   # among the punches
         s = punchfind.score(det, spans, tol, whole)
+        if not spans:
+            # Every label a framing mark: there is no punch to find, so recall, F1 and the count
+            # ratio are undefined, not 0 (score() writes NaN, which JSON cannot hold). Precision
+            # stays: none of the detections is a labelled punch.
+            s = s | {"recall": None, "f1": None, "count_ratio": None}
         result = {"clip": clip, "rule": rule, "per_hand": a.per_hand, "tolerance_frames": tol,
                   "point_labels": n_points, "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
                   "score": s}
         if not_punch:
-            # Two counts, because punches are matched first and may take a detection a framing mark
-            # could also have had: a LOWER bound (marks matched to detections no punch took) and an
-            # UPPER bound (marks with any detection within tolerance). The truth lies between.
-            fspans = punchfind.for_matching(not_punch, tol, point_tol)
-            matched = {di for _, di in punchfind.match(det, spans, tol)}
-            rest = [i for i in range(len(det)) if i not in matched]
-            on_framing = punchfind.match(det[rest], fspans, tol)
-            result["framing"] = {"marks": len(not_punch), "flagged_as_punches_at_least": len(on_framing),
-                                 "flagged_as_punches_at_most": len(punchfind.match(det, fspans, tol)),
-                                 "frames": [int(det[rest][di]) for _, di in on_framing]}
+            # Bounds that hold whichever maximum punch matching is chosen (punchfind.framing_bounds).
+            fb = punchfind.framing_bounds(det, [s_ for s_ in labelled if s_ not in not_punch], not_punch,
+                                          tol, point_tol)
+            result["framing"] = {"marks": fb["marks"], "flagged_as_punches_at_least": fb["at_least"],
+                                 "flagged_as_punches_at_most": fb["at_most"],
+                                 "frames_no_punch_can_take": [int(det[i]) for i in fb["lower_set"]]}
         min_shift = int(round(MIN_SHIFT_S * pose.fps))
-        if len(pose) >= 2 * min_shift + 2:
+        if not spans:
+            floor = "no chance floor: no punches labelled"
+        elif len(pose) >= 2 * min_shift + 2:
             fl = punchfind.shift_floor(det, spans, tol, whole, min_shift)
             result["shift_floor"] = fl
             floor = f"chance floor F1 {fl['f1_mean']:.3f} (97.5th pct {fl['f1_p97_5']:.3f})"
         else:  # too few distinct shifts for a percentile to mean anything
             floor = f"no chance floor: the clip is under {2 * MIN_SHIFT_S:.0f} s"
         within = (f"+-{tol} frames" + (f"; the {n_points} point labels +-{point_tol}" if n_points else ""))
-        print(f"  vs {s['n_labelled']} labelled punches ({within}): precision {s['precision']:.3f} "
-              f"recall {s['recall']:.3f} F1 {s['f1']:.3f}; {floor}")
+        if spans:
+            print(f"  vs {s['n_labelled']} labelled punches ({within}): precision {s['precision']:.3f} "
+                  f"recall {s['recall']:.3f} F1 {s['f1']:.3f}; {floor}")
+        else:
+            print(f"  no punches labelled: none of the {s['n_detected']} detections can be a labelled punch; {floor}")
         if "framing" in result:
             fr = result["framing"]
             lo_, hi_ = fr["flagged_as_punches_at_least"], fr["flagged_as_punches_at_most"]
             print(f"  {lo_ if lo_ == hi_ else f'{lo_} to {hi_}'} of {fr['marks']} framing marks were flagged as "
-                  "punches (detections no punch took count as false positives above)")
+                  "punches (detections that matched no punch count as false positives above)")
         (a.out_dir / f"{clip}.score.json").write_text(json.dumps(result, indent=1, allow_nan=False),
                                                       encoding="utf-8")
     return 0

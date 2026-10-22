@@ -50,7 +50,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from boxingvi import classify, punchfind  # noqa: E402
+from boxingvi import classify, lsimport, punchfind  # noqa: E402
 from boxingvi.data import CLASSES  # noqa: E402
 from boxingvi.lsimport import UNCLEAR_LABEL  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
@@ -63,6 +63,24 @@ DEFAULT_OUT = Path("results/punches")
 DEFAULT_EXTENT = Path("results/punch_extent.json")
 MAX_ROWS = 100_000
 _DIGITS = re.compile(r"[0-9]+")
+
+
+def finder_per_hand(punches: Path, clip: str) -> "bool | None":
+    """Whether find_punches.py made this CSV with --per-hand, from the <clip>.punches.json
+    it wrote beside it. None (unknown) when that file is missing, unreadable, for another
+    clip, or describes other bytes than the CSV now holds: it is recorded, never trusted
+    for anything else, so a stale or hand-made one must not lend the CSV a provenance."""
+    side = punches.with_suffix(".json")
+    try:
+        if not side.is_file() or side.stat().st_size > 64_000:
+            return None
+        d = json.loads(side.read_text(encoding="utf-8"), parse_constant=lsimport._no_constant)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(d, dict) or d.get("clip") != clip or not isinstance(d.get("per_hand"), bool)
+            or d.get("csv_sha256") != hashlib.sha256(punches.read_bytes()).hexdigest()):
+        return None
+    return d["per_hand"]
 
 
 def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
@@ -155,6 +173,7 @@ def main(argv=None) -> int:
         raise ValueError(f"{a.punches.name} does not name the clip {clip}: classify the CSV "
                          "find_punches.py wrote for this pose")
     rows = read_punches(a.punches, len(pose), pose.fps)
+    per_hand = finder_per_hand(a.punches, clip)
     if a.labels and not rows:   # before anything is written: a stale score file must not outlive this run
         raise ValueError(f"{a.punches.name} holds no punch, so there is nothing to score against labels")
     model, man = classify.load_classifier(a.classifier)
@@ -234,7 +253,8 @@ def main(argv=None) -> int:
     # these punches, from which finder rule, extent rule, stance and cut, and the CSV's own hash.
     (a.out_dir / f"{clip}.classified.json").write_text(json.dumps({
         "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
-        "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule, "extent": ex,
+        "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule, "finder_per_hand": per_hand,
+        "extent": ex,
         "cut": None if cut is None else {"per": "clip", **cut._asdict()},
         "pose_frames": len(pose), "fps": pose.fps}, indent=1, allow_nan=False), encoding="utf-8")
     print(f"  -> {out} (+ .json provenance)")
@@ -260,15 +280,11 @@ def main(argv=None) -> int:
                 continue
             yt.append(spans[si].label)
             yp.append(int(np.argmax(pred[di])))
-        # Detections that matched no punch but sit on a framing mark: what the classifier called them.
-        on_framing, framing_at_most = [], 0
-        if framing:   # a lower and an upper bound, as in find_punches.py: punches are matched first
-            fspans = punchfind.for_matching(framing, tol, point_tol)
-            taken = {di for _, di in pairs}
-            rest = [k for k in range(len(rows)) if k not in taken]
-            for _, k in punchfind.match([rows[r]["frame"] for r in rest], fspans, tol):
-                on_framing.append(rest[k])
-            framing_at_most = len(punchfind.match([d["frame"] for d in rows], fspans, tol))
+        # Framing marks that drew a detection: bounds that hold whichever maximum punch matching is
+        # chosen (punchfind.framing_bounds). Only the lower bound's detections are certainly on a
+        # framing mark, so only theirs are named.
+        fb = (punchfind.framing_bounds([d["frame"] for d in rows], spans, framing, tol, point_tol)
+              if framing else None)
 
         def scored(windows) -> "tuple[dict, int]":
             keep = [k for k, w_ in enumerate(windows) if w_.keypoints is not None]
@@ -301,7 +317,8 @@ def main(argv=None) -> int:
         result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol, "point_labels": n_points,
                   "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
                   "classifier_sha256": man["sha256"], "cut": {"per": "clip", **cut._asdict()},
-                  "finder": {"labelled_punches": len(spans), "detections": len(rows), "matched": found,
+                  "finder": {"per_hand": per_hand, "labelled_punches": len(spans), "detections": len(rows),
+                             "matched": found,
                              "recall": found / len(spans) if spans else None,
                              "precision": found / len(rows) if rows else None},
                   "matched_detections": type_scores(yt, yp),
@@ -313,11 +330,11 @@ def main(argv=None) -> int:
                   "window_iou_with_labels": {"n": len(ious), "mean": float(np.mean(ious)) if ious else None},
                   "labelled_length_s_median": (float(np.median([(x.end - x.start) / pose.fps for x in drags]))
                                                if drags else None)}
-        if framing:
-            types = [CLASSES[int(np.argmax(pred[k]))] if k in pred else "unclassified" for k in on_framing]
-            result["framing"] = {"marks": len(framing), "flagged_as_punches_at_least": len(on_framing),
-                                 "flagged_as_punches_at_most": framing_at_most,
-                                 "named_as": {t: types.count(t) for t in sorted(set(types))}}
+        if fb:
+            types = [CLASSES[int(np.argmax(pred[k]))] if k in pred else "unclassified" for k in fb["lower_set"]]
+            result["framing"] = {"marks": fb["marks"], "flagged_as_punches_at_least": fb["at_least"],
+                                 "flagged_as_punches_at_most": fb["at_most"],
+                                 "named_as_no_punch_can_take": {t: types.count(t) for t in sorted(set(types))}}
         print(f"  vs labels: the finder found {found} of {len(spans)} labelled punches, and {found} of its "
               f"{len(rows)} detections were real" + (f" ({n_points} point labels, matched within +-{point_tol} frames)"
                                                      if n_points else ""))
@@ -328,12 +345,12 @@ def main(argv=None) -> int:
                 print(f"  vs labels, {name}: type accuracy {sc['accuracy']:.3f} on {sc['n']} "
                       f"(commonest-type floor {sc['majority_floor_accuracy']:.3f}), "
                       f"hand right {sc['side_accuracy']:.3f}")
-        if framing:
+        if fb:
             fr = result["framing"]
             lo_, hi_ = fr["flagged_as_punches_at_least"], fr["flagged_as_punches_at_most"]
             print(f"  framing marks: {lo_ if lo_ == hi_ else f'{lo_} to {hi_}'} of {fr['marks']} were flagged as "
-                  "punches; those no punch took were named "
-                  + (", ".join(f"{t} {n}" for t, n in fr["named_as"].items()) or "nothing"))
+                  "punches; the detections no punch could take were named "
+                  + (", ".join(f"{t} {n}" for t, n in fr["named_as_no_punch_can_take"].items()) or "nothing"))
         if result["labelled_length_s_median"] is not None:
             print(f"  the clip's window is {cut.length_s:.2f} s; your labelled punches are a median "
                   f"{result['labelled_length_s_median']:.2f} s")

@@ -257,7 +257,10 @@ def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
     Spans are taken in order of END, each given the earliest free detection
     that fits -- the greedy that is provably optimal for points-to-intervals.
     Optimality matters here: 212 of V6's 685 spans overlap the next one, and a
-    naive first-come assignment undercounts combinations.
+    naive first-come assignment undercounts combinations. It is optimal in COUNT
+    only: where several maximum matchings exist, WHICH detections it takes is a
+    tie-break, not a fact about the footage, so nothing should be read off the
+    detections it leaves over (see framing_bounds).
 
     Returns (span index, detection index) pairs.
     """
@@ -278,6 +281,34 @@ def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
                 break
             j += 1
     return pairs
+
+
+def framing_bounds(det_frames, punch_spans: "list[Span]", framing_spans: "list[Span]",
+                   tol: int, point_tol: int) -> dict:
+    """How many framing marks (motions labelled as NOT punches) drew a detection, as
+    bounds that hold whichever maximum matching of punches is chosen.
+
+    Punches are matched first, and several equally large matchings can exist; which
+    detections they leave free decides how many framing marks are hit. So:
+
+      at_least  framing marks matched (one-to-one, maximally) to detections that lie
+                in NO punch span's reach. No punch matching can take those, so this
+                count is reached under every one of them.
+      at_most   framing marks matched to ANY detection: no matching can leave more.
+
+    Neither is claimed to be reached: the lower bound ignores detections a punch
+    COULD take but need not, so it can sit below the true minimum. Where the two
+    agree, the count is exact. Both spans lists are the labels as written; point labels are widened here
+    (`for_matching`). `lower_set` is the indices into `det_frames` of the detections
+    the lower bound used -- the only ones that are certainly on a framing mark.
+    """
+    det = np.asarray(det_frames)
+    punch = for_matching(punch_spans, tol, point_tol)
+    framing = for_matching(framing_spans, tol, point_tol)
+    free = np.flatnonzero([not any(s.start - tol <= d <= s.end + tol for s in punch) for d in det])
+    lower = match(det[free], framing, tol)
+    return {"marks": len(framing_spans), "at_least": len(lower), "at_most": len(match(det, framing, tol)),
+            "lower_set": sorted(int(free[di]) for _, di in lower)}
 
 
 def _in(frames, window) -> np.ndarray:

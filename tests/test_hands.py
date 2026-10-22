@@ -177,7 +177,10 @@ check("MIN_CONF and BODY_MIN_JOINTS equal pose_yolo's usable-frame rule",
       punchfind.MIN_CONF == pose_yolo.USABLE_MIN_CONF and punchfind.BODY_MIN_JOINTS == pose_yolo.USABLE_MIN_JOINTS)
 
 print("find_punches CLI")
+import contextlib  # noqa: E402
 import csv  # noqa: E402
+import hashlib  # noqa: E402
+import io  # noqa: E402
 import json  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -303,7 +306,8 @@ check("'unclear' as framing: 2 punches to find, the detection on the framing mar
 check("... and the framing mark is reported as flagged, at its frame (both bounds 1: no punch near it)",
       sf["framing"]["marks"] == 1 and sf["framing"]["flagged_as_punches_at_least"] == 1
       and sf["framing"]["flagged_as_punches_at_most"] == 1 and sf["point_labels"] == 2
-      and abs(sf["framing"]["frames"][0] - 9.0 * fps) < 0.3 * fps, str(sf["framing"]))
+      and len(sf["framing"]["frames_no_punch_can_take"]) == 1
+      and abs(sf["framing"]["frames_no_punch_can_take"][0] - 9.0 * fps) < 0.3 * fps, str(sf["framing"]))
 # A framing mark next to a punch: the punch takes the one detection there, so the mark's count is 0 to 1.
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
     {"start": int(3.08 * fps), "end": int(3.08 * fps), "label": "jab"},
@@ -317,6 +321,90 @@ check("a framing mark whose only detection a punch took: reported as 1 to 2 of 2
 find_punches.main(base + ["--per-hand"])
 check("the per-hand choice is recorded with the score",
       json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))["per_hand"] is True)
+side = json.loads((tmp / "o" / "IMG_7777.punches.json").read_text(encoding="utf-8"))
+check("... and beside the CSV, hashed to it, for classify_punches.py to read",
+      side["per_hand"] is True and side["clip"] == "IMG_7777"
+      and side["csv_sha256"] == hashlib.sha256((tmp / "o" / "IMG_7777.punches.csv").read_bytes()).hexdigest())
+check("... with the CSV's header unchanged",
+      (tmp / "o" / "IMG_7777.punches.csv").read_text(encoding="utf-8").splitlines()[0]
+      == "frame,time_s,hand,peak_speed_bl_per_s,peak_on_interpolated_frame")
+find_punches.main(base)
+check("a pooled run records per_hand false beside its CSV",
+      json.loads((tmp / "o" / "IMG_7777.punches.json").read_text(encoding="utf-8"))["per_hand"] is False)
+
+print("framing bounds: they hold whichever maximum punch matching is chosen")
+P, U = 1, 99   # a punch's label and a framing mark's; framing_bounds does not read labels
+fb = punchfind.framing_bounds([88, 112], [Span(100, 100, P)], [Span(120, 120, U)], 6, 12)
+check("detections at 88 and 112, a punch click at 100, a framing click at 120: a maximal punch matching may take "
+      "112, so at least 0 and at most 1 framing marks were flagged",
+      fb == {"marks": 1, "at_least": 0, "at_most": 1, "lower_set": []}, str(fb))
+greedy = punchfind.match([88, 112], punchfind.for_matching([Span(100, 100, P)], 6, 12), 6)
+check("control: the greedy gives the punch 88, so a count of what it left over would have said 1, not 0",
+      greedy == [(0, 0)] and len(punchfind.match([112], punchfind.for_matching([Span(120, 120, U)], 6, 12), 6)) == 1)
+fb = punchfind.framing_bounds([88, 112, 200], [Span(100, 100, P)], [Span(120, 120, U), Span(205, 205, U)], 6, 12)
+check("a detection in no punch's reach counts toward the lower bound, and is the one listed",
+      fb["at_least"] == 1 and fb["at_most"] == 2 and fb["lower_set"] == [2], str(fb))
+fb = punchfind.framing_bounds([88, 112], [Span(100, 100, P)], [Span(120, 120, U), Span(300, 300, U)], 6, 12)
+check("a framing mark with no detection in reach: the upper bound is below the number of marks",
+      fb["marks"] == 2 and fb["at_most"] == 1, str(fb))
+check("a point punch's reach is +-point_tol: 112 is in it (lower 0), 113 is not (lower 1)",
+      punchfind.framing_bounds([112], [Span(100, 100, P)], [Span(120, 120, U)], 6, 12)["at_least"] == 0
+      and punchfind.framing_bounds([113], [Span(100, 100, P)], [Span(120, 120, U)], 6, 12)["at_least"] == 1)
+check("a drag's reach is its span +-tol: 106 is in it (lower 0), 107 is not (lower 1)",
+      punchfind.framing_bounds([106], [Span(90, 100, P)], [Span(110, 110, U)], 6, 12)["at_least"] == 0
+      and punchfind.framing_bounds([107], [Span(90, 100, P)], [Span(110, 110, U)], 6, 12)["at_least"] == 1)
+check("with no punch labelled the two bounds are the same matching",
+      punchfind.framing_bounds([88, 112], [], [Span(100, 100, U), Span(120, 120, U)], 6, 12)
+      == {"marks": 2, "at_least": 2, "at_most": 2, "lower_set": [0, 1]})
+check("one detection cannot be two framing marks", punchfind.framing_bounds(
+    [100], [], [Span(98, 98, U), Span(102, 102, U)], 6, 12)["at_most"] == 1)
+
+print("find_punches: framing bounds on a real run")
+# A jab-cross 0.25 s apart, per hand: two detections about 15 frames apart, one punch click between them,
+# a framing click 8 frames after the cross, and a framing click on a still stretch.
+xy70 = body(n, fps, punches=[3.0], hand=0).xy.copy()
+xy70[:, 10] = body(n, fps, punches=[3.25], hand=1).xy[:, 10]
+pose_yolo.PoseSequence(xy70.astype(np.float32), np.ones((n, N_JOINTS), np.float32), np.ones(n, bool), fps, 1080,
+                       1920, "IMG_7070.mov", "test").save(tmp / "IMG_7070.pose.npz")
+b70 = ["--pose", str(tmp / "IMG_7070.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o"), "--per-hand"]
+find_punches.main(b70)
+d70 = [int(r["frame"]) for r in csv.DictReader((tmp / "o" / "IMG_7070.punches.csv").open(encoding="utf-8"))]
+check("control: two detections, 13 to 24 frames apart", len(d70) == 2 and 13 <= d70[1] - d70[0] <= 24, str(d70))
+pc, fc = (d70[0] + d70[1]) // 2, d70[1] + 8
+lab70 = tmp / "IMG_7070.labels.json"
+lab70.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": pc, "end": pc, "label": "jab"}, {"start": fc, "end": fc, "label": "unclear"},
+    {"start": int(12 * fps), "end": int(12 * fps), "label": "unclear"}]}), encoding="utf-8")
+tol70 = int(round(find_punches.TOL_S * fps))
+check("control: both detections are within 12 frames of the punch click, only the cross within 12 of the framing click,"
+      " and the greedy gives the punch the jab",
+      abs(d70[0] - pc) <= 12 and abs(d70[1] - pc) <= 12 and abs(d70[1] - fc) <= 12 and abs(d70[0] - fc) > 12
+      and punchfind.match(d70, punchfind.for_matching([Span(pc, pc, P)], tol70, 12), tol70) == [(0, 0)])
+find_punches.main(b70 + ["--labels", str(lab70), "--unclear", "not-a-punch"])
+s70 = json.loads((tmp / "o" / "IMG_7070.score.json").read_text(encoding="utf-8"))
+check("the punch may take either detection, so the framing mark beside it is 0 to 1, and none is listed as certain",
+      s70["framing"] == {"marks": 2, "flagged_as_punches_at_least": 0, "flagged_as_punches_at_most": 1,
+                         "frames_no_punch_can_take": []}, str(s70["framing"]))
+
+print("find_punches: every label a framing mark")
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": int(t_ * fps), "end": int(t_ * fps), "label": "unclear"} for t_ in (3.08, 9.1, 14.05)]}),
+    encoding="utf-8")
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc_all = find_punches.main(base + ["--unclear", "not-a-punch"])
+sall = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))
+check("scored without a crash, and the score file is written for this run", rc_all == 0
+      and sall["unclear_means"] == "not-a-punch" and sall["score"]["n_labelled"] == 0, str(sall.get("score")))
+check("... recall, F1 and the count ratio undefined (null), precision 0: none of the 3 detections is a punch",
+      sall["score"]["recall"] is None and sall["score"]["f1"] is None and sall["score"]["count_ratio"] is None
+      and sall["score"]["precision"] == 0.0 and sall["score"]["n_detected"] == 3, str(sall["score"]))
+check("... no chance floor (nothing to score a shifted guess against), though the clip is 20 s",
+      "shift_floor" not in sall)
+check("... all 3 marks flagged, by both bounds", sall["framing"]["marks"] == 3
+      and sall["framing"]["flagged_as_punches_at_least"] == 3 and sall["framing"]["flagged_as_punches_at_most"] == 3)
+check("... and it says no punches were labelled, instead of printing 0.000 scores",
+      "no punches labelled" in buf.getvalue() and "recall 0.000" not in buf.getvalue(), buf.getvalue())
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

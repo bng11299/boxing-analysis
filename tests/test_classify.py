@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from boxingvi import classify, pose_yolo, punchfind  # noqa: E402
-from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Track  # noqa: E402
+from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Span, Track  # noqa: E402
 from boxingvi.stgcnpp import STGCNPP, prepare_input  # noqa: E402
 
 PASS = FAIL = 0
@@ -893,13 +893,14 @@ lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [{"start": f_, 
 classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
 s50 = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
 check("point labels: the finder found 2 of the 2 punches, and 2 of its 3 detections were real",
-      s50["finder"] == {"labelled_punches": 2, "detections": 3, "matched": 2, "recall": 1.0, "precision": 2 / 3}
+      s50["finder"] == {"per_hand": True, "labelled_punches": 2, "detections": 3, "matched": 2, "recall": 1.0,
+                        "precision": 2 / 3}
       and s50["point_labels"] == 2 and s50["unclear_means"] == "not-a-punch", str(s50["finder"]))
 check("the framing mark that drew a detection is reported, with what the classifier called it",
       s50["framing"]["marks"] == 1 and s50["framing"]["flagged_as_punches_at_least"] == 1
       and s50["framing"]["flagged_as_punches_at_most"] == 1
-      and sum(s50["framing"]["named_as"].values()) == 1
-      and set(s50["framing"]["named_as"]) <= set(CLASSES) | {"unclassified"}, str(s50["framing"]))
+      and sum(s50["framing"]["named_as_no_punch_can_take"].values()) == 1
+      and set(s50["framing"]["named_as_no_punch_can_take"]) <= set(CLASSES) | {"unclassified"}, str(s50["framing"]))
 check("point labels have no start and end, so the 'from labelled frames' reading is empty, and no length is claimed",
       s50["labelled_punch_from_labelled_frames"]["n"] == 0 and s50["labelled_length_s_median"] is None
       and s50["window_iou_with_labels"]["n"] == 0, str(s50))
@@ -954,7 +955,58 @@ classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-pun
 snear = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))["framing"]
 check("a framing mark whose only detection a punch took is reported as 0 to 1, with nothing named",
       snear["flagged_as_punches_at_least"] == 0 and snear["flagged_as_punches_at_most"] == 1
-      and snear["named_as"] == {}, str(snear))
+      and snear["named_as_no_punch_can_take"] == {}, str(snear))
+# The jab-cross: both detections are within reach of a click between them, the framing click 8 frames after the
+# cross reaches only the cross. The greedy gives the punch the jab, but a punch matching that takes the cross is
+# just as large and leaves the mark nothing: 0 to 1, not 1. A second framing click on a still stretch draws nothing.
+d0, d1 = int(ph_rows[0]["frame"]), int(ph_rows[1]["frame"])
+pc, fc, still_f = (d0 + d1) // 2, d1 + 8, int(12 * fps)
+tol50 = int(round(find_punches.TOL_S * fps))
+check("control: both detections reach the punch click, only the cross reaches the framing click, the greedy gives the "
+      "punch the jab, and nothing is near the still click",
+      abs(d0 - pc) <= 12 and abs(d1 - pc) <= 12 and abs(d1 - fc) <= 12 and abs(d0 - fc) > 12
+      and punchfind.match([d0, d1], punchfind.for_matching([Span(pc, pc, 0)], tol50, 12), tol50) == [(0, 0)]
+      and all(abs(int(r["frame"]) - still_f) > 12 for r in ph_rows), f"{d0} {d1} {pc} {fc}")
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": pc, "end": pc, "label": "jab"}, {"start": fc, "end": fc, "label": "unclear"},
+    {"start": still_f, "end": still_f, "label": "unclear"}]}), encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+sx = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))["framing"]
+check("framing bounds hold whichever maximum punch matching is chosen: 0 to 1 of 2, nothing named as certain",
+      sx == {"marks": 2, "flagged_as_punches_at_least": 0, "flagged_as_punches_at_most": 1,
+             "named_as_no_punch_can_take": {}}, str(sx))
+
+print("which finder made the punch list: recorded from the sidecar find_punches.py writes")
+prov50 = json.loads((tmp / "ph" / "IMG_5050.classified.json").read_text(encoding="utf-8"))
+check("a per-hand list is recorded as per-hand, in the provenance and the score",
+      prov50["finder_per_hand"] is True and sx is not None
+      and json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))["finder"]["per_hand"] is True)
+classify_punches.main(args8)
+check("a pooled list is recorded as pooled",
+      json.loads((tmp / "o" / "IMG_8888.classified.json").read_text(encoding="utf-8"))["finder_per_hand"] is False)
+side50 = tmp / "ph" / "IMG_5050.punches.json"
+good_side = side50.read_text(encoding="utf-8")
+
+
+def per_hand_with(sidecar_text):
+    if sidecar_text is None:
+        side50.unlink()
+    else:
+        side50.write_text(sidecar_text, encoding="utf-8")
+    classify_punches.main(args_ph)
+    side50.write_text(good_side, encoding="utf-8")
+    return json.loads((tmp / "ph" / "IMG_5050.classified.json").read_text(encoding="utf-8"))["finder_per_hand"]
+
+
+gs = json.loads(good_side)
+check("no sidecar: unknown (null), not a guess", per_hand_with(None) is None)
+check("a sidecar hashed to other bytes than the CSV holds: unknown",
+      per_hand_with(json.dumps(gs | {"csv_sha256": "0" * 64})) is None)
+check("a sidecar for another clip: unknown", per_hand_with(json.dumps(gs | {"clip": "IMG_8888"})) is None)
+check("a sidecar whose per_hand is not a boolean: unknown", per_hand_with(json.dumps(gs | {"per_hand": "yes"})) is None)
+check("a sidecar that is not JSON, or holds NaN: unknown, not a crash",
+      per_hand_with("{not json") is None and per_hand_with('{"per_hand": NaN}') is None)
+check("control: the untouched sidecar is read", per_hand_with(good_side) is True)
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
