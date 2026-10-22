@@ -495,13 +495,22 @@ def det_region(det, width, height):
                         cx + FACE_DET_PAD * hw, cy + FACE_DET_PAD * hh, width, height)
 
 
+def _frontal_head_width(box, kxy, kc):
+    """Head width of a FRONTAL face (nose and both eyes confident) from the eye-to-eye
+    distance alone, the most reliable pair head-on; None if not frontal or implausibly
+    small. On own footage the max-over-pairs estimate ran ~2x the true head (the
+    noisiest pair wins), and every real CenterFace box failed a size check against it."""
+    if not all(kc[j] >= FACE_MIN_CONF for j in (NOSE, L_EYE, R_EYE)):
+        return None
+    hw = float(np.linalg.norm(kxy[L_EYE] - kxy[R_EYE])) * HEAD_PAIR_FACTORS[frozenset((L_EYE, R_EYE))]
+    return hw if hw >= HEAD_MIN_BOX_H * (box[3] - box[1]) else None
+
+
 def _frontal_square(box, kxy, kc, width, height):
-    """With nose AND both eyes confident (a frontal face, so their mean is the face's
+    """With a frontal face (nose and both eyes confident, so their mean is the face's
     centre), a square FRONTAL_HALF head widths either side of it; else None."""
     pts = [NOSE, L_EYE, R_EYE]
-    if not all(kc[j] >= FACE_MIN_CONF for j in pts):
-        return None
-    hw = head_width(pts, kxy, box[3] - box[1])
+    hw = _frontal_head_width(box, kxy, kc)
     if hw is None:
         return None
     cx, cy = kxy[pts].mean(axis=0)
@@ -518,13 +527,10 @@ def _agreeing_face(face, box, kxy, kc, dets, used):
     centre within the person's box (with the usual slack)."""
     if face is None or face.region is None or len(dets) == 0:
         return None
-    pts = [j for j in FACE_JOINTS if kc[j] >= FACE_MIN_CONF]
     inner = [NOSE, L_EYE, R_EYE]
     # Frontal faces only (nose AND both eyes): a three-quarter or profile face can be
     # under-measured, and a tight box then left the chin bare -- the floor catches it.
-    if not all(kc[j] >= FACE_MIN_CONF for j in inner):
-        return None
-    hw = head_width(pts, kxy, box[3] - box[1])
+    hw = _frontal_head_width(box, kxy, kc)
     if hw is None:
         return None
     wrists = [kxy[j] for j in (L_WRIST, R_WRIST) if kc[j] >= BODY_MIN_CONF]
