@@ -1142,4 +1142,10 @@ classify_punches also applies #14's pooled check. Otherwise it keeps the own-han
   - **Noted, not changed:** both checks accept a row on a track's or segment's first or last row,
     which the finder never emits. Tightening that is possible but out of scope.
 - **Re-review of 88c8ea3: FIX FIRST**, for the overclaiming test name above; Q1-Q4 confirmed killed.
+- **Re-review of 89fc9dc: SHIP**, no blocking findings.
+  - W1 and W2 killed. Removing either last-row guard (`i + 1 < len(...)`) crashes the suite with
+    IndexError on the new `[3, 6]` row-1 cases.
+  - The test names and this entry now claim only what the tests show.
+  - Optional, not done: record a crash as a named FAIL instead of a traceback, and give W1 and W2
+    one check each.
 - **Tests:** hands 73, classify 277, pipeline 260, labels 50, ingest 109, env 36.
