@@ -747,6 +747,57 @@ on; (4) own footage re-run; (5) suites green in a clean clone.
   the censoring rule and the too-few fallback are unmeasured; intervals resample punches
   independently.
 
+### Iteration 8 -- Codex's two findings (2026-10-21, `e2459d5`)
+Acceptance: (1) the under-5 fallback reads exactly `cut_window`'s frames, checked by the frames
+read, not the stored length; (2) a repeated (frame, hand) CSV row is refused; (3) decide and
+record whether threshold and local-peak checks belong here; (4) no row the finder emits is
+refused; (5) suites green here and in a clean clone; one Astra review.
+- **Finding 1, and why the obvious fix was wrong.** `clip_cut` stored `geom.duration_s` (9/24 s,
+  a sample count) as `length_s`, which `clip_window` treats as first-to-last: 10 frames at 24 fps
+  where `cut_window` reads 9. Correcting the length to (9 - 1)/24 s fixes 24 fps but, read through
+  `clip_window` + `cut_span`, reads **8** frames at 25, 29.97 and 59.94 fps: the start snaps to a
+  frame and `cut_span` reads only whole training steps. The old one-step-too-long length had
+  masked that (9 frames at phone rates, 10 only at multiples of 24). So the fallback, which IS
+  the old fixed window, is now read by `cut_window`'s own frames through the new
+  `classify.read_clip_window`; a clip's own cut goes through `clip_window` + `cut_span` exactly
+  as gated (tested equal). `classify_punches.py` and `eval_classify_v6.py` call it, and the
+  recorded span is now the frames read (it had been 2 frames wider at 59.94 fps). A manifest
+  whose lead-in would put the peak after the window's last frame is refused.
+- **Finding 2, and the decision.** Duplicates refused in `read_punches`. Threshold and local-peak
+  checks: **added here**. They are facts about this branch's own finder (`punchfind.detect`:
+  `find_peaks` on the faster hand's speed, `height` = threshold), they close the same hole
+  (rows the finder cannot emit setting the clip's tempo), and leaving them to #22 would leave
+  #14's pipeline open on its own. Here they read the faster-hand curve the finder peaks on; #22's
+  version reads each hand's curve because it adds a per-hand finder. Necessary, not sufficient:
+  a peak the minimum gap suppressed, or a CSV with rows deleted, still passes.
+- **Tests:** 202 -> 221 checks. Frames compared by index coded into the nose: 47-55 at a 24 fps
+  peak at 50; every peak tried at 23.976, 24, 25, 29.97, 30, 59.94 and 60 fps. Negative: five
+  copies, two copies, one frame up and one down the slope, threshold one ulp above the slowest
+  punch (control at exactly its speed passes: `>=`, as `find_peaks`), unknown cut source, late
+  lead-in. Two existing expectations encoded the bug (0.375 s length, 22-frame CLI span) and
+  were corrected to 8/24 s and 20 frames. **Mutants: 9, all caught**, including "length fixed but
+  read through `cut_span`" (fails the 7-rate check).
+- **Real-world facts, own footage at 59.946 fps** (outputs to scratch; finder re-run with this
+  branch): IMG_4406 and IMG_4395, 41 and 42 finder rows, all accepted by the new checks;
+  classified CSVs **byte-identical** to `49473f9`. Their first 4 rows alone (the fallback): 9
+  frames per punch before and after, the length-only fix 8; 7 of 8 types unchanged, one
+  low-confidence punch moved (rear hook 0.53 -> rear uppercut 0.36).
+- **Gates:** test green (221/260/38/109/50/36 + 38 PowerShell), the same counts in a clean clone
+  at `e2459d5`. Review (self): one overstated comment fixed. Security: changed files only; the
+  CSV boundary and manifest checks are stricter and fail closed; the duplicate set is bounded by
+  MAX_ROWS; errors name file, line and frame only.
+- **Astra (Codex, read-only, effort medium): FIX FIRST, both items in stacked branches, none in
+  this diff.** (a) `eval_pose_switch.py:166` on #16 reads through `clip_window` + `cut_span`:
+  route it through `read_clip_window` in #16's fix pass (its V5/V9 cuts have far more than 5
+  punches, so no reported number moves). (b) Merging into #22: keep #22's per-hand check, this
+  branch's duplicate guard, and `read_clip_window` at both read sites. No false refusal found
+  (plateaus, segment edges, threshold equality, same signal code in both tools). Astra could
+  not run Python in its sandbox ("Access is denied"); the runtime evidence above is this
+  session's.
+- **Residual, accepted:** `run_punch_extent.py` still takes fallback spans from `clip_window`
+  (description only; V6 never falls back). At exactly 60 fps `cut_window`'s x.5 ties fall either
+  way by float noise (pre-existing). The fallback remains unmeasured on labelled footage.
+
 ## `feat/own-footage-scoring` -- 2026-10-19
 
 Brendan's labels on IMG_4395 and IMG_4406 are single-frame clicks (94 of 94), not start-to-end
@@ -954,3 +1005,48 @@ final code. Every finder and type number reproduces iteration 2 exactly:
   merge in a throwaway clone conflicts in `classify_punches.py` and this log. Not merged here: no
   gate needed it. At the stack step, keep #22's per-hand peak check, #14's duplicate-row guard
   (threshold and local-peak checks), and `classify.read_clip_window` at both read sites.
+
+### Iteration 5 -- merging #14's fixes in (2026-10-21, base `9f33f3d`)
+Brendan asked for the conflict to be resolved here, keeping #22's per-hand peak check, #14's
+duplicate-row guard, and `classify.read_clip_window` at both read sites. Merged (not rebased, so
+no force-push).
+- **The peak check: the two sides disagreed in substance, not only in text.**
+  - **#14** refuses a row unless its hand is the FASTER one, and judges the threshold and the
+    local peak on the faster hand's speed. That is right for the pooled finder.
+  - **#22** judges both on the row's OWN hand, because the per-hand finder reports each hand's
+    peaks and the other hand may be faster.
+  - **Kept #22's**, plus #14's "that hand has speed" clause, which #22's lacked; it matters only
+    for a rule whose threshold is 0.
+  - **Cost:** for a pooled list, a slower hand's own peak now passes where #14 refused it.
+    #14's comment already called the check "necessary, not sufficient". The per_hand sidecar is
+    not used to choose the check, because it is recorded, not trusted.
+- **The read sites:** `read_clip_window` at the pipeline's read and at the perfect-finder reading,
+  as #14 had them. The IoU line keeps #22's exclusion of point labels.
+- **#14's duplicate-row guard** (`read_punches`) merged without conflict. Per-hand rows at one
+  frame for both hands are different (frame, hand) keys, so they are not duplicates.
+- **The log:** #14's iteration 8 now ends its own section, before this one.
+- **Mutants on the resolution** (copies of the tree, test_classify):
+
+  | # | mutant | first run | after the new tests |
+  |---|---|---|---|
+  | X1 | drop the "has speed" clause | survived: `clip_cut`'s `peak_width` refused the row later, so the outcome matched | killed: the test now pins that the PEAK CHECK refuses it (a still frame at threshold 0) |
+  | X2 | drop the threshold clause | killed | killed |
+  | X3, X4 | allow a faster previous / next frame | killed | killed |
+  | X5 | judge on the faster hand's speed (#14's signal) | killed | killed |
+  | X6 | restore #14's faster-hand clause | **survived**: no fixture had a per-hand row whose hand is the slower one | killed: both hands punch together, the right at half reach; the right's rows (left faster) must be accepted |
+  | X7 | pipeline read back to `cut_span(clip_window)` | **survived** | killed |
+  | X8 | perfect-finder read back to `cut_span(clip_window)` | **survived** | killed |
+  | X9 | IoU includes point labels | killed | killed |
+  | X10 | allow duplicate (frame, hand) rows | killed | killed |
+
+  - **Why X7 and X8 survived:** #14's frame-rate tests call `read_clip_window` directly, so no
+    script-level test pinned either read site. A spy on `classify.read_clip_window` now runs
+    classify on a clip with fewer than 5 punches (the training cut, where the two reads differ).
+    It asserts that every finder row goes through it, and that each named labelled punch does too
+    (3 + 2 calls).
+- **Tests:** hands 73, classify 258 (232 + 19 from #14 + 7 new), pipeline 260, labels 50, ingest
+  109, env 36.
+- **Re-measured on the merged code:** every number in iteration 3's table is unchanged, including
+  the framing bounds and per_hand. Both clips have far more than 5 punches, so they use the clip's
+  own cut, which `read_clip_window` reads exactly as before. #14's change is to the under-5
+  fallback only.

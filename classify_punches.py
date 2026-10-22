@@ -90,13 +90,15 @@ def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
     Every frame must lie in this clip and every time must equal frame / this clip's
     fps. That catches a CSV from a clip at another frame rate or a longer clip; it
     cannot catch one from another clip of the same rate and length, which is why
-    main() also requires the file names to name the same clip."""
+    main() also requires the file names to name the same clip. The finder reports
+    each hand's peak once, so a repeated (frame, hand) row is refused: five copies
+    of one punch would otherwise pass the five-punch gate and set the clip's tempo."""
     with path.open(newline="", encoding="utf-8") as f:
         r = csv.reader(f)
         header = next(r, None)
         if header != PUNCH_HEADER:
             raise ValueError(f"{path.name}: not a find_punches.py CSV (header {header!r})")
-        rows = []
+        rows, seen = [], set()
         for i, row in enumerate(r, start=2):
             if len(rows) >= MAX_ROWS:
                 raise ValueError(f"{path.name}: more than {MAX_ROWS} rows")
@@ -117,6 +119,10 @@ def read_punches(path: Path, n_frames: int, fps: float) -> "list[dict]":
             if d["peak_on_interpolated_frame"] not in ("yes", "no"):
                 raise ValueError(f"{path.name} line {i}: interpolated flag {d['peak_on_interpolated_frame']!r}")
             d["frame"] = int(d["frame"])
+            if (d["frame"], d["hand"]) in seen:
+                raise ValueError(f"{path.name} line {i}: frame {d['frame']} {d['hand']} is listed twice; "
+                                 "the finder reports each peak once")
+            seen.add((d["frame"], d["hand"]))
             rows.append(d)
     return rows
 
@@ -199,20 +205,23 @@ def main(argv=None) -> int:
     for d in rows:
         hand = 0 if d["hand"] == "left" else 1
         i = row_of.get(d["frame"])
-        # The finder reported a speed peak of this hand at this frame, above the rule's threshold:
-        # if this pose has no frame there, or that hand is not at a peak above it there, the CSV
-        # was not made from this pose with this rule. (The other hand may be faster: the per-hand
-        # finder reports each hand's own peaks.)
+        # The finder (punchfind.detect) reports speed peaks of the named hand at or above the rule's
+        # threshold. A row that is not one -- no frame here, no speed in that hand, below the
+        # threshold, or with a faster neighbouring frame OF THAT HAND -- was not made from this pose
+        # with this rule. Judged on the row's own hand, not the faster one: the per-hand finder
+        # reports each hand's own peaks, so the other hand may be faster. Necessary, not sufficient:
+        # a peak the minimum gap suppressed passes, and so does a slower hand's peak in a pooled list.
         h_ = sig[:, hand]
-        if (i is None or not h_[i] >= rule["threshold"]
+        if (i is None or not h_[i] > 0 or not h_[i] >= rule["threshold"]
                 or (i > 0 and h_[i - 1] > h_[i]) or (i + 1 < len(h_) and h_[i + 1] > h_[i])):
             raise ValueError(f"{a.punches.name}: frame {d['frame']} is not a {d['hand']}-hand speed peak in "
                              f"this pose; it was not made from {a.pose.name} with this rule")
         peaks.append((d["frame"], hand))
     # One length for the whole clip, from its punches' own extents; each punch read around its own peak.
     cut = classify.clip_cut(track, sig, peaks, ex, geom)
-    spans_read = [classify.clip_window(p, cut, pose.fps) for p, _ in peaks]
-    wins = [classify.cut_span(track, s_, e_, geom, torso) for s_, e_ in spans_read]
+    reads = [classify.read_clip_window(track, p, cut, geom, torso) for p, _ in peaks]
+    wins = [w_ for w_, _ in reads]
+    spans_read = [s_ for _, s_ in reads]
     ok = [i for i, w in enumerate(wins) if w.keypoints is not None]
     probs = classify.predict_proba(model, [wins[i].keypoints for i in ok], man["t_out"])
     pred = {i: p for i, p in zip(ok, probs)}
@@ -311,7 +320,7 @@ def main(argv=None) -> int:
             if i is None or not sig[i].max() > 0:   # span_peak fell back to the middle: there is no peak
                 by_window.append(classify.Window(None, 0, "no wrist speed inside the labelled punch"))
             else:
-                by_window.append(classify.cut_span(track, *classify.clip_window(pk, cut, pose.fps), geom, torso))
+                by_window.append(classify.read_clip_window(track, pk, cut, geom, torso)[0])
         ious = [punchfind.span_iou(spans_read[di], (spans[si].start, spans[si].end))
                 for si, di in pairs if spans[si].start != spans[si].end]
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
