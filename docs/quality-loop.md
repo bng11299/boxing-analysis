@@ -3683,3 +3683,66 @@ the chain at the report stage with out-dir untouched; (4) every suite green.
   ("re-run train_classifier.py") before the pose model would run: the one-command run stops at
   its first step until the classifier is retrained.
 - **Review (Astra / Codex, read-only, effort medium, one review of the #17/#18/#19 merges): SHIP all.** Merge OK on each branch, no adaptation defects; it checked that the shared checks are identical to feat/output-report's on all three (confirmed here: no changed line). Its sandbox could not run Python, so its verdict is from reading plus the results above; fresh clones of 2e2059f, f2412e8 and a2f90be reproduce every count.
+
+
+## `feat/glove-identity` -- 2026-10-23
+
+Glove-colour boxer identity for participant sparring footage (both boxers in black, gloves of different
+colours). `src/boxingvi/gloves.py` (the rule), `src/boxingvi/glovescore.py` (the gate's scoring),
+`glove_identity.py` (roles / compute / template / freeze / score / gate), `tests/test_gloves.py`. Stacked on
+`feat/appearance-identity` (#29). Gate `docs/gates/glove-identity.md`, committed `0e95deb` before any rule
+code. **No study frame has been read:** intake stopped at consent scope (vault ISSUES-LOG O65), so every number
+below is synthetic and none is a result.
+
+**Acceptance criteria.** (1) On painted fixtures, two boxers in different glove colours are named correctly
+through a ByteTrack id swap; same-colour gloves, one-red-one-blue on both, a light drop that changes the colour,
+and barely different colours are "not separable" with nobody named; low wrist confidence is "too few rows"; a
+clinch makes the touching gloves contested. (2) Scoring is the gate's, checked by hand-counted moments
+(anchor, unclear / not tracked / overlapping, swaps, B1 ByteTrack, B2 linker). (3) Every input file is
+checked and refused when malformed; every output is under the participant root; TEST / FAIL-CASE are refused
+before the freeze, after any rule change, and a second time. (4) Existing suites unchanged. (5) Counts only:
+no pixel array is written.
+
+**Threat sketch.** Assets: participant-derived data (pose, glove counts, labels, manifest) and the integrity of
+a one-shot held-out result. Entry points: the video decode, tracks / counts .npz, labels .csv, manifest and
+score .json, CLI paths. Trust boundary: files on disk into the parsers; the tool's writes. Top threats:
+derived participant data written into a synced, git or vault folder; a crafted or mismatched file causing a
+memory blow-up or silently wrong numbers (labels of another video, counts of another table); and, for
+integrity, scoring TEST with a rule changed after seeing it.
+
+### Iteration 1
+- **Build.** The rule: glove disc beyond each confident wrist (wrist >= 0.5, elbow >= 0.3); a read is
+  contested when another person's wrist is within 2 radii; 16 pixel classes (12 hues, dark, grey, white,
+  skin); per video an unsupervised 2-means in the Hellinger embedding; the video is separable only if the
+  centroids are >= 0.30 apart, each cluster holds >= 15% of rows, and co-present boxers fall in different
+  clusters in >= 70% of >= 10 frames; a raw decision needs a 0.20 margin; names are smoothed within a track
+  id over +-1 s with a 75% majority, and one name per frame. Roles come from the blur reports (DEV = the
+  non-fail video with the smaller original sha256), so only blurred copies can be registered.
+- **Test:** `tests/test_gloves.py` first run 153 / 153. That is a suite that had never failed, so 22 mutants:
+  **17 killed, 4 survived.** Survivors and why: the separation check (the co-present check caught every
+  same-colour fixture first; added near-identical colours, split perfectly but under 0.30); the 75% majority
+  (no fixture lent an id to the other boxer; added, and it still survived because the one-name-per-frame rule
+  masks the error, and the mutant is one-sided; added the lender undetected, in both directions); TEST
+  scored twice (refused by "output exists", not by the once-only rule; now the output is moved away first);
+  compute on an unregistered video (refused by the fingerprint check; now a matching unregistered clip).
+  Final: **163 / 163; 24 / 24 mutants killed** (scratchpad `mutate_gloves.py`).
+- **Review (own pass), 3 blocking, fixed:** (B1) the freeze compared only the constants digest: a logic change
+  with the same constants would pass; TEST now also needs the rule files byte-identical to the frozen commit
+  (`git diff --quiet <commit> -- files`). (B2) a linker refusal in baseline B2 would crash the one-shot TEST
+  run; it is recorded as an error, and bar 3 is then not met (never compared against 0). (B3) a failed JSON
+  write left a temp file in the participant folder.
+- **Security (own pass), changed files only.** Output location: faceblur's deny-by-default check, given a
+  `suffixes` argument (default `.mp4`, so the blur's behaviour and its 177 tests are unchanged) -> git /
+  vault / Syncthing / cloud / network refused; tested for root, suffix and git checkout. Parsing: counts
+  .npz zip directory and every NPY header read before allocation (a 128 GB declaration refused), no pickles,
+  exact keys / dtypes / shapes, classes summing to the disc's pixels; CSV and JSON size-capped and strict;
+  score files bound to the manifest by sha256. Subprocess: argument arrays; the commit passed to git is
+  validated as 40 hex first (no option injection). **Finding (medium), fixed:** a missing input escaped as a
+  traceback that prints its path, and an original's path may carry a name -> `main` reports only the OS
+  reason; test: a missing `Firstname-Lastname-round1.mp4` never appears in stderr.
+- **Regression:** blur 177, headgear 140, appearance 171, linking 266, tracks 79, pipeline 314: all pass,
+  same counts as before the branch.
+- **Residual risks, accepted for now:** `PoseTable.load` allocates from npy headers until #28 merges (the
+  tracks file is the one input not capped here); the counts loader checks the zip and then reopens it with
+  `np.load` (a local file swapped in between is out of scope); the rule constants are first-principles
+  guesses, untested on any real glove.
