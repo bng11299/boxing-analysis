@@ -148,7 +148,9 @@ def table_digest(table, every: int) -> str:
     """sha256 of the table's CONTENT (frame, track id, keypoints, confidences, in row order) and the sampling
     step: counts are row-indexed, so a regenerated or reordered table for the same video must not reuse them."""
     h = hashlib.sha256(f"{FORMAT}|every={int(every)}|".encode())
-    for a, dt in ((table.frame, np.int64), (table.track_id, np.int64), (table.xy, np.float32), (table.conf, np.float32)):
+    for a, dt in ((table.frame, np.int64), (table.track_id, np.int64), (table.xy, np.float64), (table.conf, np.float64)):
+        # float64: lossless for both float32 and float64 tables (a confidence of 0.299999999 vs 0.300000001
+        # sits on opposite sides of MIN_CONF and must not hash the same)
         h.update(np.ascontiguousarray(a, dtype=dt).tobytes())
     return h.hexdigest()
 
@@ -212,6 +214,28 @@ class HeadgearCounts:
             bad("not a headgear counts file (wrong arrays)")
         if sum(i.file_size for i in info) > MAX_UNCOMPRESSED_BYTES:
             bad(f"declares more than {MAX_UNCOMPRESSED_BYTES} bytes uncompressed")
+        # Each member's NPY header next, before numpy allocates from it: a tiny member can declare a shape of
+        # billions of elements. The declared data size must be exactly the bytes the member holds.
+        try:
+            with zipfile.ZipFile(p) as zf:
+                for i in info:
+                    with zf.open(i) as f:
+                        ver = np.lib.format.read_magic(f)
+                        read = np.lib.format.read_array_header_1_0 if ver == (1, 0) else \
+                            np.lib.format.read_array_header_2_0
+                        shape, _, dt = read(f)
+                        if dt.hasobject or dt.kind not in "iU":
+                            bad(f"{i.filename}: dtype {dt} is not allowed")
+                        need = math.prod(shape) * dt.itemsize
+                        if need != i.file_size - f.tell():
+                            bad(f"{i.filename}: its header declares {need} bytes of data, the member holds "
+                                f"{i.file_size - f.tell()}")
+        except (zipfile.BadZipFile, OSError, EOFError) as e:
+            raise ValueError(f"{p.name}: not a readable npz ({e})") from e
+        except ValueError as e:
+            if str(e).startswith(p.name):
+                raise
+            raise ValueError(f"{p.name}: not a readable npz ({e})") from e
         try:
             z = np.load(p, allow_pickle=False)
         except (ValueError, OSError) as e:

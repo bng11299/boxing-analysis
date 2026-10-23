@@ -90,3 +90,16 @@ Nothing above is changed; these make it precise. All come from dev numbers or fr
   each read once; a missing or failed one means "not evaluated", an unknown id is never read.
 - **Bootstrap draws with no decided pair** are dropped and counted; more than 1% dropped fails G1.
 - The rule is FROZEN at the commit that adds this note; the PR records its hash.
+
+## Result, 2026-10-22 night: G1 FAILS (frozen rule `9d18ca6`, run once on the 23 held-out videos)
+| set | decided opposite | share | Wilson 95% | video bootstrap 95% |
+|---|---|---|---|---|
+| **held-out, 23 videos (gate)** | **277 / 333** | **83.2%** | [0.788, 0.868] | **[0.756, 0.880]** (0 draws dropped) |
+| kam4, 11 videos | 269 / 307 | 87.6% | [0.835, 0.908] | [0.844, 0.917] (descriptive) |
+| kam2, 12 videos | 8 / 26 | 30.8% | [0.165, 0.500] | -- |
+| robustness: without the 3 chapter twins (20) | 199 / 241 | 82.6% | [0.773, 0.868] | [0.718, 0.889] |
+
+Share >= 0.90: no. Decided pairs >= 100: yes (333). Bootstrap lower bound >= 0.80: no. Nothing missing, nothing
+failed. Decided: 35.8% of 931 co-present credited pairs. Credited fragments over their whole length: red 409,
+blue 197, none 222, unsure 102. **G2 was not run** (it runs only if G1 passes). As this gate says: no v4 on these
+videos; the finding goes to Future Work.

@@ -3548,3 +3548,39 @@ unsure 19. kam2 1 / 2, kam4 97 / 106. Wall 330 s for 38,137 frames.
 | open | empty bootstrap draws | dropped and counted; > 1% fails G1 (pre-registered in the gate's dated note) | gate edge 100 / 101 of 10,000; mutant caught |
 
 Tests: `tests/test_headgear.py` 137 checks (synthetic only, mostly negative); 17 of 17 hand-made mutants caught.
+
+### Held-out result (frozen `9d18ca6`, run once, 2,209 s): G1 FAILS
+277 / 333 decided co-present credited pairs opposite = **83.2%** (Wilson [0.788, 0.868]; video bootstrap
+[0.756, 0.880], 0 of 10,000 draws dropped) on all 23 manifest videos, none missing or failed. Bars: share 0.90 no,
+100 pairs yes, lower bound 0.80 no. kam4 269 / 307 (87.6%, Wilson [0.835, 0.908]); kam2 8 / 26 (30.8%: when kam2
+decides, it mostly reads both people red). Without the 3 chapter twins: 199 / 241 (82.6%). Per kam4 video:
+72.7%-100% (GH189681 8 / 11 lowest; GH129681 45 / 54, GH169681 35 / 43, GH109681 17 / 21 the largest misses).
+G2 not run. Baseline linker on the same 23 videos, for context only (the existing 10-07 outputs, not re-run):
+1,165 / 1,788 credited punches on A or B (65.2%; 82.2% with `--reacquire`), median both-identified 57%.
+
+What it says: the corner colour IS on the headgear (kam4 at 87.6% against v2's chance), but at this resolution and
+on these tracks it is not reliable enough to constrain linking, and on kam2 it is not readable at all. Not
+iterated, as the gate requires.
+
+### Iteration 2 -- review gate (Astra, read-only, effort medium): 3 of 5 fixes confirmed, 2 partly; both completed
+Astra confirmed the recorded FAIL is trustworthy: both bars fail independently, and the held-out run computed fresh
+(no cached counts were loaded), so neither partial fix could reach the verdict.
+| # | finding | fix | test / mutant |
+|---|---|---|---|
+| 2b | the content digest rounded keypoints and confidences to float32 (0.299999999 and 0.300000001 hash alike, either side of MIN_CONF) | hash as float64 (lossless for float32 and float64 tables) | digest test both ways; mutant caught |
+| 4b | a tiny member's NPY header could still declare 10^10 elements | every member's NPY header read first: dtype int or text only, declared bytes must equal the bytes held | zip-bomb member refused with np.load trapped; mutant caught |
+
+Tests 140 checks; 19 of 19 mutants caught. Fresh clone of `9d18ca6` from GitHub: test_headgear 137, test_appearance
+171, test_linking 266, test_tracks 79, test_olympic 29, test_pipeline 314, all pass, clean tree.
+
+### Security gate
+The trust boundary is the counts file (an input): size, zip directory, NPY headers, dtypes, shapes, bounds and the
+table's content digest are checked before use, no pickles. Video ids pass `_check_video_id`; the counts path cannot
+leave its folder; ffmpeg runs with an argument list (`video.py`). No secret, no data, no result file and no pixel in
+the diff; Olympic-derived numbers stay in the gitignored `results/`. The eye-check overlay was written to the
+gitignored `results/eyecheck/` and not viewed by the reviewer.
+
+### Residual risks
+kam2 colour is unreadable at these saturations; ids hop between people (window reading limits, not removes, this);
+the co-present pairs assume two people on screen together are different people (box overlap was near zero in the
+3 checked pairs); bout-level boxer recurrence across chapters (robustness row barely moves).

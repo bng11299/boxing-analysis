@@ -252,7 +252,7 @@ bad_files = [
     ("an unknown format", dict(format=np.array("boxingvi-headgear-0")), "unknown format"),
     ("a format that is not text", dict(format=np.array(1)), "text"),
     ("a malformed fingerprint", dict(video_fp=np.array("ABC")), "video_fp"),
-    ("float rows", dict(rows=cnt.rows.astype(float)), "int64"),
+    ("float rows", dict(rows=cnt.rows.astype(float)), "not allowed"),
     ("2-D counts", dict(red=cnt.red.reshape(-1, 1)), "1-D"),
     ("arrays of different lengths", dict(red=cnt.red[:-1]), "differ in length"),
     ("rows out of order", dict(rows=cnt.rows[::-1].copy()), "strictly increasing"),
@@ -300,6 +300,37 @@ try:
            lambda: HeadgearCounts.load(p), "uncompressed")
 finally:
     headgear.MAX_UNCOMPRESSED_BYTES, headgear.np.load = old_u, old_load
+import zipfile  # noqa: E402
+
+bomb = tmp / "bomb.npz"
+with zipfile.ZipFile(bomb, "w") as zf:
+    for name in sorted(headgear._KEYS):
+        b = io.BytesIO()
+        if name == "rows":                   # a header declaring 10^10 int64 rows over a few bytes of data
+            np.lib.format.write_array_header_1_0(b, {"descr": "<i8", "fortran_order": False, "shape": (10 ** 10,)})
+            b.write(b"\0" * 16)
+        else:
+            np.lib.format.write_array(b, {"format": np.array(headgear.FORMAT), "source": np.array(cnt.source),
+                                          "video_fp": np.array(""), "table_sha256": np.array(cnt.table_sha256),
+                                          "meta": np.array([cnt.n_frames, cnt.n_table_rows, cnt.every], np.int64),
+                                          "red": cnt.red, "blue": cnt.blue, "n": cnt.n}[name])
+        zf.writestr(name + ".npy", b.getvalue())
+headgear.np.load = _no_load
+try:
+    raises("refused: a tiny member whose NPY header declares 10^10 elements, before numpy allocates anything",
+           lambda: HeadgearCounts.load(bomb), "declares")
+finally:
+    headgear.np.load = old_load
+ta = table_of([(1, 0, NF - 1, 80, 120)], NF)
+tb_ = table_of([(1, 0, NF - 1, 80, 120)], NF)
+ta.conf = ta.conf.astype(np.float64); tb_.conf = tb_.conf.astype(np.float64)
+ta.conf[0, 0], tb_.conf[0, 0] = 0.299999999, 0.300000001
+check("the content digest is lossless: confidences 0.299999999 and 0.300000001 (either side of MIN_CONF) differ",
+      headgear.table_digest(ta, 5) != headgear.table_digest(tb_, 5))
+check("... while a float32 table and its float64 copy (exact) hash the same",
+      headgear.table_digest(table_of([(1, 0, 9, 80, 120)], 10), 5) == headgear.table_digest(
+          (lambda t: (setattr(t, "xy", t.xy.astype(np.float64)), setattr(t, "conf", t.conf.astype(np.float64)), t)[2])(
+              table_of([(1, 0, 9, 80, 120)], 10)), 5))
 re_t = table_of([(1, 0, NF - 1, 80, 120), (2, 0, NF - 1, 240, 120)], NF)
 re_t.xy[:] = re_t.xy[::-1]                  # same video, same metadata and row count: other CONTENT per row
 raises("counts are refused against a regenerated table with the same metadata (content digest)",
