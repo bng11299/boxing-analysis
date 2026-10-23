@@ -271,6 +271,44 @@ d.mkdir()
 rc, _, se = run(args(d, "--skip-ingest"))
 check("a corrupt pose file stops the chain at the ingest stage", rc == 1 and "ingest" in se, se)
 
+print("--skip-ingest: a reused pose's fingerprint is checked, with or without the overlay")
+for extra_ in ((), ("--no-overlay",)):
+    tag_ = "no overlay" if extra_ else "with overlay"
+    d = tmp / ("fp_noov" if extra_ else "fp_ov")
+    shutil.copytree(out, d)                                   # a previous run's good outputs
+    pose_like(video_fp="0" * 64).save(d / "IMG_9001.pose.npz")  # same name and metadata, another recording
+    before_ = state(d)
+    calls["n"] = 0
+    rc, _, se = run(args(d, "--skip-ingest", *extra_))
+    check(f"a reused pose whose fingerprint is another recording's is refused at ingest ({tag_})",
+          rc == 1 and calls["n"] == 0 and "stopped at ingest" in se and "fingerprint" in se, se[-600:])
+    check(f"... and the previous outputs are kept as they were ({tag_})", state(d) == before_)
+d = tmp / "fp_match"
+d.mkdir()
+pose_like(video_fp=video.fingerprint(clip)).save(d / "IMG_9001.pose.npz")
+rc, _, se = run(args(d, "--skip-ingest", "--no-overlay"))
+check("a reused pose whose fingerprint matches this video is accepted", rc == 0, se[-600:])
+
+print("the overlay stage draws the classified punches")
+seen_ov = []
+real_ov = analyse_clip.render_punches.render_punch_overlay
+
+
+def spy_ov(video_, pose_, classified_, out_, **kw):
+    seen_ov.append((Path(classified_).name, kw.get("min_conf"), kw.get("info") is not None))
+    return real_ov(video_, pose_, classified_, out_, **kw)
+
+
+d = tmp / "ovspy"
+d.mkdir()
+shutil.copy(out / "IMG_9001.pose.npz", d / "IMG_9001.pose.npz")
+with patched(analyse_clip.render_punches, "render_punch_overlay", spy_ov):
+    rc, _, se = run(args(d, "--skip-ingest"))
+check("the overlay is render_punches.render_punch_overlay, given this run's classified CSV, "
+      "the overlay confidence and the probed video",
+      rc == 0 and seen_ov == [("IMG_9001.classified.csv", analyse_clip.OVERLAY_MIN_CONF, True)],
+      f"{seen_ov} {se[-400:]}")
+
 print("the stance is never guessed")
 d = tmp / "nostance"
 calls["n"] = 0

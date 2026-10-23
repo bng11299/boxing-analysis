@@ -44,10 +44,11 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import classify_punches  # noqa: E402
 import find_punches  # noqa: E402
+import render_punches  # noqa: E402
 import report_punches  # noqa: E402
 import run_ingest  # noqa: E402
-from boxingvi import classify, overlay, report  # noqa: E402
-from boxingvi.pose_yolo import PoseSequence  # noqa: E402
+from boxingvi import classify, report  # noqa: E402
+from boxingvi.pose_yolo import PoseSequence, verify_binding  # noqa: E402
 from boxingvi.video import VideoInfo, probe  # noqa: E402
 
 DEFAULT_OUT = Path("results/analyse")
@@ -82,9 +83,10 @@ class PublishFailed(StageFailed):
 
 def render_overlay(video: Path, pose: PoseSequence, classified_csv: Path, out: Path, info: VideoInfo) -> int:
     """The one place the overlay is drawn; returns the frames written and raises ValueError on
-    a refusal. It runs last, so the classified punches exist: feat/punch-overlay swaps its
-    punch-labelled overlay in here. Until then it is the skeleton overlay run_ingest.py draws."""
-    return overlay.render_overlay(video, pose, out, OVERLAY_MIN_CONF, None, info)
+    a refusal. It runs last, so the classified punches exist, and draws them on the skeleton
+    (render_punches.render_punch_overlay, feat/punch-overlay)."""
+    return render_punches.render_punch_overlay(video, pose, classified_csv, out,
+                                               min_conf=OVERLAY_MIN_CONF, info=info)
 
 
 def _sha256(path: Path) -> str:
@@ -123,10 +125,14 @@ def video_frames(info: VideoInfo) -> int:
 
 
 def check_pose(pose: PoseSequence, info: VideoInfo, video: Path, model: str) -> None:
-    """The pose is this video's, whole: same source file, length, rate, size and pose model."""
+    """The pose is this video's, whole: same source file, length, rate, size and pose model,
+    and -- when the pose records one -- the same CONTENT (pose_yolo.verify_binding). This runs
+    whether or not an overlay is drawn: with --skip-ingest --no-overlay nothing else would
+    compare the reused pose's fingerprint with this video."""
     name = Path(video).resolve().name
     if pose.source != name:
         raise ValueError(f"the pose was extracted from {pose.source!r}, not {name!r}")
+    verify_binding(pose, Path(video).resolve())
     n = video_frames(info)
     if len(pose) != n:
         raise ValueError(f"the pose has {len(pose)} frames, the video {n}: not the same video, or cut short")
