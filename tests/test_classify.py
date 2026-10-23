@@ -593,6 +593,8 @@ check("a good rule file is read", extent_json()() == {"frac": 0.5, "lead_widths"
 raises("a rule that did not beat the fixed window is refused", extent_json(beats_fixed_window=False))
 raises("a rule file from before the per-clip cut (the flag, but no gated cut) is refused", extent_json(gated_cut=None))
 raises("a rule file that gated another cut is refused", extent_json(gated_cut="per punch, at labelled peaks"))
+raises("a rule file gated with the greedy attribution (before 2026-10-20) is refused: the gate measured other pairs",
+       extent_json(gated_cut="per clip, median over the finder's detections, windows at its matched detections"))
 raises("a rule with no verdict is refused (truthy is not True)", extent_json(beats_fixed_window="yes"))
 raises("a rule measured with another wrist-speed variant is refused", extent_json(variant="radial"))
 raises("a width level of 1.0 is refused", extent_json(frac=1.0))
@@ -910,6 +912,10 @@ check("the window's overlap with labels that equal it is 1, over all 3 matched p
       sc["window_iou_with_labels"] == {"n": 3, "mean": 1.0}, str(sc["window_iou_with_labels"]))
 check("the score records the cut it scored", sc["cut"]["per"] == "clip" and sc["cut"]["source"] == "training")
 check("the score names the classifier it scored, by hash", sc["classifier_sha256"] == man["sha256"])
+prov_l = json.loads((tmp / "o" / "IMG_7777.classified.json").read_text(encoding="utf-8"))
+check("the score names the classified CSV it scored: the file's sha256, as the sidecar records it",
+      sc.get("csv_sha256") == prov_l["csv_sha256"]
+      == hashlib.sha256((tmp / "o" / "IMG_7777.classified.csv").read_bytes()).hexdigest(), str(sc.get("csv_sha256")))
 check("control: no matched punch is unclassifiable on the whole clip", sc.get("matched_unclassifiable") == 0)
 half = [{"start": s_["start"], "end": (s_["start"] + s_["end"]) // 2, "label": s_["label"]} for s_ in spans]
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": half}), encoding="utf-8")
@@ -937,6 +943,56 @@ check("a labelled punch with no wrist speed in it is not scored 'at its peak' (i
       sc_still["labelled_punch_by_clip_window_unclassifiable"] == 1
       and sc_still["labelled_punch_by_clip_window_at_its_peak"]["n"] == 1
       and sc_still["labelled_punch_from_labelled_frames"]["n"] == 2, str(sc_still))
+# Classified again without --labels (another stance): the CSV changes, the score file on disk does not.
+from boxingvi import report as report_mod  # noqa: E402
+
+score_path = tmp / "o" / "IMG_7777.classify_score.json"
+classify_punches.main(args + ["--stance", "southpaw"])
+prov_s = json.loads((tmp / "o" / "IMG_7777.classified.json").read_text(encoding="utf-8"))
+check("re-classifying without --labels leaves a score whose CSV hash is no longer the sidecar's",
+      json.loads(score_path.read_text(encoding="utf-8"))["csv_sha256"] != prov_s["csv_sha256"])
+try:
+    report_mod.own_reliability(score_path, "IMG_7777", man["sha256"], prov_s["csv_sha256"])
+    why = "accepted"
+except ValueError as e:
+    why = str(e)
+check("... and the report refuses that stale score for the new CSV (same clip, same classifier)",
+      "another classified CSV" in why, why)
+# A fast jab-cross: the finder reports one peak (the right hand's, at 14 s) and it fits both labels; the jab
+# ends first. punchfind.match hands that detection to the jab, so a window read at the cross would be scored
+# against 'jab'. The score must attribute it to the cross, whose middle it sits nearest.
+f14 = int(rows[2]["frame"])
+check("control: the third finder punch is the right hand's", rows[2]["hand"] == "right", str(rows[2]))
+combo = [{"start": f14 - 20, "end": f14 - 3, "label": "jab"}, {"start": f14 - 2, "end": f14 + 14, "label": "cross"}]
+tol14 = int(round(find_punches.TOL_S * fps))
+greedy14 = punchfind.match([f14], [Span(c["start"], c["end"], 0) for c in combo], tol14)
+check("control: punchfind.match gives this detection to the jab (the fixture reproduces the V5 failure)",
+      greedy14 == [(0, 0)], str(greedy14))
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": combo}), encoding="utf-8")
+classify_punches.main(args + ["--stance", "orthodox", "--labels", str(lab)])
+sc_jc = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding="utf-8"))
+check("jab-cross: the matched detection is scored against the cross, not the jab",
+      sc_jc["matched_detections"]["n"] == 1 and sc_jc["matched_detections"]["classes_present"] == ["cross"],
+      str(sc_jc["matched_detections"]))
+check("... and the score says how detections were attributed", sc_jc.get("matching") == "nearest")
+
+print("eval_classify_v6 attribution")
+import eval_classify_v6  # noqa: E402
+
+v6_combo = [Span(10, 20, CLASSES.index("lead_hook")), Span(19, 26, CLASSES.index("rear_hook"))]
+check("control: at 24 fps the tolerance is 2 frames, and punchfind.match gives 22 to the first hook",
+      int(round(eval_classify_v6.TOL_S * 24.0)) == 2 and punchfind.match([22], v6_combo, 2) == [(0, 0)])
+check("readings C/E/G read the second hook at the detection on its middle, not the first",
+      eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0) == {1: 0},
+      str(eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0)))
+check("finder_pairs: no detections -> no pairs", eval_classify_v6.finder_pairs(np.array([], dtype=np.int64), v6_combo, 24.0) == {})
+import run_punch_extent  # noqa: E402
+
+check("the extent gate measures overlap at the detection on the second hook's middle, not the first's",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100)) == [(1, 0)],
+      str(run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100))))
+check("... and only spans wholly inside the window are kept",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 25)) == [], "the second hook ends at 26")
 
 def punches_with(text):
     p = tmp / "p.csv"
@@ -996,6 +1052,20 @@ reloaded = STGCNPP(); reloaded.load_state_dict(torch.load(tmp / "saved.pt", weig
 with torch.no_grad():
     again = reloaded(prepare_input(xs[18:], 50)).argmax(1).numpy()
 check("the saved state_dict reproduces the predictions run_stgcnpp scored", np.array_equal(again, r["_pred"]))
+# The matrix the manifest records, counted by hand from the saved model's own predictions: rows true, columns
+# predicted. Independent of sklearn's convention, so a transposed record fails here.
+by_hand = [[0] * len(CLASSES) for _ in CLASSES]
+for t_, p_ in zip(ys[18:], again):
+    by_hand[int(t_)][int(p_)] += 1
+held = train_classifier.held_out_block(r)
+check("the manifest's held-out block records the saved model's confusion matrix, rows true",
+      held["confusion"] == by_hand and held["accuracy"] == r["accuracy"] and held["per_class_f1"] == r["per_class_f1"],
+      f"{held['confusion']} vs {by_hand}")
+check("... and the matrix is not symmetric, so this test can tell it from its transpose",
+      by_hand != [list(c_) for c_ in zip(*by_hand)], str(by_hand))
+check("... as plain integers (JSON-safe)", all(type(v) is int for row_ in held["confusion"] for v in row_))
+raises("a run with no matrix is not recorded as if it had one",
+       lambda: train_classifier.held_out_block({k: v for k, v in r.items() if k != "confusion"}))
 
 print("per-hand finder rows, point labels and framing marks")
 # A jab and a cross 0.25 s apart, then a lone jab: the per-hand finder reports both hands of the combination.
@@ -1309,6 +1379,16 @@ check("control: the deeply nested sidecar is under the size cap", len(deep.encod
 raises("control: ... and json itself cannot parse it", lambda: json.loads(deep), RecursionError)
 check("a deeply nested sidecar (RecursionError in json): unknown, not a crash", per_hand_with(deep) is None)
 check("control: the untouched sidecar is read", per_hand_with(good_side) is True)
+
+print("classify_punches.attribute: widened for eligibility, attributed by the label's own instant")
+pt_c = [Span(1, 1, 0)]                    # a point label at frame 1; tol 3, point tol 6 widen it to [0, 4]
+check("detections [1, 2] give the frame-1 point detection 1 (the widened span's middle is 2)",
+      classify_punches.attribute([1, 2], pt_c, 3, 6) == [(0, 0)], str(classify_punches.attribute([1, 2], pt_c, 3, 6)))
+check("a detection only the widened span reaches still matches the point (eligibility is the widened span)",
+      classify_punches.attribute([7], pt_c, 3, 6) == [(0, 0)] and classify_punches.attribute([8], pt_c, 3, 6) == [])
+two_c = [Span(10, 20, 0), Span(30, 30, 1)]
+check("drag and point labels together: each detection goes to the label whose middle or instant is nearer",
+      classify_punches.attribute([15, 31], two_c, 3, 6) == [(0, 0), (1, 1)])
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

@@ -16,6 +16,11 @@ Why the reference must record its epochs: results/stgcnpp.json (09-16) has
 ST-GCN++ ran 20. Reading the missing field as "same as epochs" trained 30 epochs
 and scored 0.7951 / 0.7141 (2026-10-09); this script refused to save it.
 
+The manifest records the saved model's held-out confusion matrix (2026-10-21):
+report_punches.py takes its per-type reliability from the reference only when
+the two matrices are equal cell for cell. A manifest written before then has no
+matrix, and the report refuses it until this script is run again.
+
 The manifest also carries the window geometry (classify.training_geometry),
 measured on the training clips only, with the wrist-speed variant the punch
 finder's tuned rule uses.
@@ -64,6 +69,19 @@ def reference_metrics(path: Path, seed: int, t_out: int) -> dict:
     return {"accuracy": r[0]["accuracy"], "macro_f1": r[0]["macro_f1"], "epochs": epochs}
 
 
+def held_out_block(r: dict) -> dict:
+    """What the manifest records about the saved model on the held-out videos: its
+    scores AND its confusion matrix (rows true, columns predicted, CLASSES order).
+    run_stgcnpp saves the model after scoring it, so this is that model's matrix. The
+    report requires the reference's matrix to equal it cell for cell; per-class F1
+    alone cannot tell a matrix from its transpose."""
+    c = r.get("confusion")
+    if not (isinstance(c, list) and c and all(isinstance(row, list) and len(row) == len(c) for row in c)):
+        raise ValueError("the run returned no square confusion matrix; nothing to record")
+    return {"accuracy": r["accuracy"], "macro_f1": r["macro_f1"], "per_class_f1": r.get("per_class_f1"),
+            "confusion": [[int(v) for v in row] for row in c]}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, required=True)
@@ -106,8 +124,7 @@ def main(argv=None) -> int:
     m = write_manifest(a.out.with_suffix(".json"), a.out, geom, t_out, {
         "trained_on": "BoxingVI video-disjoint training side; held out " + "/".join(HELD_OUT_VIDEOS),
         "seed": seed, "epochs": epochs,
-        "held_out": {"accuracy": r["accuracy"], "macro_f1": r["macro_f1"],
-                     "per_class_f1": r.get("per_class_f1")},
+        "held_out": held_out_block(r),
         "reproduces": str(a.reference.as_posix()),
         "pretrained_from": r.get("pretrained_from"),
         "licence": "NTU RGB+D 120-derived weights: non-commercial; never released",

@@ -162,6 +162,19 @@ def span_peak(track, signal: np.ndarray, start: int, end: int) -> int:
     return (start + end) // 2
 
 
+def attribute(det_frames, spans: list, tol: int, point_tol: int) -> "list[tuple[int, int]]":
+    """Who is scored against which label: (span index, detection index) pairs.
+
+    Nearest, not punchfind.match's greedy, which hands a fast jab-cross's one detection
+    to the jab (punchfind.match_nearest): the same number of matches either way, but not
+    the same spans. The widened spans (punchfind.for_matching) decide which detections
+    are ELIGIBLE for a point label; distance is measured to each label's own middle or
+    instant (punchfind.centers), because a point near frame 0 is widened asymmetrically
+    and the widened span's middle moves off the click."""
+    return punchfind.match_nearest(det_frames, punchfind.for_matching(spans, tol, point_tol), tol,
+                                   centers=punchfind.centers(spans))
+
+
 def type_scores(y_true: "list[int]", y_pred: "list[int]") -> dict:
     """Accuracy, macro F1 over the classes present in the labels, and the
     always-guess-the-commonest-labelled-type floor."""
@@ -284,8 +297,9 @@ def main(argv=None) -> int:
               f"(chance for these proportions {agree['chance']:.1%}); a consistency check, not accuracy")
     # Provenance for whatever reads the CSV next (report_punches.py): which model named
     # these punches, from which finder rule, extent rule, stance and cut, and the CSV's own hash.
+    csv_sha256 = hashlib.sha256(out.read_bytes()).hexdigest()
     (a.out_dir / f"{clip}.classified.json").write_text(json.dumps({
-        "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+        "clip": clip, "csv_sha256": csv_sha256,
         "classifier_sha256": man["sha256"], "stance": a.stance, "rule": rule, "finder_per_hand": per_hand,
         "extent": ex,
         "cut": None if cut is None else {"per": "clip", **cut._asdict()},
@@ -303,7 +317,7 @@ def main(argv=None) -> int:
         n_points = sum(x.start == x.end for x in spans)       # point labels among the punches
         drags = [x for x in spans if x.start != x.end]
         named = [(j, x) for j, x in enumerate(spans) if x.label != UNCLEAR_LABEL]
-        pairs = punchfind.match([d["frame"] for d in rows], punchfind.for_matching(spans, tol, point_tol), tol)
+        pairs = attribute([d["frame"] for d in rows], spans, tol, point_tol)
         yt, yp, matched_unclassified = [], [], 0
         for si, di in pairs:
             if spans[si].label == UNCLEAR_LABEL:
@@ -347,9 +361,12 @@ def main(argv=None) -> int:
                 for si, di in pairs if spans[si].start != spans[si].end]
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
         found = len(pairs)
-        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol, "point_labels": n_points,
-                  "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
-                  "classifier_sha256": man["sha256"], "cut": {"per": "clip", **cut._asdict()},
+        # csv_sha256: the classified CSV this score describes. A later run without --labels
+        # rewrites the CSV but not this file; the report refuses the score once they differ.
+        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol, "matching": "nearest",
+                  "point_labels": n_points, "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
+                  "classifier_sha256": man["sha256"], "csv_sha256": csv_sha256,
+                  "cut": {"per": "clip", **cut._asdict()},
                   "finder": {"per_hand": per_hand, "labelled_punches": len(spans), "detections": len(rows),
                              "matched": found,
                              "recall": found / len(spans) if spans else None,

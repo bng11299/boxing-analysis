@@ -237,6 +237,71 @@ find_punches.main(["--pose", str(tmp / "IMG_6666.pose.npz"), "--rule", str(rule)
 check("a 10 s clip gets no chance floor (too few distinct shifts to mean anything)",
       "shift_floor" not in json.loads((tmp / "o" / "IMG_6666.score.json").read_text(encoding="utf-8")))
 
+print("nearest attribution (punchfind.match_nearest)")
+JAB, CROSS = 0, 1
+# A jab 10-18 then a cross 19-26; the finder reports one peak, at the cross's middle (22).
+combo = [Span(10, 18, JAB), Span(19, 26, CROSS)]
+greedy = punchfind.match([22], combo, 4)
+near = punchfind.match_nearest([22], combo, 4)
+check("punchfind.match credits the jab with the cross's detection (why attribution needs match_nearest)",
+      greedy == [(0, 0)], str(greedy))
+check("nearest matching gives that detection to the cross, whose middle it sits on", near == [(1, 0)], str(near))
+# Count comes first: z fits only A; w fits A (nearer) and C. Nearest-per-detection would give both to A.
+a_c = [Span(0, 10, JAB), Span(9, 30, CROSS)]
+check("a maximum matching first: the nearer span is given up when that keeps a hit",
+      punchfind.match_nearest([5, 9], a_c, 0) == [(0, 0), (1, 1)], str(punchfind.match_nearest([5, 9], a_c, 0)))
+rng = np.random.default_rng(3)
+same = True
+for _ in range(200):
+    starts = np.sort(rng.integers(0, 300, 12))
+    sp = [Span(int(s), int(s + rng.integers(3, 20)), int(rng.integers(0, 6))) for s in starts]
+    det = rng.integers(0, 320, int(rng.integers(0, 15)))
+    m = punchfind.match_nearest(det, sp, 3)
+    same &= len(m) == len(punchfind.match(det, sp, 3)) and len({j for _, j in m}) == len(m) \
+        and all(sp[s].start - 3 <= det[j] <= sp[s].end + 3 for s, j in m)
+check("200 random cases: as many hits as punchfind.match, one-to-one, every pair inside span +- tol", bool(same))
+import itertools  # noqa: E402
+
+opt = True
+for _ in range(150):
+    ns, nd = int(rng.integers(1, 6)), int(rng.integers(1, 6))
+    st = np.sort(rng.integers(0, 60, ns))
+    sp = [Span(int(x), int(x + rng.integers(2, 15)), 0) for x in st]
+    det = rng.integers(0, 75, nd)
+    fits = lambda si, di: sp[si].start - 2 <= det[di] <= sp[si].end + 2  # noqa: E731
+    dist = lambda si, di: abs(det[di] - (sp[si].start + sp[si].end) / 2)  # noqa: E731
+    best = (0, 0.0)                              # (hits, -total distance), maximised
+    for perm in itertools.permutations(range(nd), min(ns, nd)):
+        pairs = [(si, di) for si, di in zip(range(ns), perm) if fits(si, di)]
+        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
+    for perm in itertools.permutations(range(ns), min(ns, nd)):   # spans fewer than detections either way
+        pairs = [(si, di) for di, si in zip(range(nd), perm) if fits(si, di)]
+        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
+    m = punchfind.match_nearest(det, sp, 2)
+    opt &= len(m) == best[0] and abs(sum(dist(si, di) for si, di in m) + best[1]) < 1e-9
+check("150 small random cases against brute force: the most hits, then the least total distance", bool(opt))
+check("no detections, or no spans: no pairs", punchfind.match_nearest([], combo, 2) == [] and punchfind.match_nearest([5], [], 2) == [])
+
+raises("negative tolerance refused, as punchfind.match refuses it", lambda: punchfind.match_nearest([1], [Span(0, 1, 0)], -1))
+raises("... even with no detections, before the empty answer", lambda: punchfind.match_nearest([], [Span(0, 1, 0)], -1))
+import scipy.optimize  # noqa: E402
+
+_lsa = scipy.optimize.linear_sum_assignment
+scipy.optimize.linear_sum_assignment = lambda c: (np.array([], int), np.array([], int))   # a solver that drops a hit
+try:
+    raises("a solver answer with fewer hits than punchfind.match is refused, not scored",
+           lambda: punchfind.match_nearest([22], combo, 4), AssertionError)
+finally:
+    scipy.optimize.linear_sum_assignment = _lsa
+check("... and the real solver is back", punchfind.match_nearest([22], combo, 4) == [(1, 0)])
+# The combination as V6 has it: a hook whose span runs into the next, and the finder's one peak at the second's middle.
+hooks = [Span(100, 116, 2), Span(112, 128, 3), Span(200, 210, 2)]
+check("overlapping spans (as 212 of V6's 685 do): the detection goes to the span it sits in the middle of",
+      punchfind.match_nearest([117, 205], hooks, 2) == [(1, 0), (2, 1)]
+      and punchfind.match([117, 205], hooks, 2) == [(0, 0), (2, 1)], str(punchfind.match_nearest([117, 205], hooks, 2)))
+check("pairs come back sorted by span, whatever order the detections arrive in",
+      punchfind.match_nearest([205, 117], hooks, 2) == [(1, 1), (2, 0)], str(punchfind.match_nearest([205, 117], hooks, 2)))
+
 print("coverage is exactly where the signal is")
 walk = body(900, 59.946)
 walk.xy[:, [9, 10]] += np.random.default_rng(3).normal(0, 6, (900, 2, 2)).cumsum(axis=0)  # never still
@@ -414,6 +479,56 @@ s71 = json.loads((tmp / "o" / "IMG_7171.score.json").read_text(encoding="utf-8")
 check("framing-only labels on a still clip: no detections, so precision is null as well, and the 3 marks drew nothing",
       s71["score"]["n_detected"] == 0 and s71["score"]["precision"] is None and s71["score"]["recall"] is None
       and s71["framing"]["flagged_as_punches_at_most"] == 0 and s71["framing"]["marks"] == 3, str(s71))
+
+print("detect: eligible x per_hand, keyword-only (#13 x #22)")
+N_ = 60
+tr_ = Track(np.arange(N_), np.zeros((N_, N_JOINTS, 2)), 10.0)     # 10 fps: min_gap 0.4 s = 4 frames
+sg_ = np.zeros((N_, 2))
+sg_[9:14, 0] = [1.0, 5.0, 1.0, 2.0, 1.0]   # left: a large peak at 10 beside a smaller one at 12
+sg_[30, 0], sg_[30, 1] = 3.0, 4.0          # both hands peak on frame 30
+el_ = np.ones((N_, 2), bool)
+el_[10, 0] = False                         # the large peak is not eligible (e.g. a frame skip)
+
+
+def got(**kw):
+    f_, h_ = punchfind.detect(tr_, sg_, 1.5, 0.4, **kw)
+    return list(zip(f_.tolist(), h_.tolist()))
+
+
+combos_ = {
+    ("pooled", "all"): (got(), [(10, 0), (30, 1)]),
+    ("pooled", "eligible"): (got(eligible=el_), [(12, 0), (30, 1)]),
+    ("per_hand", "all"): (got(per_hand=True), [(10, 0), (30, 0), (30, 1)]),
+    ("per_hand", "eligible"): (got(per_hand=True, eligible=el_), [(12, 0), (30, 0), (30, 1)]),
+}
+for (mode_, el_name), (have_, want_) in combos_.items():
+    check(f"detect {mode_}, {el_name} frames: {want_}", have_ == want_, str(have_))
+check("control: without the eligibility mask the large peak at 10 suppresses the eligible one at 12",
+      (12, 0) not in got() and (12, 0) not in got(per_hand=True))
+check("an all-True mask is the original computation, in both modes",
+      got(eligible=np.ones((N_, 2), bool)) == got()
+      and got(per_hand=True, eligible=np.ones((N_, 2), bool)) == got(per_hand=True))
+raises("eligible and per_hand are keyword-only: a fifth positional argument is refused",
+       lambda: punchfind.detect(tr_, sg_, 1.5, 0.4, el_), TypeError)
+raises("an eligibility mask of the wrong shape is refused",
+       lambda: punchfind.detect(tr_, sg_, 1.5, 0.4, eligible=np.ones((N_, 1), bool)))
+
+print("match_nearest: widened spans decide eligibility, the label's own instant decides who")
+pt_ = [Span(1, 1, 0)]                                 # a point label at frame 1
+wide_ = punchfind.for_matching(pt_, 3, 6)             # -> [0, 4]: start clipped at 0, middle 2
+check("control: the widened point near frame 0 has its middle at 2, not 1",
+      (wide_[0].start, wide_[0].end) == (0, 4), str(wide_))
+check("control: by the widened middle, detections [1, 2] give the point to detection 2",
+      punchfind.match_nearest([1, 2], wide_, 3) == [(0, 1)])
+check("with centers = the labels' own instants, detections [1, 2] match the frame-1 point to detection 1",
+      punchfind.match_nearest([1, 2], wide_, 3, centers=punchfind.centers(pt_)) == [(0, 0)],
+      str(punchfind.match_nearest([1, 2], wide_, 3, centers=punchfind.centers(pt_))))
+check("centers of a drag label is its middle, of a point its instant",
+      punchfind.centers([Span(10, 20, 0), Span(7, 7, 1)]).tolist() == [15.0, 7.0])
+raises("centers of the wrong length are refused",
+       lambda: punchfind.match_nearest([1, 2], wide_, 3, centers=np.array([1.0, 2.0])))
+raises("non-finite centers are refused",
+       lambda: punchfind.match_nearest([1, 2], wide_, 3, centers=np.array([np.nan])))
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)
