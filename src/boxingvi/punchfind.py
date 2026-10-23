@@ -215,16 +215,28 @@ def signal_frames(track: Track, min_conf: float = MIN_CONF, bridge_s: float = BR
 
 
 def detect(track: Track, signal: np.ndarray, threshold: float,
-           min_gap_s: float, eligible: "np.ndarray | None" = None) -> "tuple[np.ndarray, np.ndarray]":
-    """Peaks of the faster hand's speed above `threshold`, at least `min_gap_s`
-    apart. Returns (video frame ids, hand: 0 left / 1 right).
+           min_gap_s: float, *, eligible: "np.ndarray | None" = None,
+           per_hand: bool = False) -> "tuple[np.ndarray, np.ndarray]":
+    """Peaks of wrist speed above `threshold`. Returns (video frame ids, hand: 0
+    left / 1 right), in (frame, hand) order.
 
-    `eligible` ((F, 2) bool, default None = every frame): a frame whose hand is not eligible can be a
-    neighbour in the peak test (its signal value is compared as it is) but is never a CANDIDATE, and is
-    excluded BEFORE the minimum-gap suppression, so it cannot suppress a real peak near it and then be
-    discarded itself. None is the original computation, untouched."""
-    from scipy.signal import find_peaks
+    Pooled (the V6-tuned rule, default): peaks of the FASTER hand's speed, at least
+    `min_gap_s` apart whichever hand threw them. A jab-cross faster than that is
+    one detection.
+    Per hand (`per_hand=True`): each hand's own peaks, at least `min_gap_s` apart
+    within that hand, so alternating combinations are seen as separate punches. On
+    Brendan's own labelled clips, 40% and 32% of punches follow the previous one
+    within 0.4 s, but only 11% and 0% follow one by the same hand (2026-10-19). The
+    threshold and the gap are the pooled rule's, unchanged.
 
+    `eligible` ((F, 2) bool, default None = every frame): a frame whose hand is not
+    eligible can be a neighbour in the peak test (its signal value is compared as it
+    is) but is never a CANDIDATE, and is excluded BEFORE the minimum-gap suppression,
+    so it cannot suppress a real peak near it and then be discarded itself. In pooled
+    mode a candidate's hand is the faster one there; per hand, it is that hand. None
+    is the original computation, untouched. Both options are keyword-only: they used
+    to share the fifth positional slot on two branches.
+    """
     if signal.shape != (len(track.frame_ids), 2):
         raise ValueError(f"signal shape {signal.shape} does not match the track")
     if not (np.isfinite(threshold) and min_gap_s >= 0):
@@ -232,20 +244,66 @@ def detect(track: Track, signal: np.ndarray, threshold: float,
     if eligible is not None and (eligible.shape != signal.shape or eligible.dtype != bool):
         raise ValueError("eligible must be a bool array shaped like the signal")
     dist = max(1, int(round(min_gap_s * track.fps)))
-    best = signal.max(axis=1)
     frames, hands = [], []
     for lo, hi in track.segments():
-        if eligible is None:
-            peaks, _ = find_peaks(best[lo:hi], height=threshold, distance=dist)
+        if per_hand:
+            for h in (0, 1):
+                peaks = _peaks(signal[lo:hi, h], threshold, dist,
+                               None if eligible is None else eligible[lo:hi, h])
+                frames.append(track.frame_ids[lo + peaks])
+                hands.append(np.full(len(peaks), h, dtype=np.int64))
         else:
-            cand, _ = find_peaks(best[lo:hi], height=threshold)             # local maxima on the true values
-            cand = cand[eligible[lo + cand, signal[lo + cand].argmax(axis=1)]]   # only eligible ones compete
-            spikes = np.zeros(hi - lo)                                      # the same suppression, on the survivors
-            spikes[cand] = best[lo + cand]
-            peaks, _ = find_peaks(spikes, height=threshold, distance=dist)
-        frames.append(track.frame_ids[lo + peaks])
-        hands.append(signal[lo + peaks].argmax(axis=1))
-    return np.concatenate(frames), np.concatenate(hands)
+            best = signal[lo:hi].max(axis=1)
+            ok = None
+            if eligible is not None:
+                ok = eligible[lo:hi][np.arange(hi - lo), signal[lo:hi].argmax(axis=1)]
+            peaks = _peaks(best, threshold, dist, ok)
+            frames.append(track.frame_ids[lo + peaks])
+            hands.append(signal[lo + peaks].argmax(axis=1))
+    f, h = np.concatenate(frames), np.concatenate(hands)
+    order = np.lexsort((h, f))
+    return f[order], h[order]
+
+
+def _peaks(x: np.ndarray, threshold: float, dist: int, ok: "np.ndarray | None") -> np.ndarray:
+    """find_peaks with a minimum distance, over the candidates `ok` allows (None: all).
+    Local maxima are found on the true values; the ineligible ones are dropped; the
+    minimum-gap suppression then runs on the survivors alone."""
+    from scipy.signal import find_peaks
+
+    if ok is None:
+        return find_peaks(x, height=threshold, distance=dist)[0]
+    cand, _ = find_peaks(x, height=threshold)
+    cand = cand[ok[cand]]
+    spikes = np.zeros(len(x))
+    spikes[cand] = x[cand]
+    return find_peaks(spikes, height=threshold, distance=dist)[0]
+
+
+# A label that is a single frame marks one instant somewhere inside a punch (a click in
+# the labelling tool, not a drag from start to end). The finder reports the wrist-speed
+# peak, which can sit anywhere in the same punch, so a point label matches a detection
+# within half a punch. Half of 0.4 s: the training clips' median punch is 0.375 s, and the
+# per-clip windows on Brendan's clips are 0.39 and 0.41 s. Chosen 2026-10-19 after the
+# scores at 0.1 s and 0.2 s had been seen on those clips; both are in docs/quality-loop.md.
+POINT_TOL_S = 0.2
+
+
+def for_matching(spans: "list[Span]", tol: int, point_tol: int) -> "list[Span]":
+    """Spans as `match` should see them: a single-frame span (a point label) is widened
+    so that, with `match`'s own `tol` on top, it matches within `point_tol` frames.
+    Start is kept at frame 0 or later, so a point near the clip's start still counts as
+    inside a window that starts there. The widened span decides ELIGIBILITY only: its
+    middle moves when the start is clipped at 0, so attribution uses `centers`."""
+    if tol < 0 or point_tol < 0:
+        raise ValueError("tolerances must be >= 0")
+    extra = max(point_tol - tol, 0)
+    return [Span(max(s.start - extra, 0), s.end + extra, s.label) if s.start == s.end else s for s in spans]
+
+
+def centers(spans: "list[Span]") -> np.ndarray:
+    """Each label's own middle (a point label's instant), for `match_nearest`."""
+    return np.array([(s.start + s.end) / 2 for s in spans], dtype=np.float64)
 
 
 def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
@@ -255,7 +313,10 @@ def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
     Spans are taken in order of END, each given the earliest free detection
     that fits -- the greedy that is provably optimal for points-to-intervals.
     Optimality matters here: 212 of V6's 685 spans overlap the next one, and a
-    naive first-come assignment undercounts combinations.
+    naive first-come assignment undercounts combinations. It is optimal in COUNT
+    only: where several maximum matchings exist, WHICH detections it takes is a
+    tie-break, not a fact about the footage, so nothing should be read off the
+    detections it leaves over (see framing_bounds).
 
     Returns (span index, detection index) pairs.
     """
@@ -278,7 +339,38 @@ def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
     return pairs
 
 
-def match_nearest(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
+def framing_bounds(det_frames, punch_spans: "list[Span]", framing_spans: "list[Span]",
+                   tol: int, point_tol: int) -> dict:
+    """How many framing marks (motions labelled as NOT punches) drew a detection, as
+    bounds that hold whichever matching of punches is chosen (maximum or not).
+
+    Punches are matched first, and several equally large matchings can exist; which
+    detections they leave free decides how many framing marks are hit. So:
+
+      at_least  framing marks matched (one-to-one, maximally) to detections that lie
+                in NO punch span's reach. No punch matching can take those, so this
+                count is reached under every one of them.
+      at_most   framing marks matched to ANY detection: no matching can leave more.
+
+    Neither is claimed to be reached: the lower bound ignores detections a punch
+    COULD take but need not, so it can sit below the true minimum. Where the two
+    agree, the count is exact. Both spans lists are the labels as written; point
+    labels are widened here (`for_matching`). `lower_set` is the indices into
+    `det_frames` of the detections ONE maximum framing matching used for the lower
+    bound: each is out of every punch's reach and on a framing mark, but where a mark
+    has several such detections, only one is listed.
+    """
+    det = np.asarray(det_frames)
+    punch = for_matching(punch_spans, tol, point_tol)
+    framing = for_matching(framing_spans, tol, point_tol)
+    free = np.flatnonzero([not any(s.start - tol <= d <= s.end + tol for s in punch) for d in det])
+    lower = match(det[free], framing, tol)
+    return {"marks": len(framing_spans), "at_least": len(lower), "at_most": len(match(det, framing, tol)),
+            "lower_set": sorted(int(free[di]) for _, di in lower)}
+
+
+def match_nearest(det_frames, spans: "list[Span]", tol: int,
+                  centers: "np.ndarray | None" = None) -> "list[tuple[int, int]]":
     """A maximum one-to-one matching of detections to spans, as `match`, that among
     all maximum matchings has the least total distance from each detection to its
     span's MIDDLE (ties broken by the solver, deterministically).
@@ -295,6 +387,11 @@ def match_nearest(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int,
     checked on every call. Solved as an assignment: an infeasible pair costs more than
     every feasible pair together, so the count is maximised first and the distance second.
 
+    `centers` (one per span, default each span's middle) is what distance is measured
+    to; eligibility is always [start - tol, end + tol]. Pass the labels' own middles
+    when the spans were widened for matching (`for_matching`), so a widened point
+    label is still attributed by where it was clicked.
+
     Returns (span index, detection index) pairs, sorted by span.
     """
     if tol < 0:
@@ -307,7 +404,13 @@ def match_nearest(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int,
     st = np.array([s.start for s in spans], dtype=np.int64)
     en = np.array([s.end for s in spans], dtype=np.int64)
     ok = (det[None, :] >= st[:, None] - tol) & (det[None, :] <= en[:, None] + tol)
-    dist = np.abs(det[None, :] - (st[:, None] + en[:, None]) / 2)
+    if centers is None:
+        mid = (st + en) / 2
+    else:
+        mid = np.asarray(centers, dtype=np.float64)
+        if mid.shape != (len(spans),) or not np.isfinite(mid).all():
+            raise ValueError("centers must be one finite number per span")
+    dist = np.abs(det[None, :] - mid[:, None])
     big = float(dist[ok].sum()) + 1.0 if ok.any() else 1.0
     ri, ci = linear_sum_assignment(np.where(ok, dist, big))
     pairs = [(int(s), int(d)) for s, d in zip(ri, ci) if ok[s, d]]

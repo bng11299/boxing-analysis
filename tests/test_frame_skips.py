@@ -460,23 +460,23 @@ check("the real punch at 212 IS a burst when the stronger edge peak at 204 is in
       any(near(b.frame, 212, 3) for b in rE["bursts"]) and not any(196 <= b.frame <= 204 for b in rE["bursts"])
       and all(rE["exposure"][1][b.frame] for b in rE["bursts"]), str(frames_of(rE)))
 raises("detect refuses an eligibility array of the wrong shape or type",
-       lambda: punchfind.detect(completeness._track_of(tE, np.arange(len(tE.frame)), "t"), np.zeros((NS, 2)), 3.6, 0.4, np.ones((NS, 1), bool)), "eligible")
+       lambda: punchfind.detect(completeness._track_of(tE, np.arange(len(tE.frame)), "t"), np.zeros((NS, 2)), 3.6, 0.4, eligible=np.ones((NS, 1), bool)), "eligible")
 trE = completeness._track_of(tE, np.arange(len(tE.frame)), "t")
 sgE = punchfind.wrist_signal(trE, "relative")
 check("detect with every frame eligible equals detect without the argument, on the scene's signal",
-      all(np.array_equal(x, y) for x, y in zip(punchfind.detect(trE, sgE, 3.62, 0.4), punchfind.detect(trE, sgE, 3.62, 0.4, np.ones(sgE.shape, bool)))))
+      all(np.array_equal(x, y) for x, y in zip(punchfind.detect(trE, sgE, 3.62, 0.4), punchfind.detect(trE, sgE, 3.62, 0.4, eligible=np.ones(sgE.shape, bool)))))
 rng_ = np.random.default_rng(7)
 same_ = True
 for _ in range(200):          # random smooth-ish signals with ties and plateaus: the two code paths agree peak for peak
     z_ = np.round(np.abs(np.convolve(rng_.normal(size=300), np.ones(3) / 3, mode="same")) * 4) / 2
     sg_ = np.stack([z_, np.roll(z_, 5)], axis=1)
     tr_ = completeness._track_of(table_of(300, range(300)), np.arange(300), "t")
-    a_, b_ = punchfind.detect(tr_, sg_, 2.0, 0.4), punchfind.detect(tr_, sg_, 2.0, 0.4, np.ones(sg_.shape, bool))
+    a_, b_ = punchfind.detect(tr_, sg_, 2.0, 0.4), punchfind.detect(tr_, sg_, 2.0, 0.4, eligible=np.ones(sg_.shape, bool))
     same_ &= np.array_equal(a_[0], b_[0]) and np.array_equal(a_[1], b_[1])
 check("... and on 200 random signals with plateaus and ties (the new path is the old suppression, not a look-alike)", same_)
 el_ = np.ones(sgE.shape, bool)
 el_[204] = False
-fr_, hd_ = punchfind.detect(trE, sgE, 3.62, 0.4, el_)
+fr_, hd_ = punchfind.detect(trE, sgE, 3.62, 0.4, eligible=el_)
 check("an ineligible frame is no candidate but still a neighbour: marking only 204 ineligible removes the burst there and nothing else",
       204 not in fr_.tolist() and 205 not in fr_.tolist() and set(punchfind.detect(trE, sgE, 3.62, 0.4)[0].tolist()) - {204} <= set(fr_.tolist()))
 
