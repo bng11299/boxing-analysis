@@ -64,48 +64,14 @@ check("inside is 0, before / between / after measured to the nearer edge, worked
 check("no labels at all: every detection is infinitely far", (ev.distance_to([3], []) > 10 ** 9).all())
 
 print("matching")
-# A jab 10-18 then a cross 19-26; the finder reports one peak, at the cross's middle (22).
+# The matcher itself is punchfind.match_nearest, tested in tests/test_hands.py. Pinned here: this script uses
+# it and keeps no copy of its own that could drift from what classify_punches and eval_classify_v6 use.
 combo = [Span(10, 18, JAB), Span(19, 26, CROSS)]
-greedy = punchfind.match([22], combo, 4)
-near = ev.match_nearest([22], combo, 4)
-check("punchfind.match credits the jab with the cross's detection (why this script has its own)",
-      greedy == [(0, 0)], str(greedy))
-check("nearest matching gives that detection to the cross, whose middle it sits on", near == [(1, 0)], str(near))
-# Count comes first: z fits only A; w fits A (nearer) and C. Nearest-per-detection would give both to A.
-a_c = [Span(0, 10, JAB), Span(9, 30, CROSS)]
-check("a maximum matching first: the nearer span is given up when that keeps a hit",
-      ev.match_nearest([5, 9], a_c, 0) == [(0, 0), (1, 1)], str(ev.match_nearest([5, 9], a_c, 0)))
-rng = np.random.default_rng(3)
-same = True
-for _ in range(200):
-    starts = np.sort(rng.integers(0, 300, 12))
-    sp = [Span(int(s), int(s + rng.integers(3, 20)), int(rng.integers(0, 6))) for s in starts]
-    det = rng.integers(0, 320, int(rng.integers(0, 15)))
-    m = ev.match_nearest(det, sp, 3)
-    same &= len(m) == len(punchfind.match(det, sp, 3)) and len({j for _, j in m}) == len(m) \
-        and all(sp[s].start - 3 <= det[j] <= sp[s].end + 3 for s, j in m)
-check("200 random cases: as many hits as punchfind.match, one-to-one, every pair inside span +- tol", bool(same))
-import itertools  # noqa: E402
+check("the script keeps no matcher of its own", not hasattr(ev, "match_nearest"))
+check("split_detections attributes with punchfind.match_nearest by default: the jab-cross detection is the cross's",
+      ev.split_detections([22], combo, [], 4, 30)["pairs"] == [(1, 0)], str(ev.split_detections([22], combo, [], 4, 30)))
 
-opt = True
-for _ in range(150):
-    ns, nd = int(rng.integers(1, 6)), int(rng.integers(1, 6))
-    st = np.sort(rng.integers(0, 60, ns))
-    sp = [Span(int(x), int(x + rng.integers(2, 15)), 0) for x in st]
-    det = rng.integers(0, 75, nd)
-    fits = lambda si, di: sp[si].start - 2 <= det[di] <= sp[si].end + 2  # noqa: E731
-    dist = lambda si, di: abs(det[di] - (sp[si].start + sp[si].end) / 2)  # noqa: E731
-    best = (0, 0.0)                              # (hits, -total distance), maximised
-    for perm in itertools.permutations(range(nd), min(ns, nd)):
-        pairs = [(si, di) for si, di in zip(range(ns), perm) if fits(si, di)]
-        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
-    for perm in itertools.permutations(range(ns), min(ns, nd)):   # spans fewer than detections either way
-        pairs = [(si, di) for di, si in zip(range(nd), perm) if fits(si, di)]
-        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
-    m = ev.match_nearest(det, sp, 2)
-    opt &= len(m) == best[0] and abs(sum(dist(si, di) for si, di in m) + best[1]) < 1e-9
-check("150 small random cases against brute force: the most hits, then the least total distance", bool(opt))
-check("no detections, or no spans: no pairs", ev.match_nearest([], combo, 2) == [] and ev.match_nearest([5], [], 2) == [])
+rng = np.random.default_rng(3)   # the later random cases' generator; their draws differ from before the move
 
 print("splitting detections")
 spans = [Span(100, 110, JAB), Span(200, 210, CROSS)]
@@ -173,7 +139,7 @@ rows = [{"frame": 5, "hand": "left", "lead_rear": "lead", "type": JAB},
         {"frame": 72, "hand": "left", "lead_rear": "lead", "type": None}]
 det = np.array([r["frame"] for r in rows])
 refs = {("V", 0): (JAB, JAB), ("V", 1): (CROSS, JAB), ("V", 2): (JAB, JAB)}
-t = ev.tally("V", ev.match_nearest(det, spans, 2), det, det, spans, rows, refs, block=40, n_blocks=2)
+t = ev.tally("V", punchfind.match_nearest(det, spans, 2), det, det, spans, rows, refs, block=40, n_blocks=2)
 check("per-block detections, labels, hits", t["fin"][:, :4].tolist() == [[2, 2, 2, 2], [2, 1, 1, 1]], str(t["fin"][:, :4]))
 rbt = ev.recall_by_type({"V": t["fin"]}, False)
 check("recall by type: both jabs found, the cross found", rbt["jab"] == {"labelled": 2, "found": 2, "recall": 1.0}
@@ -193,7 +159,7 @@ check("a matched span with no perfect-finder reading is counted, not paired and 
 # A hit that straddles a block edge: the span starts in block 0, its detection lands in block 1.
 edge = [Span(35, 45, JAB)]
 er = [{"frame": 44, "hand": "left", "lead_rear": "lead", "type": JAB}]
-te = ev.tally("V", ev.match_nearest([44], edge, 2), np.array([44]), np.array([44]), edge, er,
+te = ev.tally("V", punchfind.match_nearest([44], edge, 2), np.array([44]), np.array([44]), edge, er,
               {("V", 0): (JAB, JAB)}, block=40, n_blocks=2)
 check("across a block edge: precision's hit goes with the detection, recall's and the type's with the span",
       te["fin"][:, 2].tolist() == [0, 1] and te["fin"][:, 3].tolist() == [1, 0]

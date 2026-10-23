@@ -215,41 +215,8 @@ def distance_to(frames, intervals: "list[tuple[int, int]]") -> np.ndarray:
     return d.min(axis=1)
 
 
-def match_nearest(det, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
-    """A maximum one-to-one matching of detections to spans, as punchfind.match, that
-    among all maximum matchings has the least total distance from each detection to its
-    span's MIDDLE (ties broken by the solver, deterministically).
-
-    Why not punchfind.match's: it takes spans in order of end and hands each the earliest
-    free detection that fits, which maximises the count but not who gets what. In a fast
-    jab-cross the finder (0.4 s minimum gap) reports one peak, usually the cross; that
-    peak also fits inside the jab's span plus tolerance, and the jab ends first, so the
-    jab is credited with the cross's detection. On V5 147 of 356 matched detections sat
-    off their span's own wrist-speed peak, 115 of them on another labelled punch's: a
-    window correctly read as a cross was scored against 'jab'. Counts (recall, precision)
-    are the same under both; per-type recall and type accuracy are not, and both are
-    reported. Solved as an assignment: an infeasible pair costs more than every feasible
-    pair together, so the count is maximised first and the distance second."""
-    det = np.asarray(det, dtype=np.int64)
-    if not len(det) or not spans:
-        return []
-    from scipy.optimize import linear_sum_assignment
-
-    st = np.array([s.start for s in spans], dtype=np.int64)
-    en = np.array([s.end for s in spans], dtype=np.int64)
-    ok = (det[None, :] >= st[:, None] - tol) & (det[None, :] <= en[:, None] + tol)
-    dist = np.abs(det[None, :] - (st[:, None] + en[:, None]) / 2)
-    big = float(dist[ok].sum()) + 1.0 if ok.any() else 1.0
-    cost = np.where(ok, dist, big)
-    ri, ci = linear_sum_assignment(cost)
-    pairs = [(int(s), int(d)) for s, d in zip(ri, ci) if ok[s, d]]
-    if len(pairs) != len(punchfind.match(det, spans, tol)):   # both are maximum matchings
-        raise AssertionError("nearest matching is not a maximum matching")
-    return sorted(pairs)
-
-
 def split_detections(det, spans: "list[Span]", unusable: "list[tuple[int, int]]", tol: int, far: int,
-                     matcher=match_nearest) -> dict:
+                     matcher=punchfind.match_nearest) -> dict:
     """Which detections are hits, which sit on an unusable labelled row (ignored), and
     which unmatched ones are far (> `far` frames) from every label of either kind."""
     det = np.asarray(det, dtype=np.int64)
@@ -590,7 +557,7 @@ def main(argv=None) -> int:
 
     # ---- score
     report = {"stance": a.stance, "classifier_sha256": man["sha256"], "rule": find_punches.load_rule(a.rule),
-              "extent": ex, "matching": "nearest (primary): " + match_nearest.__doc__.split("\n")[0].strip(),
+              "extent": ex, "matching": "nearest (primary): " + punchfind.match_nearest.__doc__.split("\n")[0].strip(),
               "videos": {}, "limits": []}
     tallies = {"nearest": {}, "greedy_v6_convention": {}}
     audit_pools = {}

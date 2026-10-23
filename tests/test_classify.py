@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from boxingvi import classify, pose_yolo, punchfind  # noqa: E402
-from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Track  # noqa: E402
+from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Span, Track  # noqa: E402
 from boxingvi.stgcnpp import STGCNPP, prepare_input  # noqa: E402
 
 PASS = FAIL = 0
@@ -593,6 +593,8 @@ check("a good rule file is read", extent_json()() == {"frac": 0.5, "lead_widths"
 raises("a rule that did not beat the fixed window is refused", extent_json(beats_fixed_window=False))
 raises("a rule file from before the per-clip cut (the flag, but no gated cut) is refused", extent_json(gated_cut=None))
 raises("a rule file that gated another cut is refused", extent_json(gated_cut="per punch, at labelled peaks"))
+raises("a rule file gated with the greedy attribution (before 2026-10-20) is refused: the gate measured other pairs",
+       extent_json(gated_cut="per clip, median over the finder's detections, windows at its matched detections"))
 raises("a rule with no verdict is refused (truthy is not True)", extent_json(beats_fixed_window="yes"))
 raises("a rule measured with another wrist-speed variant is refused", extent_json(variant="radial"))
 raises("a width level of 1.0 is refused", extent_json(frac=1.0))
@@ -920,6 +922,41 @@ except ValueError as e:
     why = str(e)
 check("... and the report refuses that stale score for the new CSV (same clip, same classifier)",
       "another classified CSV" in why, why)
+# A fast jab-cross: the finder reports one peak (the right hand's, at 14 s) and it fits both labels; the jab
+# ends first. punchfind.match hands that detection to the jab, so a window read at the cross would be scored
+# against 'jab'. The score must attribute it to the cross, whose middle it sits nearest.
+f14 = int(rows[2]["frame"])
+check("control: the third finder punch is the right hand's", rows[2]["hand"] == "right", str(rows[2]))
+combo = [{"start": f14 - 20, "end": f14 - 3, "label": "jab"}, {"start": f14 - 2, "end": f14 + 14, "label": "cross"}]
+tol14 = int(round(find_punches.TOL_S * fps))
+greedy14 = punchfind.match([f14], [Span(c["start"], c["end"], 0) for c in combo], tol14)
+check("control: punchfind.match gives this detection to the jab (the fixture reproduces the V5 failure)",
+      greedy14 == [(0, 0)], str(greedy14))
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": combo}), encoding="utf-8")
+classify_punches.main(args + ["--stance", "orthodox", "--labels", str(lab)])
+sc_jc = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding="utf-8"))
+check("jab-cross: the matched detection is scored against the cross, not the jab",
+      sc_jc["matched_detections"]["n"] == 1 and sc_jc["matched_detections"]["classes_present"] == ["cross"],
+      str(sc_jc["matched_detections"]))
+check("... and the score says how detections were attributed", sc_jc.get("matching") == "nearest")
+
+print("eval_classify_v6 attribution")
+import eval_classify_v6  # noqa: E402
+
+v6_combo = [Span(10, 20, CLASSES.index("lead_hook")), Span(19, 26, CLASSES.index("rear_hook"))]
+check("control: at 24 fps the tolerance is 2 frames, and punchfind.match gives 22 to the first hook",
+      int(round(eval_classify_v6.TOL_S * 24.0)) == 2 and punchfind.match([22], v6_combo, 2) == [(0, 0)])
+check("readings C/E/G read the second hook at the detection on its middle, not the first",
+      eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0) == {1: 0},
+      str(eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0)))
+check("finder_pairs: no detections -> no pairs", eval_classify_v6.finder_pairs(np.array([], dtype=np.int64), v6_combo, 24.0) == {})
+import run_punch_extent  # noqa: E402
+
+check("the extent gate measures overlap at the detection on the second hook's middle, not the first's",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100)) == [(1, 0)],
+      str(run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100))))
+check("... and only spans wholly inside the window are kept",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 25)) == [], "the second hook ends at 26")
 
 def punches_with(text):
     p = tmp / "p.csv"

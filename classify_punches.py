@@ -249,7 +249,10 @@ def main(argv=None) -> int:
         spans = load_labels(a.labels, len(pose), pose.fps)
         named = [(j, s) for j, s in enumerate(spans) if s.label != UNCLEAR_LABEL]
         tol = int(round(TOL_S * pose.fps))
-        pairs = punchfind.match([d["frame"] for d in rows], spans, tol)
+        # Who is scored against which label: nearest, not punchfind.match's greedy, which hands a fast
+        # jab-cross's one detection to the jab (punchfind.match_nearest). The same number of matches either
+        # way, but not the same spans: matched_detections.n and matched_unclassifiable can move.
+        pairs = punchfind.match_nearest([d["frame"] for d in rows], spans, tol)
         yt, yp, matched_unclassified = [], [], 0
         for si, di in pairs:
             if spans[si].label == UNCLEAR_LABEL:
@@ -281,7 +284,7 @@ def main(argv=None) -> int:
         (label_scores, label_unc), (window_scores, window_unc) = scored(by_label), scored(by_window)
         # csv_sha256: the classified CSV this score describes. A later run without --labels
         # rewrites the CSV but not this file; the report refuses the score once they differ.
-        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol,
+        result = {"clip": clip, "stance": a.stance, "tolerance_frames": tol, "matching": "nearest",
                   "classifier_sha256": man["sha256"], "csv_sha256": csv_sha256,
                   "cut": {"per": "clip", **cut._asdict()},
                   "matched_detections": type_scores(yt, yp),

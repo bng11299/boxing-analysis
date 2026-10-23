@@ -278,6 +278,44 @@ def match(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
     return pairs
 
 
+def match_nearest(det_frames, spans: "list[Span]", tol: int) -> "list[tuple[int, int]]":
+    """A maximum one-to-one matching of detections to spans, as `match`, that among
+    all maximum matchings has the least total distance from each detection to its
+    span's MIDDLE (ties broken by the solver, deterministically).
+
+    Use it wherever a detection's span decides what it is scored against (type, hand,
+    overlap); `match` is enough for counts. `match` takes spans in order of end and
+    hands each the earliest free detection that fits, which maximises the count but
+    not who gets what. In a fast jab-cross the finder (0.4 s minimum gap) reports one
+    peak, usually the cross; that peak also fits inside the jab's span plus tolerance,
+    and the jab ends first, so `match` credits the jab with the cross's detection. On
+    V5 147 of 356 matched detections sat off their span's own wrist-speed peak, 115 of
+    them on another labelled punch's: a window correctly read as a cross was scored
+    against 'jab'. Counts (recall, precision) are the same under both, and that is
+    checked on every call. Solved as an assignment: an infeasible pair costs more than
+    every feasible pair together, so the count is maximised first and the distance second.
+
+    Returns (span index, detection index) pairs, sorted by span.
+    """
+    if tol < 0:
+        raise ValueError("tol must be >= 0")
+    det = np.asarray(det_frames, dtype=np.int64)
+    if not len(det) or not spans:
+        return []
+    from scipy.optimize import linear_sum_assignment
+
+    st = np.array([s.start for s in spans], dtype=np.int64)
+    en = np.array([s.end for s in spans], dtype=np.int64)
+    ok = (det[None, :] >= st[:, None] - tol) & (det[None, :] <= en[:, None] + tol)
+    dist = np.abs(det[None, :] - (st[:, None] + en[:, None]) / 2)
+    big = float(dist[ok].sum()) + 1.0 if ok.any() else 1.0
+    ri, ci = linear_sum_assignment(np.where(ok, dist, big))
+    pairs = [(int(s), int(d)) for s, d in zip(ri, ci) if ok[s, d]]
+    if len(pairs) != len(match(det, spans, tol)):   # both are maximum matchings
+        raise AssertionError("nearest matching is not a maximum matching")
+    return sorted(pairs)
+
+
 def _in(frames, window) -> np.ndarray:
     lo, hi = window
     f = np.asarray(frames)
