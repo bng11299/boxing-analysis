@@ -268,9 +268,18 @@ def frame_change(path, info: "VideoInfo | None" = None, step: int = 4) -> np.nda
 
 
 class VideoWriter:
-    """H.264 mp4 writer fed raw RGB frames. Use as a context manager."""
+    """H.264 mp4 writer fed raw RGB frames. Use as a context manager.
 
-    def __init__(self, path, width: int, height: int, fps: Fraction):
+    The input is a raw pipe, so nothing of the source file (audio, tags, GPS,
+    creation time) can reach the output. `private=True` also strips what the muxer
+    adds on its own (the Lavf encoder tag, creation time) and maps no non-video
+    stream. What remains is x264's own settings string in the bitstream ("x264 -
+    core ... options: ..."): encoder settings, no data about the footage."""
+
+    PRIVATE_ARGS = ("-map_metadata", "-1", "-map_chapters", "-1", "-an", "-sn", "-dn",
+                    "-fflags", "+bitexact", "-flags:v", "+bitexact")
+
+    def __init__(self, path, width: int, height: int, fps: Fraction, private: bool = False):
         self.path = Path(path).resolve()
         if width * height > MAX_PIXELS or width <= 0 or height <= 0:
             raise ValueError(f"bad frame size {width}x{height}")
@@ -278,7 +287,8 @@ class VideoWriter:
         cmd = [_tool("ffmpeg"), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", f"{width}x{height}", "-r", f"{fps.numerator}/{fps.denominator}",
                "-i", "-", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", str(self.path)]
+               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+               *(self.PRIVATE_ARGS if private else ()), str(self.path)]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def write(self, frame: np.ndarray) -> None:

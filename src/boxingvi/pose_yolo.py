@@ -394,8 +394,11 @@ def load_yolo(weights, sha256: "str | None", device: str = "cpu"):
     return model
 
 
-def yolo_predictor(model, conf: float = 0.25, device: str = "cpu"):
-    """Wrap a loaded model as predict(frame_rgb) -> (boxes, kp_xy, kp_conf)."""
+def yolo_predictor(model, conf: float = 0.25, device: str = "cpu", missing_conf: float = 1.0):
+    """Wrap a loaded model as predict(frame_rgb) -> (boxes, kp_xy, kp_conf).
+
+    `missing_conf` is the confidence given to every keypoint when the model reports
+    none. The face blur passes 0.0: an unconfident face falls back to more blur."""
 
     def predict(frame_rgb: np.ndarray):
         # Ultralytics treats a bare ndarray as BGR (OpenCV convention); ours is RGB.
@@ -405,7 +408,7 @@ def yolo_predictor(model, conf: float = 0.25, device: str = "cpu"):
         boxes = r.boxes.xyxy.cpu().numpy()
         kxy = r.keypoints.xy.cpu().numpy()
         kc = (r.keypoints.conf.cpu().numpy() if r.keypoints.conf is not None
-              else np.ones(kxy.shape[:2]))
+              else np.full(kxy.shape[:2], missing_conf))
         return boxes, kxy, kc
 
     return predict
