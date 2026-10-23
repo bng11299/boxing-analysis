@@ -233,7 +233,8 @@ check("... and binds to its table", True)
 
 def write(name, **over):
     d = {"format": np.array(headgear.FORMAT), "source": np.array(cnt.source), "video_fp": np.array(""),
-         "meta": np.array([cnt.n_frames, cnt.n_table_rows], np.int64), "rows": cnt.rows, "red": cnt.red,
+         "table_sha256": np.array(cnt.table_sha256),
+         "meta": np.array([cnt.n_frames, cnt.n_table_rows, cnt.every], np.int64), "rows": cnt.rows, "red": cnt.red,
          "blue": cnt.blue, "n": cnt.n}
     for k, v in over.items():
         if v is None:
@@ -261,8 +262,14 @@ bad_files = [
     ("more kit than pixels", dict(red=cnt.n + 1), "impossible"),
     ("a negative count", dict(blue=np.r_[-1, cnt.blue[1:]]), "impossible"),
     ("a region under the minimum", dict(n=np.r_[MIN_REGION_PX - 1, cnt.n[1:]]), "impossible"),
-    ("meta of the wrong shape", dict(meta=np.array([1], np.int64)), "meta"),
-    ("zero frames", dict(meta=np.array([0, cnt.n_table_rows], np.int64)), "meta"),
+    ("meta of the wrong shape", dict(meta=np.array([1, 2], np.int64)), "meta"),
+    ("zero frames", dict(meta=np.array([0, cnt.n_table_rows, 5], np.int64)), "meta"),
+    ("a sampling step of 0", dict(meta=np.array([cnt.n_frames, cnt.n_table_rows, 0], np.int64)), "meta"),
+    ("a missing table digest", dict(table_sha256=None), "wrong arrays"),
+    ("a malformed table digest", dict(table_sha256=np.array("xyz")), "table_sha256"),
+    ("counts that overflow int64 when added (red 2^63-1, blue 2^61)",
+     dict(red=np.full(len(cnt.n), 2 ** 63 - 1, np.int64), blue=np.full(len(cnt.n), 2 ** 61, np.int64)), "impossible"),
+    ("a crown bigger than a 4K frame", dict(n=np.r_[headgear.MAX_REGION_PX + 1, cnt.n[1:]]), "impossible"),
 ]
 for i, (what, over, why) in enumerate(bad_files):
     q = write(f"bad{i}.npz", **over)
@@ -279,6 +286,24 @@ try:
     raises("refused: a file over the size cap, before it is read", lambda: HeadgearCounts.load(p), "bytes")
 finally:
     headgear.MAX_FILE_BYTES = old
+old_u, old_load = headgear.MAX_UNCOMPRESSED_BYTES, headgear.np.load
+
+
+def _no_load(*a, **k):
+    raise AssertionError("np.load was called before the declared sizes were checked")
+
+
+headgear.MAX_UNCOMPRESSED_BYTES = 100
+headgear.np.load = _no_load
+try:
+    raises("refused: a file whose zip directory DECLARES too many bytes, before any member is read",
+           lambda: HeadgearCounts.load(p), "uncompressed")
+finally:
+    headgear.MAX_UNCOMPRESSED_BYTES, headgear.np.load = old_u, old_load
+re_t = table_of([(1, 0, NF - 1, 80, 120), (2, 0, NF - 1, 240, 120)], NF)
+re_t.xy[:] = re_t.xy[::-1]                  # same video, same metadata and row count: other CONTENT per row
+raises("counts are refused against a regenerated table with the same metadata (content digest)",
+       lambda: cnt.check_table(re_t), "different content")
 for what, kw in (("another source", dict(source="GH999999.mp4")), ("another length", dict(n_frames=NF + 1)),
                  ("another fingerprint", dict(fp="0" * 64))):
     other = table_of([(1, 0, NF - 1, 80, 120), (2, 0, NF - 1, 240, 120)], kw.get("n_frames", NF),
@@ -315,7 +340,14 @@ c5 = headgear.headgear_check(tb_u, attrs_of(1, 2), cnt_u)
 check("no headgear on either: the pair is co-present but undecided, the share is None (no measurement, not 0%)",
       c5["copresent_pairs"] == 1 and c5["decided_pairs"] == 0 and c5["opposite_share"] is None, str(c5))
 raises("the check refuses counts from another table", lambda: headgear.headgear_check(tb_s, attrs_of(1, 2), cnt_u.__class__(
-    cnt_u.rows, cnt_u.red, cnt_u.blue, cnt_u.n, "GH999999.mp4", cnt_u.n_frames, cnt_u.n_table_rows)), "")
+    cnt_u.rows, cnt_u.red, cnt_u.blue, cnt_u.n, "GH999999.mp4", cnt_u.n_frames, cnt_u.n_table_rows, cnt_u.every, cnt_u.table_sha256)), "")
+star = [(1, 0, 99, 160, 120), (2, 0, 99, 40, 120), (3, 0, 99, 240, 120), (4, 0, 99, 300, 120)]
+tb_x, cnt_x = run(star, lambda t, i: (RED, RED if t == 1 else BLUE), 100)
+c6 = headgear.headgear_check(tb_x, attrs_of(1, 2, 3, 4), cnt_x)
+check("one red fragment with three blue partners: fragment counts read each fragment ONCE (red 1, blue 3) ...",
+      c6["credited_by_decision"]["red"] == 1 and c6["credited_by_decision"]["blue"] == 3, str(c6["credited_by_decision"]))
+check("... while pair sides count the red fragment once per partner (red 3)", c6["window_decisions"]["red"] == 3
+      and c6["copresent_pairs"] == 6 and c6["opposite"] == 3 and c6["same"] == 3, str(c6))
 pl = headgear.pool([c1, c2, c5])
 check("pooling adds integer counts and divides once: 1 opposite of 2 decided, 2 of 3 co-present decided",
       pl["opposite"] == 1 and pl["decided_pairs"] == 2 and pl["opposite_share"] == 0.5
@@ -350,17 +382,22 @@ sp = [olympic_headgear.split_of(v) for v in ALL29]
 check("29 videos: 4 dev, 2 excluded (eye-checked GH089681, GH118416), 23 held-out",
       sp.count("dev") == 4 and sp.count("excluded") == 2 and sp.count("heldout") == 23
       and {v for v, s in zip(ALL29, sp) if s == "excluded"} == {"GH089681", "GH118416"})
+check("the frozen held-out manifest is exactly the 29 minus dev minus the 2 eye-checked",
+      olympic_headgear.HELD_OUT == frozenset(ALL29) - olympic_headgear.DEV_VIDEOS - olympic_headgear.EYE_CHECKED
+      and len(olympic_headgear.HELD_OUT) == 23)
+check("a video outside the 29 is 'unknown', never held-out", olympic_headgear.split_of("GH000002") == "unknown")
 check("the robustness row drops exactly the 3 chapter twins of dev videos: 20 videos",
       len([v for v, s in zip(ALL29, sp) if s == "heldout" and v not in olympic_headgear.CHAPTER_TWINS]) == 20
       and olympic_headgear.CHAPTER_TWINS <= {v for v, s in zip(ALL29, sp) if s == "heldout"})
 check("the gate is 0.90 over >= 100 decided pairs with a bootstrap lower bound >= 0.80, 20 pairs per camera",
       (olympic_headgear.GATE_SHARE, olympic_headgear.GATE_MIN_PAIRS, olympic_headgear.GATE_BOOT_LO,
        olympic_headgear.CAMERA_MIN_PAIRS) == (0.90, 100, 0.80, 20))
-ok = {"opposite_share": 0.90, "decided_pairs": 100, "bootstrap95": {"lo": 0.80}}
-check("gate: exactly at every bar passes", olympic_headgear.gate(ok))
+ok = {"opposite_share": 0.90, "decided_pairs": 100, "bootstrap95": {"lo": 0.80, "draws": 10_000, "dropped": 100}}
+check("gate: exactly at every bar passes (including 1% of draws dropped)", olympic_headgear.gate(ok))
 for what, ch in (("share 0.8999", {"opposite_share": 0.8999}), ("99 pairs", {"decided_pairs": 99}),
-                 ("lower bound 0.7999", {"bootstrap95": {"lo": 0.7999}}), ("no bootstrap", {"bootstrap95": None}),
-                 ("no share", {"opposite_share": None})):
+                 ("lower bound 0.7999", {"bootstrap95": {"lo": 0.7999, "draws": 10_000, "dropped": 0}}),
+                 ("101 of 10,000 draws dropped", {"bootstrap95": {"lo": 0.95, "draws": 10_000, "dropped": 101}}),
+                 ("no bootstrap", {"bootstrap95": None}), ("no share", {"opposite_share": None})):
     check(f"gate: {what} fails", not olympic_headgear.gate(ok | ch))
 
 print("the CLI on a painted clip")
@@ -390,9 +427,15 @@ tab.save(trk / "GH000002.tracks.npz")
 root, cdir = tmp / "ds", tmp / "counts"
 base = ["--data", str(root), "--tracks", str(trk), "--counts-dir", str(cdir)]
 with contextlib.redirect_stdout(io.StringIO()):
-    raises("the default split is dev: a held-out video is not read", lambda: olympic_headgear.main(
-        base + ["--check-out", str(tmp / "r" / "d.json")]), "could be read")
+    raises("a video outside the frozen manifest is never read as held-out", lambda: olympic_headgear.main(
+        base + ["--split", "heldout", "--check-out", str(tmp / "r" / "u.json")]), "could be read")
 check("... and no counts file was written for it", not (cdir / "GH000002.headgear.npz").exists())
+REAL_HELD_OUT = olympic_headgear.HELD_OUT
+olympic_headgear.HELD_OUT = frozenset({"GH000002"})          # the painted clip stands in for the manifest
+with contextlib.redirect_stdout(io.StringIO()):
+    raises("the default split is dev: a (manifest) held-out video is not read", lambda: olympic_headgear.main(
+        base + ["--check-out", str(tmp / "r" / "d.json")]), "could be read")
+check("... and no counts file was written for it either", not (cdir / "GH000002.headgear.npz").exists())
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     rc = olympic_headgear.main(base + ["--split", "heldout", "--check-out", str(tmp / "r" / "h.json")])
@@ -431,6 +474,23 @@ with contextlib.redirect_stdout(io.StringIO()):
 with contextlib.redirect_stdout(io.StringIO()):
     rc6 = olympic_headgear.main(base + ["--split", "heldout", "--check-only", "--check-out", str(tmp / "r" / "h6.json")])
 check("--check-only on a corrupt counts file fails that video, exit 1", rc6 == 1, str(rc6))
+olympic_headgear.HELD_OUT = frozenset({"GH000002", "GH000003"})   # one manifest video is absent from the data
+with contextlib.redirect_stdout(io.StringIO()):
+    rc7 = olympic_headgear.main(base + ["--split", "heldout", "--check-out", str(tmp / "r" / "h7.json")])
+res7 = json.loads((tmp / "r" / "h7.json").read_text(encoding="utf-8"))
+check("a held-out set with a video missing is NOT evaluated (passes None, exit 1), even though the video read passes "
+      "its own check", rc7 == 1 and res7["passes"] is None and res7["heldout_missing"] == ["GH000003"], str((rc7, res7.get("passes"))))
+olympic_headgear.HELD_OUT = frozenset({"GH000002"})
+dup = tmp / "dup"
+for task in ("task_kam2_gh000002", "task_kam4_gh000002"):
+    (dup / task / "data").mkdir(parents=True)
+    (dup / task / "data" / "GH000002.mp4").write_bytes((ds / "data" / "GH000002.mp4").read_bytes())
+    (dup / task / "annotations.json").write_text((ds / "annotations.json").read_text(encoding="utf-8"), encoding="utf-8")
+with contextlib.redirect_stdout(io.StringIO()):
+    raises("one video id in two task folders is refused, not overwritten", lambda: olympic_headgear.main(
+        ["--data", str(dup), "--tracks", str(trk), "--counts-dir", str(tmp / "c3"), "--split", "heldout",
+         "--check-out", str(tmp / "r" / "h8.json")]), "two task folders")
+olympic_headgear.HELD_OUT = REAL_HELD_OUT
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

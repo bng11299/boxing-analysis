@@ -37,8 +37,10 @@ PIXELS NEVER LEAVE MEMORY: frames are decoded one at a time and only three count
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,8 +66,11 @@ BLUE_HUE_LO, BLUE_HUE_HI = 195.0, 285.0    # blue is [195, 285)
 BLUE_SAT_MIN, BLUE_VAL_MIN = 0.50, 0.08
 
 CO_PRESENT_S = 0.5          # ADR-0013: on screen together this long = two different people
-FORMAT = "boxingvi-headgear-1"
-MAX_FILE_BYTES = 256 * 1024 * 1024
+FORMAT = "boxingvi-headgear-2"
+MAX_FILE_BYTES = 256 * 1024 * 1024          # on disk (compressed)
+MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024   # all members as the zip directory declares them, BEFORE any is read
+MAX_REGION_PX = 3840 * 2160                   # a crown cannot hold more pixels than a 4K frame
+_KEYS = {"format", "source", "video_fp", "table_sha256", "meta", "rows", "red", "blue", "n"}
 _FP = re.compile(r"[0-9a-f]{64}")
 
 
@@ -139,6 +144,15 @@ def crown_counts(frame: np.ndarray, xy, conf, min_conf: float = MIN_CONF, min_px
 
 
 # ---- the counts of one video ---------------------------------------------------------
+def table_digest(table, every: int) -> str:
+    """sha256 of the table's CONTENT (frame, track id, keypoints, confidences, in row order) and the sampling
+    step: counts are row-indexed, so a regenerated or reordered table for the same video must not reuse them."""
+    h = hashlib.sha256(f"{FORMAT}|every={int(every)}|".encode())
+    for a, dt in ((table.frame, np.int64), (table.track_id, np.int64), (table.xy, np.float32), (table.conf, np.float32)):
+        h.update(np.ascontiguousarray(a, dtype=dt).tobytes())
+    return h.hexdigest()
+
+
 @dataclass(frozen=True)
 class HeadgearCounts:
     """Crown counts per read row of ONE video's PoseTable, bound to it by source name, frame count, row
@@ -151,10 +165,12 @@ class HeadgearCounts:
     source: str
     n_frames: int
     n_table_rows: int
+    every: int
+    table_sha256: str
     video_fp: str = ""
 
     def check_table(self, table) -> None:
-        """Refuse a table these counts were not computed from."""
+        """Refuse a table these counts were not computed from (metadata first, then the content digest)."""
         if self.source != table.source:
             raise ValueError(f"the headgear counts are for {self.source!r}, the pose table for {table.source!r}")
         if self.n_frames != table.n_frames:
@@ -164,11 +180,14 @@ class HeadgearCounts:
                              f"{len(table.frame)}: they were computed from another table")
         if self.video_fp != table.video_fp:
             raise ValueError("the headgear counts and the pose table carry different video fingerprints")
+        if self.table_sha256 != table_digest(table, self.every):
+            raise ValueError("the headgear counts were computed from a pose table with different content "
+                             "(regenerated or reordered rows): recompute them")
 
     def save(self, path) -> None:
         np.savez_compressed(path, format=np.array(FORMAT), source=np.array(self.source),
-                            video_fp=np.array(self.video_fp),
-                            meta=np.array([self.n_frames, self.n_table_rows], dtype=np.int64),
+                            video_fp=np.array(self.video_fp), table_sha256=np.array(self.table_sha256),
+                            meta=np.array([self.n_frames, self.n_table_rows, self.every], dtype=np.int64),
                             rows=self.rows.astype(np.int64), red=self.red.astype(np.int64),
                             blue=self.blue.astype(np.int64), n=self.n.astype(np.int64))
 
@@ -176,7 +195,8 @@ class HeadgearCounts:
     def load(cls, path) -> "HeadgearCounts":
         """Load a counts file. It is an INPUT file: size capped, no pickles, exactly the known arrays with the
         known dtypes and shapes, and counts that are internally possible (0 <= red, blue; red + blue <= n;
-        n >= MIN_REGION_PX; rows strictly increasing inside the table)."""
+        MIN_REGION_PX <= n <= MAX_REGION_PX; rows strictly increasing inside the table). The zip directory is
+        read first, so a small file that declares huge members is refused before anything is allocated."""
         p = Path(path)
         if p.stat().st_size > MAX_FILE_BYTES:
             raise ValueError(f"{p.name}: more than {MAX_FILE_BYTES} bytes")
@@ -184,14 +204,22 @@ class HeadgearCounts:
         def bad(msg):
             raise ValueError(f"{p.name}: {msg}")
         try:
+            with zipfile.ZipFile(p) as zf:
+                info = zf.infolist()
+        except (zipfile.BadZipFile, OSError) as e:
+            raise ValueError(f"{p.name}: not a readable npz ({e})") from e
+        if len(info) != len(_KEYS) or {i.filename for i in info} != {k + ".npy" for k in _KEYS}:
+            bad("not a headgear counts file (wrong arrays)")
+        if sum(i.file_size for i in info) > MAX_UNCOMPRESSED_BYTES:
+            bad(f"declares more than {MAX_UNCOMPRESSED_BYTES} bytes uncompressed")
+        try:
             z = np.load(p, allow_pickle=False)
         except (ValueError, OSError) as e:
             raise ValueError(f"{p.name}: not a readable npz ({e})") from e
         with z:
-            keys = {"format", "source", "video_fp", "meta", "rows", "red", "blue", "n"}
-            if set(z.files) != keys:
+            if set(z.files) != _KEYS:
                 bad("not a headgear counts file (wrong arrays)")
-            for k in ("format", "source", "video_fp"):
+            for k in ("format", "source", "video_fp", "table_sha256"):
                 if z[k].dtype.kind != "U" or z[k].shape != ():
                     bad(f"{k} must be one text value")
             if str(z["format"]) != FORMAT:
@@ -199,9 +227,11 @@ class HeadgearCounts:
             fp = str(z["video_fp"])
             if fp and not _FP.fullmatch(fp):
                 bad("video_fp must be empty or a 64-character lowercase sha256 hex digest")
+            if not _FP.fullmatch(str(z["table_sha256"])):
+                bad("table_sha256 must be a 64-character lowercase sha256 hex digest")
             meta = z["meta"]
-            if meta.dtype != np.int64 or meta.shape != (2,) or meta[0] < 1 or meta[1] < 0:
-                bad("meta must be two whole numbers (frames >= 1, table rows >= 0)")
+            if meta.dtype != np.int64 or meta.shape != (3,) or meta[0] < 1 or meta[1] < 0 or meta[2] < 1:
+                bad("meta must be three whole numbers (frames >= 1, table rows >= 0, every >= 1)")
             arrs = {}
             for k in ("rows", "red", "blue", "n"):
                 a = z[k]
@@ -214,10 +244,12 @@ class HeadgearCounts:
             rows, red, blue, n = arrs["rows"], arrs["red"], arrs["blue"], arrs["n"]
             if m and (rows[0] < 0 or rows[-1] >= meta[1] or (np.diff(rows) <= 0).any()):
                 bad("rows must be strictly increasing table row indices")
-            if (red < 0).any() or (blue < 0).any() or (red + blue > n).any() or (n < MIN_REGION_PX).any():
-                bad("counts are impossible (negative, more kit than pixels, or a region under the minimum)")
+            # each bound alone first, so the sum below cannot overflow int64
+            if (n < MIN_REGION_PX).any() or (n > MAX_REGION_PX).any() or (red < 0).any() or (blue < 0).any() \
+                    or (red > n).any() or (blue > n).any() or (red + blue > n).any():
+                bad("counts are impossible (negative, more kit than pixels, or a region outside its size bounds)")
             return cls(rows.copy(), red.copy(), blue.copy(), n.copy(), str(z["source"]), int(meta[0]),
-                       int(meta[1]), fp)
+                       int(meta[1]), int(meta[2]), str(z["table_sha256"]), fp)
 
 
 def compute_headgear(video, table, info=None, every: int = SAMPLE_EVERY, min_conf: float = MIN_CONF,
@@ -252,7 +284,7 @@ def compute_headgear(video, table, info=None, every: int = SAMPLE_EVERY, min_con
     rows = np.array(sorted(got), dtype=np.int64)
     cnt = np.array([got[r] for r in rows.tolist()], dtype=np.int64).reshape(-1, 3)
     return HeadgearCounts(rows, cnt[:, 0], cnt[:, 1], cnt[:, 2], table.source, table.n_frames,
-                          len(table.frame), table.video_fp)
+                          len(table.frame), every, table_digest(table, every), table.video_fp)
 
 
 # ---- decisions -----------------------------------------------------------------------
@@ -273,7 +305,9 @@ def headgear_check(table, attrs, counts: HeadgearCounts) -> dict:
 
     Two fragments that both carry a labelled punch credited to them and share at least CO_PRESENT_S of frames
     are two different people, so the corner colours should come out opposite. Counts only;
-    `opposite_share` is None when no pair is decided (no measurement, not 0%)."""
+    `opposite_share` is None when no pair is decided (no measurement, not 0%). `credited_by_decision` counts
+    each credited fragment ONCE, read over all of its rows (the gate's fragment counts); `window_decisions`
+    counts pair sides (a fragment with three partners is read three times, once per shared window)."""
     counts.check_table(table)
     credited = sorted({int(a.track_id) for a in attrs if a.track_id is not None})
     frames = {t: np.unique(table.frame[table.track_id == t]) for t in credited}
@@ -282,6 +316,10 @@ def headgear_check(table, attrs, counts: HeadgearCounts) -> dict:
     r_frame = table.frame[counts.rows]
     pairs = opposite = same = 0
     by = {d: 0 for d in DECISIONS}
+    whole = {d: 0 for d in DECISIONS}
+    for t in credited:
+        m = r_tid == t
+        whole[decide_rows(counts.red[m], counts.blue[m], counts.n[m])] += 1
     for i, a in enumerate(credited):
         for b in credited[i + 1:]:
             common = np.intersect1d(frames[a], frames[b], assume_unique=True)
@@ -301,7 +339,7 @@ def headgear_check(table, attrs, counts: HeadgearCounts) -> dict:
                     opposite += 1
     decided = opposite + same
     return {"credited_fragments": len(credited), "copresent_pairs": pairs, "decided_pairs": decided,
-            "opposite": opposite, "same": same, "window_decisions": by,
+            "opposite": opposite, "same": same, "window_decisions": by, "credited_by_decision": whole,
             "opposite_share": (opposite / decided) if decided else None}
 
 
@@ -312,6 +350,7 @@ def pool(rows) -> dict:
     for k in ("credited_fragments", "copresent_pairs", "decided_pairs", "opposite", "same"):
         out[k] = sum(r[k] for r in rows)
     out["window_decisions"] = {d: sum(r["window_decisions"][d] for r in rows) for d in DECISIONS}
+    out["credited_by_decision"] = {d: sum(r["credited_by_decision"][d] for r in rows) for d in DECISIONS}
     d = out["decided_pairs"]
     out["opposite_share"] = (out["opposite"] / d) if d else None
     out["decided_share"] = (d / out["copresent_pairs"]) if out["copresent_pairs"] else None

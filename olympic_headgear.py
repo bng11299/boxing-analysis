@@ -36,10 +36,15 @@ from olympic_colour import DEV_VIDEOS  # noqa: E402
 from boxingvi import headgear, olympic  # noqa: E402
 
 EYE_CHECKED = frozenset({"GH089681", "GH118416"})          # their kit was seen by eye: out of the held-out set
+# The frozen held-out manifest (docs/gates/appearance-identity.md): the gate needs EXACTLY these, each read once.
+HELD_OUT = frozenset({"GH088416", "GH098416", "GH108416", "GH138416", "GH148416", "GH158416", "GH168416", "GH178416",
+                      "GH188416", "GH198416", "GH208416", "GH218416", "GH079681", "GH099681", "GH109681", "GH119681",
+                      "GH129681", "GH139681", "GH149681", "GH169681", "GH179681", "GH189681", "GH199681"})
 CHAPTER_TWINS = frozenset({"GH079681", "GH158416", "GH129681"})   # same chapter number as a dev video
 GATE_SHARE = 0.90
 GATE_MIN_PAIRS = 100
 GATE_BOOT_LO = 0.80
+GATE_MAX_DROPPED = 0.01     # bootstrap draws with no decided pair are dropped and counted; over 1% fails the gate
 CAMERA_MIN_PAIRS = 20
 SPLITS = ("dev", "heldout", "all")
 
@@ -49,7 +54,9 @@ def split_of(vid: str) -> str:
         return "dev"
     if vid in EYE_CHECKED:
         return "excluded"
-    return "heldout"
+    if vid in HELD_OUT:
+        return "heldout"
+    return "unknown"
 
 
 def counts_path(folder: Path, vid: str) -> Path:
@@ -78,7 +85,8 @@ def block(checks: dict, names, camera: dict) -> dict:
 def gate(pooled: dict) -> bool:
     b = pooled["bootstrap95"]
     return bool(pooled["opposite_share"] is not None and pooled["opposite_share"] >= GATE_SHARE
-                and pooled["decided_pairs"] >= GATE_MIN_PAIRS and b is not None and b["lo"] >= GATE_BOOT_LO)
+                and pooled["decided_pairs"] >= GATE_MIN_PAIRS and b is not None and b["lo"] >= GATE_BOOT_LO
+                and b["dropped"] <= GATE_MAX_DROPPED * b["draws"])
 
 
 def main(argv=None) -> int:
@@ -98,10 +106,16 @@ def main(argv=None) -> int:
     counts_dir.mkdir(parents=True, exist_ok=True)
 
     t_all = time.perf_counter()
-    checks, report, camera, failed = {}, {}, {}, []
+    checks, report, camera, failed, unknown, seen = {}, {}, {}, [], [], set()
     for t in olympic.find_tasks(a.data):
         vid = t.video.stem
+        if vid in seen:
+            raise ValueError(f"video id {vid} appears in two task folders: refusing to guess which one is meant")
+        seen.add(vid)
         sp = split_of(vid)
+        if sp == "unknown":
+            unknown.append(vid)           # not in the frozen manifest: never read, never pooled
+            continue
         if sp == "excluded" or (a.split != "all" and sp != a.split):
             continue
         if only is not None and vid not in only:
@@ -133,7 +147,8 @@ def main(argv=None) -> int:
     out = {"gate": f"held-out pooled: opposite >= {GATE_SHARE}, >= {GATE_MIN_PAIRS} decided pairs, "
                    f"video-cluster bootstrap 95% lower bound >= {GATE_BOOT_LO}",
            "rule": "headgear crown, read on the co-present window (src/boxingvi/headgear.py)",
-           "split_run": a.split, "only": sorted(only) if only else None, "videos": report, "failed": failed}
+           "split_run": a.split, "only": sorted(only) if only else None, "videos": report, "failed": failed,
+           "unknown_videos_not_read": unknown}
     for sp in ("dev", "heldout"):
         names = [n for n in checks if report[n]["split"] == sp]
         if not names:
@@ -156,15 +171,21 @@ def main(argv=None) -> int:
                 print(f"    {cam}: {c['videos']} videos, opposite {c['opposite']} of {c['decided_pairs']} "
                       f"({_pct(c['opposite_share'])}), {est}")
     passes = None
-    if "heldout" in out and only is None and not failed:
-        passes = gate(out["heldout"]["all"])
+    missing = []
+    if a.split in ("heldout", "all") and only is None:
+        missing = sorted(HELD_OUT - {n for n in checks if report[n]["split"] == "heldout"})
+        out["heldout_missing"] = missing
+        if not missing and not failed:
+            passes = gate(out["heldout"]["all"])
+        else:
+            print(f"G1 NOT EVALUATED: the held-out set is incomplete ({len(missing)} missing, {len(failed)} failed)")
     out["passes"] = passes
     out["wall_s_total"] = round(time.perf_counter() - t_all, 1)
     a.check_out.parent.mkdir(parents=True, exist_ok=True)
     a.check_out.write_text(json.dumps(out, indent=1, allow_nan=False), encoding="utf-8")
     print(f"G1: {'not evaluated' if passes is None else ('PASS' if passes else 'FAIL')}; "
           f"{out['wall_s_total']} s -> {a.check_out}")
-    if failed:
+    if failed or missing:
         return 1
     return 0 if passes in (None, True) else 2
 

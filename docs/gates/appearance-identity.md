@@ -76,3 +76,17 @@ numbers, and NOT iterated on held-out data. No v4 on these 23 videos.
 Olympic Boxing is research-use only. Nothing derived (clips, crops, embeddings, colour files, overlays) is
 committed or shown publicly; results stay in the gitignored `results/`. Pixels are reduced to counts in memory;
 the reviewer never views a frame. No re-ID weights are used by this gate.
+
+## Dated note, 2026-10-22 evening: settled AFTER this gate was committed, BEFORE any held-out read
+Nothing above is changed; these make it precise. All come from dev numbers or from review, none from held-out data.
+- **The reading unit.** For G1 each fragment of a co-present pair is decided from its rows on the frames the two
+  SHARE, not over its whole length. Why (dev only): ids hop between people (the eye check above), and the same crown
+  rule scored 89 / 124 opposite over whole fragments against 98 / 108 over the shared frames. Fragment-level decisions
+  are still reported (`credited_by_decision`).
+- **The rule** is `src/boxingvi/headgear.py` (headgear crown above the face, ADR-0013 v2's colour decisions); its
+  dev numbers are in `docs/quality-loop.md` (`feat/appearance-identity`). kam2 is expected to be "not established":
+  its blue kit is washed out (dev: 2 decided pairs).
+- **The held-out manifest is enforced** (Astra review 1): the gate is evaluated only on exactly the 23 named videos,
+  each read once; a missing or failed one means "not evaluated", an unknown id is never read.
+- **Bootstrap draws with no decided pair** are dropped and counted; more than 1% dropped fails G1.
+- The rule is FROZEN at the commit that adds this note; the PR records its hash.
