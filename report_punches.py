@@ -13,7 +13,11 @@ from this pose (same frames, same fps) and with the --rule finder rule (the
 <clip>.classified.json beside it records all of that); a --score must have scored
 this very CSV. The summary is fixed templates filled with the
 counts; its reliability warnings come from measured numbers (see boxingvi.report),
-and it says so when nothing has been measured on your own footage.
+and it says so when nothing has been measured on your own footage. It leads with a
+warning when the hand each punch type implies matches the wrist that moved less
+often than the report requires (report.HAND_FLOOR), or not significantly more
+often than chance (one-sided exact binomial and Fisher tests, 0.05), and with a
+caution when the check cannot confirm the types at all.
 """
 
 from __future__ import annotations

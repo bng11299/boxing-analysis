@@ -11,14 +11,17 @@ look like one of those clips, in time and in space:
   the clip (`clip_cut`). Every punch is read over that one length, placed around
   its own peak (`clip_window`), and `cut_span` resamples those frames to the
   training frame rate -- footage at 60 fps is converted explicitly, not passed
-  through at twice the frames per punch (O54).
+  through at twice the frames per punch (O54). `read_clip_window` is what the
+  pipeline calls: it does that, or, for a clip with too few punches to read a
+  tempo from, reads the training window exactly as `cut_window` does.
   Why per clip and not per punch (vault ADR-0014, amended 2026-10-13): sizing each
   punch from its own peak width is worse on normal-tempo footage and no better on
   slow footage. V5 + V9, 742 punches: per clip 0.826, the old fixed 0.375 s window
   0.806, per punch 0.774 (per punch minus per clip -0.053 [-0.075, -0.030]). V6
   second half: per clip 0.631, per punch 0.608, old window 0.500 (per punch minus
-  per clip -0.022 [-0.054, +0.010], a tie; at the finder's own detections 0.678
-  against 0.684, also a tie). A boxer's tempo is steady within a clip; one punch's
+  per clip -0.022 [-0.054, +0.010], a tie; at the finder's own detections 0.684
+  against 0.694, also a tie -- detections attributed by punchfind.match_nearest
+  since 2026-10-20; 0.678 against 0.684 under the greedy punchfind.match). A boxer's tempo is steady within a clip; one punch's
   peak width is a noisy reading of it. `cut_window`, the fixed-length window,
   stays as the baseline these are measured against.
   THE CHOICE WAS MADE LOOKING AT THOSE NUMBERS: V5, V9 and V6's second half are no
@@ -132,6 +135,10 @@ class WindowGeometry:
             # No training clip is longer than the corpus's 25 frames, and a manifest
             # asking for more would also size every window from untrusted input.
             raise ValueError(f"geometry window must be 2..{MAX_FRAMES} frames, got {self.n_frames}")
+        if self.lead_in_s > (self.n_frames - 1) / self.fps + 1e-9:
+            # duration_s counts samples, one step more than the window's first-to-last time: a lead-in
+            # in that last step would put the peak after the window's last frame.
+            raise ValueError("geometry lead-in must fall on one of the window's frames")
 
     @property
     def n_frames(self) -> int:
@@ -319,8 +326,13 @@ def cut_window(track: Track, peak_frame: int, geom: WindowGeometry, torso_px: fl
     design, kept as the baseline the per-clip window is measured against: on V6 it
     cost 21 points of accuracy, because that footage's punches run about twice the
     median training clip."""
+    return _window(track, _fixed_frames(track, peak_frame, geom), geom, torso_px, min_conf)
+
+
+def _fixed_frames(track: Track, peak_frame: int, geom: WindowGeometry) -> np.ndarray:
+    """The video frames cut_window reads around a peak: n_frames samples, 1/geom.fps apart."""
     t0 = _frame(peak_frame, "peak frame") / track.fps - geom.lead_in_s
-    return _window(track, _nearest_frames(track, t0, geom.n_frames, geom), geom, torso_px, min_conf)
+    return _nearest_frames(track, t0, geom.n_frames, geom)
 
 
 def cut_span(track: Track, start: int, end: int, geom: WindowGeometry, torso_px: float,
@@ -481,7 +493,9 @@ def hand_agreement(type_sides: "list[str]", finder_sides: "list[str]") -> dict:
 
 # What run_punch_extent.py's `beats_fixed_window` certifies, written into the rule file and
 # required by read_extent. Change it whenever the pipeline's cut, or how the gate measures it, changes.
-GATED_CUT = "per clip, median over the finder's detections, windows at its matched detections"
+# 2026-10-20: matched detections attributed by punchfind.match_nearest, not the greedy punchfind.match.
+GATED_CUT = ("per clip, median over the finder's detections, windows at its matched detections, "
+             "each attributed by nearest middle (punchfind.match_nearest)")
 
 def max_span_s(geom: WindowGeometry) -> float:
     """The longest punch the classifier can be shown: the corpus's 25 frames at the training rate."""
@@ -528,7 +542,8 @@ def clip_cut(track: Track, signal: np.ndarray, peaks: "list[tuple[int, int]]", r
     V6. A peak whose hand has no speed there raises, as in `punchfind.peak_width`.
 
     With fewer than MIN_CLIP_PUNCHES punches the clip's tempo cannot be read, and the
-    cut is the training clips' median window. None when the clip has no punch.
+    cut is the training clips' median window, `cut_window`'s: read it with
+    `read_clip_window`. None when the clip has no punch.
     """
     if not peaks:
         return None
@@ -538,7 +553,12 @@ def clip_cut(track: Track, signal: np.ndarray, peaks: "list[tuple[int, int]]", r
         w, censored = peak_width(track, signal, peak, hand, rule["frac"])
         (cut_off if censored else whole).append(w * per_width)
     if len(peaks) < MIN_CLIP_PUNCHES:
-        return ClipCut(geom.duration_s, geom.lead_in_s / geom.duration_s, 0, 0, False, "training")
+        # cut_window's window, as a span: its n_frames samples run (n_frames - 1) steps from first to
+        # last, which is what length_s holds. geom.duration_s counts samples (n / fps), one step more:
+        # using it read 10 frames at 24 fps where cut_window reads 9 (Codex on PR #14). The pipeline
+        # reads this cut with read_clip_window, i.e. cut_window's own frames.
+        span = (geom.n_frames - 1) / geom.fps
+        return ClipCut(span, min(1.0, geom.lead_in_s / span), 0, 0, False, "training")
     use = whole if len(whole) > len(cut_off) else whole + cut_off
     length = float(np.median(use))
     cap = max_span_s(geom)
@@ -559,6 +579,25 @@ def clip_window(peak_frame: int, cut: ClipCut, fps: float) -> "tuple[int, int]":
     while (end - start) / fps > cut.length_s + 1e-9 and end > peak_frame:   # rounding both ends outward
         end -= 1
     return start, max(end, start + 1)
+
+
+def read_clip_window(track: Track, peak_frame: int, cut: ClipCut, geom: WindowGeometry, torso_px: float,
+                     min_conf: float = CLASSIFY_MIN_CONF) -> "tuple[Window, tuple[int, int]]":
+    """What the pipeline reads for the punch whose peak is at `peak_frame`, under the clip's
+    cut, and the (first, last) video frames that reading spans.
+
+    A clip's own cut is `clip_window` resampled by `cut_span`, as gated. A training cut
+    (fewer than MIN_CLIP_PUNCHES punches) IS the old fixed window, so it is read by
+    `cut_window`'s own frames, sample for sample. Through `cut_span` it could not be:
+    that snaps the window's start to a frame and reads only the whole training steps
+    that fit, so the 9-frame window came out at 8 frames at 25, 29.97 and 59.94 fps."""
+    if cut.source == "training":
+        want = _fixed_frames(track, peak_frame, geom)
+        return _window(track, want, geom, torso_px, min_conf), (int(want[0]), int(want[-1]))
+    if cut.source != "clip":
+        raise ValueError(f"unknown cut source {cut.source!r}")
+    start, end = clip_window(peak_frame, cut, track.fps)
+    return cut_span(track, start, end, geom, torso_px, min_conf), (start, end)
 
 
 def read_extent(path: Path, variant: str) -> dict:
