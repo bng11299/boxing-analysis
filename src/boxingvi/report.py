@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import re
@@ -135,19 +136,21 @@ def _count(x, what: str) -> int:
     return x
 
 
-def read_classified(path: Path, duration_s: float, *, fps: float) -> "list[dict]":
+def read_classified(path: Path, duration_s: float, data: "bytes | None" = None, *, fps: float) -> "list[dict]":
     """classify_punches.py's CSV, checked field by field: it sits on disk between
-    the two tools, and everything in it ends up in front of the user. Every frame
-    must lie in this clip and every time must equal frame / this clip's fps, as
-    find_punches.py wrote it: a CSV made at another frame rate is refused even when
-    its sidecar has been made to agree."""
+    the two tools, and everything in it ends up in front of the user. `data`, when
+    given, is the file's bytes as already read (and hashed) by the caller; `path`
+    then only names it. Every frame must lie in this clip and every time must equal
+    frame / this clip's fps, as find_punches.py wrote it: a CSV made at another
+    frame rate is refused even when its sidecar has been made to agree."""
     path = Path(path)
     if (isinstance(fps, bool) or not isinstance(fps, (int, float)) or (isinstance(fps, int) and not 0 < fps <= 10_000)
             or not (math.isfinite(fps) and fps > 0)):
         raise ValueError("fps must be a positive number")
     n_frames = round(duration_s * fps)
     rows, leads = [], set()
-    with path.open(newline="", encoding="utf-8") as f:
+    with (path.open(newline="", encoding="utf-8") if data is None
+          else io.StringIO(data.decode("utf-8"), newline="")) as f:
         r = csv.reader(f)
         if next(r, None) != CLASSIFIED_HEADER:
             raise ValueError(f"{path.name}: not a classify_punches.py CSV")
@@ -204,16 +207,25 @@ def read_classified(path: Path, duration_s: float, *, fps: float) -> "list[dict]
     return sorted(rows, key=lambda x: x["frame"])
 
 
-def verify_provenance(csv_path: Path, sidecar: Path, manifest: Path, clip: str) -> dict:
-    """The CSV is the one classify_punches.py wrote, by the classifier this manifest
-    describes. Returns the validated manifest."""
+def verify_sidecar(csv_path: Path, sidecar: Path, clip: str, data: "bytes | None" = None) -> dict:
+    """The CSV is the one classify_punches.py wrote for this clip, unchanged since:
+    its sha256 is the one the sidecar recorded. Returns the sidecar. Pass the CSV's
+    bytes as `data` to hash exactly what will be parsed (no second read)."""
     side = _read_json(sidecar)
     if side.get("clip") != clip:
         raise ValueError(f"{Path(sidecar).name} describes clip {side.get('clip')!r}, not {clip}")
     if not isinstance(side.get("csv_sha256"), str) or not _HEX64.fullmatch(side["csv_sha256"]):
         raise ValueError(f"{Path(sidecar).name}: no csv sha256")
-    if hashlib.sha256(Path(csv_path).read_bytes()).hexdigest() != side["csv_sha256"]:
+    raw = Path(csv_path).read_bytes() if data is None else data
+    if hashlib.sha256(raw).hexdigest() != side["csv_sha256"]:
         raise ValueError(f"{Path(csv_path).name} has changed since classify_punches.py wrote it")
+    return side
+
+
+def verify_provenance(csv_path: Path, sidecar: Path, manifest: Path, clip: str) -> dict:
+    """The CSV is the one classify_punches.py wrote, by the classifier this manifest
+    describes. Returns the validated manifest."""
+    side = verify_sidecar(csv_path, sidecar, clip)
     man = read_manifest(manifest)   # classify's own schema checks
     if side.get("classifier_sha256") != man["sha256"]:
         raise ValueError("these punches were named by another classifier than this manifest describes; "
