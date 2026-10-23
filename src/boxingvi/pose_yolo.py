@@ -53,7 +53,11 @@ CONTINUITY_BONUS = 2.0  # ... and its area counts double, so a bigger bystander 
 # float32 (what `extract` writes), ~820 MB at float64. The longest real one (V4) is
 # 35,363 frames.
 MAX_POSE_FRAMES = 2_000_000
-MAX_POSE_TEXT = 4096    # characters in `source` / `model`; a 'U' scalar's size is in its header
+# A tracks table has one row per (frame, person). The same 2M bound caps what loading
+# one costs: ~440 MB for box + xy + conf at float32 (what `extract_tracks` writes),
+# ~880 MB at float64; it covers ~2.8 h of 50 fps footage with four people tracked.
+MAX_TABLE_ROWS = 2_000_000
+MAX_POSE_TEXT = 4096   # characters in `source` / `model`; a 'U' scalar's size is in its header
 
 
 _FP = re.compile(r"[0-9a-f]{64}")
@@ -279,50 +283,72 @@ _POSE_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
 _DEFLATE_MAX_RATIO = 1032
 
 
-def _npy_header(member, key: str, name: str):
+# The same for a tracks table (`PoseTable.save`). Whole-number fields also accept
+# floats because `_whole_array` / `_scalar` refuse any fraction before converting.
+_TABLE_KINDS = {"frame": "iuf", "track_id": "iuf", "box": "f", "xy": "f", "conf": "f",
+                "n_frames": "iuf", "fps": "fiu", "width": "iuf", "height": "iuf",
+                "source": "U", "model": "U", "video_fp": "U"}
+
+
+def _pose_shapes(f: int) -> "dict[str, tuple]":
+    return {"xy": (f, N_JOINTS, 2), "conf": (f, N_JOINTS), "detected": (f,)}
+
+
+def _table_shapes(n: int) -> "dict[str, tuple]":
+    return {"frame": (n,), "track_id": (n,), "box": (n, 4), "xy": (n, N_JOINTS, 2),
+            "conf": (n, N_JOINTS)}
+
+
+def _npy_header(member, key: str, name: str, kinds: "dict[str, str]" = _POSE_KINDS):
     """(shape, fortran_order, dtype) from a member's .npy header, read through a cap
     (`npyread.read_header`), with the dtype checked against what `save` writes for
     `key`. Leaves `member` positioned at the first byte of array data."""
     shape, fortran, dtype = read_header(member, f"{name}: {key}")
     max_item = 4 * MAX_POSE_TEXT if dtype.kind == "U" else 8  # 'U' is 4 bytes a character
-    if (dtype.kind not in _POSE_KINDS[key] or dtype.hasobject or dtype.fields is not None
+    if (dtype.kind not in kinds[key] or dtype.hasobject or dtype.fields is not None
             or dtype.subdtype is not None or dtype.itemsize > max_item):
-        raise ValueError(f"{name}: {key} has dtype {dtype.str!r}; a pose file's {key} "
-                         f"must be of kind {_POSE_KINDS[key]!r}")
+        raise ValueError(f"{name}: {key} has dtype {dtype.str!r}; its {key} "
+                         f"must be of kind {kinds[key]!r}")
     return shape, fortran, dtype
 
 
-def _read_pose_npz(fh, name: str) -> "dict[str, np.ndarray]":
+def _read_pose_npz(fh, name: str, kinds: "dict[str, str]" = _POSE_KINDS,
+                   shapes=_pose_shapes, row_key: str = "detected",
+                   cap: "int | None" = None, what: str = "pose file",
+                   unit: str = "frames") -> "dict[str, np.ndarray]":
     """Validate every member's .npy header, then read the arrays -- in that order,
-    from one open file, so what was checked is what is read."""
+    from one open file, so what was checked is what is read. `row_key`'s 1-D length
+    is the row count; `shapes(rows)` gives each array's expected shape (a key not in
+    it is a 0-d scalar), and `cap` (default MAX_POSE_FRAMES, read at call time) bounds
+    the rows before anything is allocated."""
+    cap = MAX_POSE_FRAMES if cap is None else cap
     with zipfile.ZipFile(fh) as zf:
         names = set(zf.namelist())
-        missing = [k for k in _POSE_KINDS
+        missing = [k for k in kinds
                    if k + ".npy" not in names and k not in _POSE_OPTIONAL]
         if missing:
-            raise ValueError(f"{name}: not a pose file, missing {', '.join(missing)}")
-        keys = [k for k in _POSE_KINDS if k + ".npy" in names]
+            raise ValueError(f"{name}: not a {what}, missing {', '.join(missing)}")
+        keys = [k for k in kinds if k + ".npy" in names]
         for k in keys:  # before any member is opened: opening one decompresses
             if zf.getinfo(k + ".npy").compress_type not in _POSE_COMPRESSION:
                 raise ValueError(f"{name}: {k} uses zip compression method "
-                                 f"{zf.getinfo(k + '.npy').compress_type}; a pose file is "
+                                 f"{zf.getinfo(k + '.npy').compress_type}; a {what} is "
                                  f"stored or deflated (np.savez / np.savez_compressed)")
         heads = {}
         for k in keys:
             with zf.open(k + ".npy") as m:
-                heads[k] = _npy_header(m, k, name)
-        dshape = heads["detected"][0]
+                heads[k] = _npy_header(m, k, name, kinds)
+        dshape = heads[row_key][0]
         if len(dshape) != 1 or type(dshape[0]) is not int or dshape[0] < 0:  # (True,) parses
-            raise ValueError(f"{name}: detected has shape {dshape}, expected (frames,)")
+            raise ValueError(f"{name}: {row_key} has shape {dshape}, expected ({unit},)")
         f = dshape[0]
-        want = {"xy": (f, N_JOINTS, 2), "conf": (f, N_JOINTS), "detected": (f,)}
+        want = shapes(f)
         for k in keys:
             if heads[k][0] != want.get(k, ()):  # tuple == compares lengths and every dim
                 raise ValueError(f"{name}: {k} has shape {heads[k][0]}, expected "
-                                 f"{want.get(k, ())} for a {f}-frame pose")
-        if f > MAX_POSE_FRAMES:  # before anything is allocated
-            raise ValueError(f"{name}: claims {f:,} frames; the cap is {MAX_POSE_FRAMES:,} "
-                             f"(~9 h at 60 fps)")
+                                 f"{want.get(k, ())} for {f} {unit}")
+        if f > cap:  # before anything is allocated
+            raise ValueError(f"{name}: claims {f:,} {unit}; the cap is {cap:,}")
         size = os.fstat(fh.fileno()).st_size
         for k in keys:  # what the member could hold at most, before allocating it
             info = zf.getinfo(k + ".npy")
@@ -336,7 +362,7 @@ def _read_pose_npz(fh, name: str) -> "dict[str, np.ndarray]":
         out = {}
         for k in keys:
             with zf.open(k + ".npy") as m:
-                if _npy_header(m, k, name) != heads[k]:  # rewritten since validated
+                if _npy_header(m, k, name, kinds) != heads[k]:  # rewritten since validated
                     raise ValueError(f"{name}: {k} changed while being read")
                 out[k] = read_data(m, *heads[k], f"{name}: {k}")
         return out
@@ -482,18 +508,31 @@ class PoseTable:
         number > 0, source / model / video_fp are 0-d strings. A fraction is refused, not truncated
         into a different frame or id. Cross-field consistency (matching lengths, frames inside the
         video, finite coordinates, confidence in [0, 1], no repeated id in a frame) is then checked
-        by the constructor."""
-        with np.load(path, allow_pickle=False) as z:
-            frame, track_id = _whole_array(z, "frame"), _whole_array(z, "track_id")
-            fps = _scalar(z, "fps", whole=False)
-            if not fps > 0:
-                raise ValueError(f"fps must be positive, got {fps!r}")
-            return cls(frame=frame, track_id=track_id,
-                       box=_float_array(z, "box"), xy=_float_array(z, "xy"), conf=_float_array(z, "conf"),
-                       n_frames=_scalar(z, "n_frames", whole=True, lo=1), fps=fps,
-                       width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
-                       source=_text(z, "source"), model=_text(z, "model"),
-                       video_fp=_text(z, "video_fp") if "video_fp" in z.files else "")
+        by the constructor.
+
+        As in `PoseSequence.load`, every member's .npy header is read and checked first
+        (keys, zip compression method, dtype kinds, agreeing shapes, MAX_TABLE_ROWS, size
+        against the zip entry) and only then is anything allocated: a few-KB file whose
+        headers claim huge shapes is refused instead of allocating gigabytes. Never
+        unpickles. A file that cannot be opened raises OSError; anything wrong inside
+        it, ValueError."""
+        p = Path(path)
+        with open(p, "rb") as fh:
+            try:
+                z = _read_pose_npz(fh, p.name, _TABLE_KINDS, _table_shapes, "frame",
+                                   MAX_TABLE_ROWS, "tracks table", "rows")
+            except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, OSError) as e:
+                raise ValueError(f"{p.name}: not a readable tracks table ({type(e).__name__})") from e
+        frame, track_id = _whole_array(z, "frame"), _whole_array(z, "track_id")
+        fps = _scalar(z, "fps", whole=False)
+        if not fps > 0:
+            raise ValueError(f"fps must be positive, got {fps!r}")
+        return cls(frame=frame, track_id=track_id,
+                   box=_float_array(z, "box"), xy=_float_array(z, "xy"), conf=_float_array(z, "conf"),
+                   n_frames=_scalar(z, "n_frames", whole=True, lo=1), fps=fps,
+                   width=_scalar(z, "width", whole=True, lo=1), height=_scalar(z, "height", whole=True, lo=1),
+                   source=_text(z, "source"), model=_text(z, "model"),
+                   video_fp=_text(z, "video_fp") if "video_fp" in z else "")
 
 
 TRACKER_CONFIG = Path(__file__).resolve().parents[2] / "config" / "bytetrack_50fps.yaml"
