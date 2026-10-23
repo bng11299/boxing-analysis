@@ -90,6 +90,41 @@ def sign_test_p(n_pos: int, n_neg: int) -> float:
     return float(min(1.0, 2 * tail))
 
 
+def binomial_greater_p(k: int, n: int, p: float) -> float:
+    """Exact one-sided binomial test: P(X >= k) for X ~ Binomial(n, p), the chance
+    of k or more successes in n if each succeeds with probability p.
+
+    Summed term by term in log space, so it holds for large n where comb(n, i)
+    would overflow a float.
+    """
+    from math import exp, fsum, lgamma, log, log1p
+    for name, v in (("k", k), ("n", n)):
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(f"{name} must be a whole number, got {v!r}")
+    if not 0 <= k <= n:
+        raise ValueError(f"need 0 <= k <= n, got k={k}, n={n}")
+    if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 1:
+        raise ValueError(f"p must be a number in [0, 1], got {p!r}")
+    if k == 0 or p == 1:
+        return 1.0
+    if p == 0:
+        return 0.0
+    lp, lq, top = log(p), log1p(-p), lgamma(n + 1)
+    tail = fsum(exp(top - lgamma(i + 1) - lgamma(n - i + 1) + i * lp + (n - i) * lq) for i in range(k, n + 1))
+    return float(min(1.0, tail))
+
+
+def fisher_greater_p(a: int, b: int, c: int, d: int) -> float:
+    """One-sided Fisher exact test on the 2x2 table [[a, b], [c, d]]: the chance, with
+    both row and column totals held fixed, of a diagonal at least this heavy (`a` this
+    large). A table with an empty row or column carries no evidence: p = 1."""
+    from scipy.stats import fisher_exact
+    for name, v in (("a", a), ("b", b), ("c", c), ("d", d)):
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise ValueError(f"cell {name} must be a whole number >= 0, got {v!r}")
+    return float(fisher_exact([[a, b], [c, d]], alternative="greater").pvalue)
+
+
 def per_group_gaps(y_true, pred_a, pred_b, groups, score) -> dict:
     """score(a) - score(b) inside each group, with a sign test across groups.
 

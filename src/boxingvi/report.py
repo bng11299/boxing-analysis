@@ -31,22 +31,39 @@ Fixed rules, stated in the report: a punch type the classifier names correctly
 under LOW_RECALL of the time is "named least reliably"; a count more than
 COUNT_BIAS off on the benchmark is reported as running high or low; a change in
 punch rate counts only beyond two standard errors of a Poisson count.
+
+The one label-free check on THIS clip's punch types: how often the hand a punch
+type implies is the wrist that moved, against the agreement two independent
+readings with the same proportions would reach by chance (classify.hand_agreement).
+The summary leads with a warning when that agreement is under HAND_FLOOR, or is not
+above chance by either of two one-sided exact tests at HAND_ALPHA (binomial against
+the chance agreement; Fisher's, which holds both proportions fixed). When the types
+fall so heavily on one hand, or are so few, that even full agreement could not pass
+both tests, it says the check cannot confirm them instead (unless agreement is already
+under the floor, which is a warning). Without this, a broken
+classify step (2026-10-12: 63% and 41% lead uppercuts) produced reports that were
+faithful to the broken input and said nothing about it. The check sees the hand
+only: a jab read as a lead hook passes it.
 """
 
 from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 
-from .classify import class_side, read_manifest
+from .classify import class_side, hand_agreement, read_manifest
 from .data import CLASSES, HELD_OUT_VIDEOS
+from .stats import binomial_greater_p, fisher_greater_p
 
 CLASSIFIED_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_interpolated_frame",
                      "lead_rear", "punch_type", "confidence", "type_hand", "hands_agree",
@@ -55,6 +72,17 @@ UNCLASSIFIED = "unclassified"
 LOW_RECALL = 0.70
 COUNT_BIAS = 0.20
 CHANCE_SE = 2.0
+HAND_ALPHA = 0.05
+# The agreement the report requires, whatever the tests say. Set by Brendan 2026-10-20, to rise to 0.80;
+# chosen, not fitted to any clip.
+HAND_FLOOR = 0.70
+
+
+
+def _under_alpha(p: float) -> bool:
+    """p < HAND_ALPHA, ignoring float noise at the boundary: scipy returns Fisher's exact 1/20
+    as 0.04999999999999999. A p within a billionth of alpha counts as not under it."""
+    return p < HAND_ALPHA * (1 - 1e-9)
 MAX_ROWS = 100_000
 MAX_ROUNDS = 100
 MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -108,19 +136,21 @@ def _count(x, what: str) -> int:
     return x
 
 
-def read_classified(path: Path, duration_s: float, *, fps: float) -> "list[dict]":
+def read_classified(path: Path, duration_s: float, data: "bytes | None" = None, *, fps: float) -> "list[dict]":
     """classify_punches.py's CSV, checked field by field: it sits on disk between
-    the two tools, and everything in it ends up in front of the user. Every frame
-    must lie in this clip and every time must equal frame / this clip's fps, as
-    find_punches.py wrote it: a CSV made at another frame rate is refused even when
-    its sidecar has been made to agree."""
+    the two tools, and everything in it ends up in front of the user. `data`, when
+    given, is the file's bytes as already read (and hashed) by the caller; `path`
+    then only names it. Every frame must lie in this clip and every time must equal
+    frame / this clip's fps, as find_punches.py wrote it: a CSV made at another
+    frame rate is refused even when its sidecar has been made to agree."""
     path = Path(path)
     if (isinstance(fps, bool) or not isinstance(fps, (int, float)) or (isinstance(fps, int) and not 0 < fps <= 10_000)
             or not (math.isfinite(fps) and fps > 0)):
         raise ValueError("fps must be a positive number")
     n_frames = round(duration_s * fps)
     rows, leads = [], set()
-    with path.open(newline="", encoding="utf-8") as f:
+    with (path.open(newline="", encoding="utf-8") if data is None
+          else io.StringIO(data.decode("utf-8"), newline="")) as f:
         r = csv.reader(f)
         if next(r, None) != CLASSIFIED_HEADER:
             raise ValueError(f"{path.name}: not a classify_punches.py CSV")
@@ -177,16 +207,25 @@ def read_classified(path: Path, duration_s: float, *, fps: float) -> "list[dict]
     return sorted(rows, key=lambda x: x["frame"])
 
 
-def verify_provenance(csv_path: Path, sidecar: Path, manifest: Path, clip: str) -> dict:
-    """The CSV is the one classify_punches.py wrote, by the classifier this manifest
-    describes. Returns the validated manifest."""
+def verify_sidecar(csv_path: Path, sidecar: Path, clip: str, data: "bytes | None" = None) -> dict:
+    """The CSV is the one classify_punches.py wrote for this clip, unchanged since:
+    its sha256 is the one the sidecar recorded. Returns the sidecar. Pass the CSV's
+    bytes as `data` to hash exactly what will be parsed (no second read)."""
     side = _read_json(sidecar)
     if side.get("clip") != clip:
         raise ValueError(f"{Path(sidecar).name} describes clip {side.get('clip')!r}, not {clip}")
     if not isinstance(side.get("csv_sha256"), str) or not _HEX64.fullmatch(side["csv_sha256"]):
         raise ValueError(f"{Path(sidecar).name}: no csv sha256")
-    if hashlib.sha256(Path(csv_path).read_bytes()).hexdigest() != side["csv_sha256"]:
+    raw = Path(csv_path).read_bytes() if data is None else data
+    if hashlib.sha256(raw).hexdigest() != side["csv_sha256"]:
         raise ValueError(f"{Path(csv_path).name} has changed since classify_punches.py wrote it")
+    return side
+
+
+def verify_provenance(csv_path: Path, sidecar: Path, manifest: Path, clip: str) -> dict:
+    """The CSV is the one classify_punches.py wrote, by the classifier this manifest
+    describes. Returns the validated manifest."""
+    side = verify_sidecar(csv_path, sidecar, clip)
     man = read_manifest(manifest)   # classify's own schema checks
     if side.get("classifier_sha256") != man["sha256"]:
         raise ValueError("these punches were named by another classifier than this manifest describes; "
@@ -371,6 +410,50 @@ def round_of(t: float, rounds) -> "int | None":
     return None
 
 
+def _could_pass(n: int, a: int) -> bool:
+    """Whether the check could pass at all on n named punches whose types put `a` on the
+    lead hand: both tests, if the wrist agreed with every one."""
+    return (_under_alpha(binomial_greater_p(n, n, (a * a + (n - a) ** 2) / n ** 2))
+            and _under_alpha(fisher_greater_p(a, 0, 0, n - a)))
+
+
+def hand_check(named) -> dict:
+    """Type-implied hand against the wrist that moved, over the named punches.
+
+    verdict, in this order: "warn" if agreement is under HAND_FLOOR; "pass" if both
+    one-sided exact tests (binomial, Fisher) are under HAND_ALPHA; "warn" if they are
+    not but full agreement could have passed them; otherwise the check cannot confirm
+    the types: "concentrated" (full agreement on a 50/50 split of this many punches
+    would have passed; at alpha 0.05 that needs 7 or more) or "too_few". "none" with no
+    named punch: no type to warn about."""
+    ag = hand_agreement([r["type_hand"] for r in named], [r["lead_rear"] for r in named])
+    n = ag["n"]
+    out = {**ag, "k": 0, "table": None, "p_binomial": None, "p_fisher": None, "below_floor": False,
+           "dominant": None, "dominant_share": None, "most_often": [], "most_often_n": 0}
+    if not n:
+        return {**out, "verdict": "none", "warn": False}
+    t = Counter((r["type_hand"], r["lead_rear"]) for r in named)
+    table = (t[("lead", "lead")], t[("lead", "rear")], t[("rear", "lead")], t[("rear", "rear")])
+    k, a = table[0] + table[3], table[0] + table[1]
+    pb, pf = binomial_greater_p(k, n, ag["chance"]), fisher_greater_p(*table)
+    below = Fraction(k, n) < Fraction(str(HAND_FLOOR))
+    if below:
+        verdict = "warn"
+    elif _under_alpha(pb) and _under_alpha(pf):
+        verdict = "pass"
+    elif _could_pass(n, a):
+        verdict = "warn"
+    else:
+        verdict = "concentrated" if _could_pass(n, n // 2) else "too_few"
+    hand = "lead" if 2 * a >= n else "rear"
+    types = Counter(r["punch_type"] for r in named if r["type_hand"] == hand)
+    top = max(types.values())
+    return {**out, "k": k, "table": table, "p_binomial": pb, "p_fisher": pf, "below_floor": below,
+            "dominant": hand, "dominant_share": max(a, n - a) / n,
+            "most_often": [c for c in CLASSES if types[c] == top], "most_often_n": top,   # every tied type
+            "verdict": verdict, "warn": verdict == "warn"}
+
+
 def compute_facts(rows, rounds, duration_s: float) -> dict:
     """Every number the report states, computed once."""
     which = [round_of(r["time_s"], rounds) for r in rows]
@@ -390,7 +473,8 @@ def compute_facts(rows, rounds, duration_s: float) -> dict:
             "round_minutes": minutes,
             "types": {c: sum(r["punch_type"] == c for r in named) for c in CLASSES},
             "n_type_lead": sum(r["type_hand"] == "lead" for r in named),
-            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named)}
+            "n_hands_disagree": sum(r["hands_agree"] == "no" for r in named),
+            "hand_check": hand_check(named)}
 
 
 def shares(counts: "dict[str, int]") -> "dict[str, int]":
@@ -439,6 +523,20 @@ class _Writer:
     def rate(self, x: float) -> str:
         return self.num(f"{x:.1f}" if x < 10 else f"{x:.0f}")
 
+    def pval(self, p: float) -> str:
+        """'p = 0.29'; three decimals under 0.1, so a p just above 0.05 never prints as 0.05;
+        a p under alpha that would print as alpha says 'just under'; never 'p = 0.000' or
+        'p = 1.00' unless exact."""
+        if _under_alpha(p) and f"{p:.3f}" == f"{HAND_ALPHA:.3f}":
+            return "p just under " + self.num(f"{HAND_ALPHA:.2f}")
+        if p == 1:
+            return "p = " + self.num("1")
+        if p >= 0.995:
+            return "p over " + self.num("0.99")
+        if 0 < p < 0.0005:
+            return "p under " + self.num("0.001")
+        return "p = " + self.num(f"{p:.3f}" if p < 0.1 else f"{p:.2f}")
+
     def mmss(self, s: float) -> str:
         s = int(round(s))
         return self.num(f"{s // 60}:{s % 60:02d}")
@@ -460,6 +558,38 @@ def _join(items: "list[str]") -> str:
 def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tuple[str, list[str]]":
     """(text, the numbers it states). Fixed templates only."""
     w = _Writer()
+    hc = facts["hand_check"]
+    if hc["verdict"] == "warn":
+        w.say("Warning: the punch types in this summary may be wrong for this clip.")
+        w.say(f"For {w.count(hc['k'])} of {w.count(hc['n'])} named {_punches(hc['n'])} the hand the punch type "
+              f"implies is the wrist that moved ({w.pct(hc['agree'])}), against {w.pct(hc['chance'])} expected by "
+              f"chance from how often each reading says lead hand.")
+        ok_b, ok_f = _under_alpha(hc["p_binomial"]), _under_alpha(hc["p_fisher"])
+        tests = (f"One-sided exact tests of whether that is above chance give {w.pval(hc['p_binomial'])} "
+                 f"(binomial) and {w.pval(hc['p_fisher'])} (Fisher)")
+        if ok_b and ok_f:
+            w.say(tests + ".")
+        elif ok_b or ok_f:
+            w.say(tests + f"; only the {'binomial' if ok_b else 'Fisher'} test is under "
+                  f"{w.num(f'{HAND_ALPHA:.2f}')}, so that agreement is not shown to be better than chance.")
+        else:
+            w.say(tests + f", neither under {w.num(f'{HAND_ALPHA:.2f}')}, so that agreement is not shown to be "
+                  f"better than chance.")
+        if hc["below_floor"]:
+            w.say(f"The {w.pct(hc['agree'])} agreement is under the {w.pct(HAND_FLOOR)} this report requires.")
+        if hc["agree"] <= hc["chance"]:
+            w.say("Agreement no higher than chance can also mean the clip was read with the wrong stance "
+                  "(orthodox or southpaw), which swaps lead and rear.")
+    elif hc["verdict"] == "concentrated":
+        w.say(f"Caution: there appears to be an extreme concentration of {hc['dominant']}-hand punch types: "
+              f"{w.pct(hc['dominant_share'])} of the {w.count(hc['n'])} named punches, most often "
+              f"{_join([PLURAL[c] for c in hc['most_often']])} ({w.count(hc['most_often_n'])}"
+              f"{' each' if len(hc['most_often']) > 1 else ''}). On a split like this the hand check "
+              f"cannot confirm the types even if every punch agreed with the wrist that moved. If this is not "
+              f"expected, checking the footage is recommended.")
+    elif hc["verdict"] == "too_few":
+        w.say(f"Caution: only {w.count(hc['n'])} named {_punches(hc['n'])}, too few to check the punch types "
+              f"against the wrist that moved.")
     rounds = facts["rounds"]
     nr = len(rounds)
     where = "one round" if nr == 1 else f"{w.count(nr)} rounds"
@@ -481,6 +611,13 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
                 k = facts["n_hands_disagree"]
                 w.say(f"For {w.count(k)} {_punches(k)} the punch type and the wrist that moved point to "
                       f"different hands; one of the two readings is wrong there.")
+            if hc["verdict"] == "pass":
+                w.say(f"Across the clip the hand each punch type implies is the wrist that moved for "
+                      f"{w.count(hc['k'])} of {w.count(hc['n'])} ({w.pct(hc['agree'])}) against "
+                      f"{w.pct(hc['chance'])} by chance ({w.pval(hc['p_binomial'])} binomial, "
+                      f"{w.pval(hc['p_fisher'])} Fisher), and at least the {w.pct(HAND_FLOOR)} this report "
+                      f"requires. That checks the hand only: it cannot tell a jab from a lead hook or uppercut, or "
+                      f"a cross from a rear hook or uppercut.")
         if facts["n_unnamed"]:
             w.say(f"{w.count(facts['n_unnamed'])} it could not name: the pose was too incomplete to read.")
         first, last = rounds[0], rounds[-1]
@@ -570,6 +707,17 @@ def cut_line(sidecar: dict) -> str:
             + ("; capped at the longest the tool can read." if c["capped"] else "."))
 
 
+def _check_result(hc: dict) -> str:
+    """The Reliability sheet's one-cell verdict of the hand check."""
+    if hc["verdict"] == "warn":
+        why = ([f"under {100 * HAND_FLOOR:.0f}%"] if hc["below_floor"] else []) + [
+            f"{name} not under {HAND_ALPHA:.2f}" for name, q in (("binomial", "p_binomial"), ("Fisher", "p_fisher"))
+            if not _under_alpha(hc[q])]
+        return "warning: " + "; ".join(why)
+    return {"pass": "passed", "concentrated": "cannot check: types concentrated on one hand",
+            "too_few": "cannot check: too few named punches", "none": "no named punch"}[hc["verdict"]]
+
+
 def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict, text: str,
                    fps: float, how_cut: str = "") -> None:
     from openpyxl import Workbook
@@ -605,11 +753,30 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
         ws.append([PLURAL[t.cls], t.true, t.predicted, f"{100 * (t.count_ratio - 1):+.0f}%", round(t.recall, 3),
                    None if t.precision is None else round(t.precision, 3), round(t.f1, 3),
                    "yes" if t.recall < LOW_RECALL else ""])
+    hc = facts["hand_check"]
+    ws.append([])
+    ws.append(["this clip's check", "named punches", "type hand = wrist", "agreement", "chance agreement",
+               "p, binomial (one-sided exact)", "p, Fisher (one-sided exact)", "agreement required", "result"])
+    ws.append(["punch type's hand vs the wrist that moved", hc["n"], hc["k"],
+               None if hc["agree"] is None else round(hc["agree"], 3),
+               None if hc["chance"] is None else round(hc["chance"], 3),
+               *(None if hc[q] is None else float(f"{hc[q]:.3g}") for q in ("p_binomial", "p_fisher")),  # never 0
+               HAND_FLOOR, _check_result(hc)])
     ws = wb.create_sheet("About")
     for line in (f"clip: {clip}", "", "summary:", text, "", how_cut,
                  f"'named least reliably' = named correctly under {100 * LOW_RECALL:.0f}% of the time on held-out "
                  f"benchmark footage; type counts reported when more than {100 * COUNT_BIAS:.0f}% off; a change in "
                  f"punch rate reported only beyond {CHANCE_SE:.0f} standard errors of a Poisson count.",
+                 f"A warning leads the summary when the hand each punch type implies matches the wrist that moved "
+                 f"under {100 * HAND_FLOOR:.0f}% of the time (a fixed requirement), or not significantly more often "
+                 f"than chance by either of two one-sided exact tests at {HAND_ALPHA:.2f}: binomial, against the "
+                 f"chance agreement for the two readings' proportions, and Fisher's, which holds both proportions "
+                 f"fixed. When the punch types fall so heavily on one hand, or are so few, that even full agreement "
+                 f"could not pass both tests, the summary says the check cannot confirm them instead, unless "
+                 f"agreement is already under {100 * HAND_FLOOR:.0f}%.",
+                 "That check sees only which hand threw: it cannot tell a jab from a lead hook or uppercut, or a "
+                 "cross from a rear hook or uppercut. Lead and rear follow the stance given to classify_punches.py; "
+                 "a wrong stance swaps them and shows up as low agreement.",
                  f"Benchmark = BoxingVI, held-out videos {'/'.join(bench['videos'])}; skeletons from AlphaPose, "
                  "not the YOLO11-pose used on your footage. Counts are estimates."):
         ws.append([_cell(line)])

@@ -56,6 +56,20 @@ share exactly these, Send & Receive, with **Trash Can file versioning** on each
 
 All three are gitignored, so nothing Syncthing writes can reach a commit.
 
+### Start Syncthing from Windows, never from an assistant terminal
+
+Learned 2026-10-07. A Syncthing started from inside the assistant desktop app (its
+terminal pane, or an assistant tool call) is closed when the app restarts: Windows
+logged "syncthing.exe stopped interacting with Windows and was closed" at the
+same minute the app restarted (10-06 12:53, 10-07 12:06). On the laptop the first
+install also kept its identity somewhere the app's environment pointed, so the
+Syncthing restarted from Windows came up as a NEW device (B66PIM4..., config
+created 10-07 13:24) with no pairing, and the 29 Olympic tracks files could not
+come back. Fix: start it with Win+R -> `shell:startup` -> double-click
+Syncthing (or just log in), check its parent is `explorer` running since login,
+and re-pair a device whose ID changed (a new device has no history, so nothing
+it holds can propagate a deletion).
+
 ## 4. Weights are checked, not trusted
 
 Every checkpoint is a pickle and is loaded only against a pinned sha256. After a

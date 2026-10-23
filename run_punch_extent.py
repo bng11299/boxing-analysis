@@ -83,6 +83,17 @@ def paired_gain(a, b, spans, n_boot: int = 2000, seed: int = 0) -> dict:
             "excludes_zero": bool(lo > 0 or hi < 0), "n_boot": n_boot}
 
 
+def matched_inside(det, spans, fps: float, window: "tuple[int, int]") -> "list[tuple[int, int]]":
+    """(span, detection) pairs for the spans inside `window`, each read at the detection
+    the matching attributes to it. Nearest attribution (punchfind.match_nearest), as
+    eval_classify_v6.py's readings: the greedy punchfind.match hands an overlapping
+    combination's one detection to whichever span ends first, and the overlap is then
+    measured against the wrong span. classify.GATED_CUT names this attribution, so a rule
+    file gated under the greedy one is refused."""
+    return [(si, di) for si, di in punchfind.match_nearest(det, spans, int(round(TOL_S * fps)))
+            if window[0] <= spans[si].start and spans[si].end <= window[1]]
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, required=True)
@@ -139,8 +150,9 @@ def main(argv=None) -> int:
     # As the pipeline runs: anchored at the finder's own detections, second half only.
     det, dh = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
     w = tuple(r["test_window"])
-    m = [(si, di) for si, di in punchfind.match(det, spans, int(round(TOL_S * track.fps)))
-         if w[0] <= spans[si].start and spans[si].end <= w[1]]
+    # Sorted by span index (match_nearest's order); paired_gain resamples by position, so its interval also
+    # moved with the change from the greedy's span-end order, not only with the attribution.
+    m = matched_inside(det, spans, track.fps, w)
     if m:
         sp = [spans[si] for si, _ in m]
         e = [ext(int(det[di]), int(dh[di])) for _, di in m]
