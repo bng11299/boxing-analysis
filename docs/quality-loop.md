@@ -3807,3 +3807,25 @@ integrity, scoring TEST with a rule changed after seeing it.
   other's record). `manifest_lock` (exclusive-create lock file, bounded wait) around the freeze and both
   record steps.
 - **Test:** 210 / 210. **Mutants: 43 of 44 killed;** the survivor is still the redundant 75% majority.
+
+### Iteration 3 review (Astra, third round, on a fresh clone of `27717ec`): **SHIP**
+All six open items FIXED (B1, B2, S1, NEW-1, NEW-2, NEW-3); no new finding. Astra could not run Python in its
+sandbox in any round ("Access is denied"), so its three reviews are static; the runtime evidence is the
+suites and mutants above, all run here and reproduced in a fresh clone.
+
+### Exit
+- **Gates:** test 210 / 210 (fresh clone of `27717ec`: identical; blur 177, headgear 140, appearance 171, linking
+  266, tracks 79, pipeline 314, all unchanged from before the branch); mutants 43 / 44 (survivor: the redundant
+  majority guard); review: Astra FIX FIRST -> FIX FIRST -> SHIP; security: every finding above closed.
+- **Residual risks, accepted:**
+  - An owner who deliberately rewrites the manifest and the scores together can forge a pass. Closing that
+    needs a record the owner cannot edit.
+  - `PoseTable.load` is capped only once #28 merges.
+  - The counts loader checks the zip, then reopens it with `np.load` (a file swapped in between is out of
+    scope).
+  - Counts must be computed and scored in the SAME checkout: the code digest hashes the bytes on disk, and line
+    endings differ between checkouts.
+  - An id lent to the other boxer while the borrower's gloves are hidden and the lender is undetected can be
+    named as the lender for up to 0.3 s.
+  - Every constant is a first-principles guess, untested on any real glove. **No study frame has been read**,
+    and the gate is not evaluated until Hector rules (vault ISSUES-LOG O65).
