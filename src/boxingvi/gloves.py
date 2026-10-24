@@ -29,12 +29,17 @@ synthetic fixtures, BEFORE any study frame was read; DEV-only changes are record
   7. A row's raw decision is its nearer cluster when the margin (d_far - d_near) / (d_far + d_near) is at
      least MARGIN_MIN, else unsure (motion blur, odd light, half a glove).
   8. Every table row (sampled or not) is then named by the raw decisions of the SAME track id within
-     +-SMOOTH_S: at least SMOOTH_MIN_VOTES votes and a SMOOTH_MAJORITY majority, else unsure. Two rows of
+     +-SMOOTH_S: at least SMOOTH_MIN_VOTES votes and a SMOOTH_MAJORITY majority, else unsure. A row with any
+     raw decision of its track within one sampling step that contradicts that name is unsure: direct
+     evidence beats the window (an id lent to the other boxer for a moment). A row is named only with an
+     AGREEING raw decision of its track within +-SUPPORT_S: where the gloves are hidden (a clinch, a lent id
+     whose borrower's gloves are out of sight) the window does not guess for more than SUPPORT_S. Two rows of
      one frame given the same name are both made unsure (they cannot be the same boxer).
 
 What it cannot do (reported, not hidden): two gloves of the same colour (the gate's FAIL-CASE; the
 right output is "not separable"); tan or brown gloves overlap skin and are read as skin; coloured light moves
-every hue; a ByteTrack id that hops to the other boxer inside SMOOTH_S carries a wrong vote with it.
+every hue; an id lent to the other boxer while that boxer's gloves are hidden and the lender is undetected
+can be named as the lender for up to SUPPORT_S past the last glove seen (there is no evidence either way).
 
 PIXELS NEVER LEAVE MEMORY: frames are decoded one at a time and only 16 class counts per glove read survive.
 Nothing here writes a crop, an image or a pixel array.
@@ -91,13 +96,15 @@ KMEANS_ITERS = 50
 SMOOTH_S = 1.0
 SMOOTH_MIN_VOTES = 3
 SMOOTH_MAJORITY = 0.75
+SUPPORT_S = 0.3
 
 VERDICTS = ("separable", "not_separable", "too_few_rows", "too_few_copresent")
 FORMAT = "boxingvi-gloves-1"
 MAX_FILE_BYTES = 256 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 MAX_REGION_PX = 3840 * 2160
-_KEYS = {"format", "source", "video_fp", "table_sha256", "meta", "rows", "hand", "bins", "n", "contested"}
+_KEYS = {"format", "source", "video_fp", "table_sha256", "provenance", "meta", "rows", "hand", "bins", "n",
+         "contested"}
 _FP = re.compile(r"[0-9a-f]{64}")
 
 
@@ -107,7 +114,7 @@ def rule_constants() -> dict:
              "MAX_RADIUS_FRAC", "MIN_DISC_PX", "CONTEST_FACTOR", "DARK_V", "NEUTRAL_S", "WHITE_V",
              "SKIN_HUE_MAX", "SKIN_SAT_MAX", "HUE_BINS", "MIN_GLOVE_PX", "MIN_FIT_ROWS", "SEP_MIN",
              "MIN_CLUSTER_SHARE", "MARGIN_MIN", "COPRESENT_SPLIT_MIN", "MIN_COPRESENT_FRAMES", "KMEANS_ITERS",
-             "SMOOTH_S", "SMOOTH_MIN_VOTES", "SMOOTH_MAJORITY", "FORMAT")
+             "SMOOTH_S", "SMOOTH_MIN_VOTES", "SMOOTH_MAJORITY", "SUPPORT_S", "FORMAT")
     g = globals()
     return {k: g[k] for k in names}
 
@@ -194,8 +201,10 @@ def frame_reads(frame: np.ndarray, table, rows_here, read_rows):
 
 # ---- the counts of one video ------------------------------------------------------------
 def table_digest(table, every: int) -> str:
-    """sha256 of the table's CONTENT and the sampling step (counts are row-indexed)."""
-    h = hashlib.sha256(f"{FORMAT}|every={int(every)}|".encode())
+    """sha256 of the table's CONTENT, its timing and size, and the sampling step (counts are row-indexed, and
+    fps sets both the sampling and the smoothing window)."""
+    h = hashlib.sha256(f"{FORMAT}|every={int(every)}|fps={float(table.fps)!r}|n={int(table.n_frames)}|"
+                       f"{int(table.width)}x{int(table.height)}|".encode())
     for a, dt in ((table.frame, np.int64), (table.track_id, np.int64), (table.box, np.float64),
                   (table.xy, np.float64), (table.conf, np.float64)):
         h.update(np.ascontiguousarray(a, dtype=dt).tobytes())
@@ -218,6 +227,7 @@ class GloveCounts:
     every: int
     table_sha256: str
     video_fp: str = ""
+    provenance: str = ""    # sha256 of the rule constants and the code that computed these counts ("" = unknown)
 
     def check_table(self, table) -> None:
         if self.source != table.source:
@@ -234,6 +244,7 @@ class GloveCounts:
     def save(self, path) -> None:
         np.savez_compressed(path, format=np.array(FORMAT), source=np.array(self.source),
                             video_fp=np.array(self.video_fp), table_sha256=np.array(self.table_sha256),
+                            provenance=np.array(self.provenance),
                             meta=np.array([self.n_frames, self.n_table_rows, self.every], dtype=np.int64),
                             rows=self.rows.astype(np.int64), hand=self.hand.astype(np.int64),
                             bins=self.bins.astype(np.int64), n=self.n.astype(np.int64),
@@ -280,7 +291,7 @@ class GloveCounts:
         except (ValueError, OSError) as e:
             raise ValueError(f"{p.name}: not a readable npz") from e
         with z:
-            for k in ("format", "source", "video_fp", "table_sha256"):
+            for k in ("format", "source", "video_fp", "table_sha256", "provenance"):
                 if z[k].dtype.kind != "U" or z[k].shape != ():
                     bad(f"{k} must be one text value")
             if str(z["format"]) != FORMAT:
@@ -288,6 +299,9 @@ class GloveCounts:
             fp = str(z["video_fp"])
             if fp and not _FP.fullmatch(fp):
                 bad("video_fp must be empty or a sha256 hex digest")
+            prov = str(z["provenance"])
+            if prov and not _FP.fullmatch(prov):
+                bad("provenance must be empty or a sha256 hex digest")
             if not _FP.fullmatch(str(z["table_sha256"])):
                 bad("table_sha256 must be a sha256 hex digest")
             meta = z["meta"]
@@ -318,10 +332,10 @@ class GloveCounts:
             if (bins.sum(axis=1) != n).any():
                 bad("counts are impossible (a read's classes do not add up to its pixels)")
             return cls(rows.copy(), hand.copy(), bins.copy(), n.copy(), con.copy(), str(z["source"]),
-                       int(meta[0]), int(meta[1]), int(meta[2]), str(z["table_sha256"]), fp)
+                       int(meta[0]), int(meta[1]), int(meta[2]), str(z["table_sha256"]), fp, prov)
 
 
-def compute_gloves(video, table, info=None, frames=None) -> GloveCounts:
+def compute_gloves(video, table, info=None, frames=None, provenance: str = "") -> GloveCounts:
     """Decode `video` once and read both gloves of every table row on a sampled frame. `frames` replaces
     the decoder with any iterator of (H, W, 3) uint8 frames (tests)."""
     every = sample_every(table.fps)
@@ -356,7 +370,7 @@ def compute_gloves(video, table, info=None, frames=None) -> GloveCounts:
                        np.array([x[3] for x in reads], dtype=np.int64),
                        np.array([int(x[4]) for x in reads], dtype=np.int64),
                        table.source, table.n_frames, len(table.frame), every, table_digest(table, every),
-                       table.video_fp)
+                       table.video_fp, provenance)
 
 
 # ---- the per-video model ------------------------------------------------------------------
@@ -475,6 +489,26 @@ def identify(table, counts: GloveCounts) -> GloveIdentity:
                 label[r] = 1
             elif n - k1 >= SMOOTH_MAJORITY * n:
                 label[r] = 0
+    # direct evidence wins over the window: a row whose own track has ANY confident raw decision within one
+    # sampling step that contradicts the smoothed name is unsure (an id lent to the other boxer for a moment;
+    # "the nearest one only" missed the last frame of a lend, whose nearest sample is already the old boxer)
+    every = sample_every(table.fps)
+    for t in np.unique(table.track_id):
+        vote = dec & (table.track_id[rows] == t)
+        vf = table.frame[rows][vote]
+        vl = raw[vote]
+        if not len(vf):
+            label[table.track_id == t] = -1
+            continue
+        order = np.argsort(vf, kind="stable")
+        vf, vl = vf[order], vl[order]
+        sup = SUPPORT_S * table.fps
+        for r in np.flatnonzero((table.track_id == t) & (label >= 0)).tolist():
+            f = int(table.frame[r])
+            lo, hi = np.searchsorted(vf, f - every, "left"), np.searchsorted(vf, f + every, "right")
+            slo, shi = np.searchsorted(vf, f - sup, "left"), np.searchsorted(vf, f + sup, "right")
+            if (vl[lo:hi] != label[r]).any() or not (vl[slo:shi] == label[r]).any():
+                label[r] = -1
     for f in np.unique(table.frame):
         idx = np.flatnonzero((table.frame == f) & (label >= 0))
         for k in (0, 1):

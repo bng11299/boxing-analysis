@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -39,7 +40,9 @@ MANIFEST_FORMAT = "glove-identity-manifest-1"
 SCORE_FORMAT = "glove-identity-score-1"
 ROLES = ("dev", "test", "fail_case")
 MAX_JSON_BYTES = 4 * 1024 * 1024
-RULE_FILES = ("src/boxingvi/gloves.py", "src/boxingvi/glovescore.py", "glove_identity.py")
+# Everything the result depends on: the whole library (the rule imports appearance, headgear, linking, video,
+# npyread, faceblur, punchfind ...) and this file. The freeze pins all of it, not just the glove files.
+RULE_FILES = ("src/boxingvi", "glove_identity.py")
 _FP = re.compile(r"[0-9a-f]{64}")
 
 
@@ -50,6 +53,19 @@ class Refused(Exception):
 def full_digest() -> str:
     both = {"rule": gloves.rule_constants(), "score": glovescore.score_constants()}
     return hashlib.sha256(json.dumps(both, sort_keys=True).encode()).hexdigest()
+
+
+def code_digest() -> str:
+    """sha256 of every library file and this one, as they are on disk."""
+    h = hashlib.sha256()
+    for p in sorted((ROOT / "src" / "boxingvi").glob("*.py")) + [ROOT / "glove_identity.py"]:
+        h.update(p.relative_to(ROOT).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def provenance() -> str:
+    """What a counts file must carry to be scored: the rule's constants and the code that computed it."""
+    return hashlib.sha256(f"{full_digest()}|{code_digest()}".encode()).hexdigest()
 
 
 def sha256_file(path: Path) -> str:
@@ -65,19 +81,28 @@ def out_path(path, ctx, suffixes, overwrite=False) -> Path:
     try:
         return faceblur.check_output_location(path, overwrite=overwrite, allowed_root=ctx["root"],
                                               syncthing_configs=ctx["syncthing"], suffixes=suffixes)
-    except faceblur.UnsafeOutput as e:
-        raise Refused(f"output refused ({e.reason}): {e}") from e
+    except faceblur.UnsafeOutput as e:      # the reason code only: the message names folders and files
+        raise Refused(f"output refused ({e.reason})") from e
 
 
-def write_json(path: Path, obj) -> None:
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+def write_atomic(path: Path, write, suffix: str) -> None:
+    """Write through a fresh temp file in the same folder, then swap the directory entry: an existing file
+    (or a hard link planted at `path`) is replaced, never written through, and a failure leaves nothing."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp" + suffix)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, indent=2, sort_keys=True)
+        write(Path(tmp))
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def write_json(path: Path, obj) -> None:
+    def w(p):
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
+    write_atomic(path, w, ".json")
 
 
 def read_json(path, what: str) -> dict:
@@ -88,7 +113,7 @@ def read_json(path, what: str) -> dict:
         obj = json.loads(p.read_text(encoding="utf-8"))
     except OSError as e:
         raise Refused(f"{what}: cannot be read ({e.strerror})") from e
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise Refused(f"{what}: not valid JSON") from e
     if not isinstance(obj, dict):
         raise Refused(f"{what}: not a JSON object")
@@ -192,10 +217,10 @@ def cmd_compute(a, ctx) -> int:
     if fingerprint(a.video) != table.video_fp:
         raise Refused("the video is not the one this pose table was extracted from")
     try:
-        counts = gloves.compute_gloves(a.video, table)
+        counts = gloves.compute_gloves(a.video, table, provenance=provenance())
     except ValueError as e:
         raise Refused(str(e)) from e
-    counts.save(out)
+    write_atomic(out, counts.save, ".npz")
     print(f"glove reads: {len(counts.rows)} ({int(counts.contested.sum())} contested)")
     return 0
 
@@ -204,9 +229,13 @@ def cmd_template(a, ctx) -> int:
     m = load_manifest(a.manifest)
     out = out_path(a.out, ctx, (".csv",))
     table = load_table(a.tracks)
-    print(f"role: {role_of(m, table)}")
-    glovescore.write_template(table, out)
-    print(f"label rows: {len(glovescore.label_times(table))} (every {glovescore.LABEL_EVERY_S} s)")
+    role = role_of(m, table)
+    try:
+        write_atomic(out, lambda p: glovescore.write_template(table, p), ".csv")
+        n = len(glovescore.label_times(table))
+    except ValueError as e:
+        raise Refused(str(e)) from e
+    print(f"role: {role}; label rows: {n} (every {glovescore.LABEL_EVERY_S} s)")
     return 0
 
 
@@ -217,11 +246,27 @@ def cmd_freeze(a, ctx) -> int:
         raise Refused("already frozen: the rule is not changed after a freeze (the gate)")
     commit, clean = ctx["git"]()
     if not clean:
-        raise Refused("commit the rule files first: the freeze records a commit that must hold this code")
+        raise Refused("commit the library and CLI first: the freeze records a commit that must hold this code")
     m["frozen"] = {"rule_digest": full_digest(), "commit": commit}
     write_json(mp, m)
     print(f"frozen at {commit[:12]}, rule digest {m['frozen']['rule_digest'][:12]}")
     return 0
+
+
+def claim_path(mp: Path, role: str) -> Path:
+    return mp.with_name(f"{mp.stem}.{role}.claim")
+
+
+def claim(mp: Path, role: str) -> None:
+    """Take the role's one run, atomically (exclusive create), BEFORE its labels are read. A run that dies
+    after this has used the role up: rerunning needs the owner to delete the claim deliberately and say why."""
+    try:
+        fd = os.open(claim_path(mp, role), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as e:
+        raise Refused(f"{role} has already been claimed by a run (finished, running or interrupted): "
+                      "it is scored once (the gate)") from e
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"claimed {datetime.now(timezone.utc).isoformat(timespec='seconds')} pid {os.getpid()}\n")
 
 
 def cmd_score(a, ctx) -> int:
@@ -240,6 +285,12 @@ def cmd_score(a, ctx) -> int:
     out = out_path(a.out, ctx, (".json",), overwrite=a.overwrite and role == "dev")
     try:
         counts = gloves.GloveCounts.load(a.counts)
+        if counts.provenance != provenance():
+            raise Refused("the glove counts were computed by another rule or another version of the code: "
+                          "recompute them with this checkout")
+        counts.check_table(table)
+        if role != "dev":
+            claim(mp, role)
         labels = glovescore.parse_labels(a.labels, table)
         ident = gloves.identify(table, counts)
     except ValueError as e:
@@ -257,6 +308,7 @@ def cmd_score(a, ctx) -> int:
            "glove_diagnostics": ident.diagnostics, "methods": methods}
     write_json(out, res)
     if role != "dev":
+        m = load_manifest(mp)                 # re-read: record onto the manifest as it is now
         m["scored"][role] = sha256_file(out)
         write_json(mp, m)
     g = methods["glove"]
@@ -271,24 +323,50 @@ def cmd_score(a, ctx) -> int:
     return 0
 
 
+def _count(d, k) -> int:
+    v = d.get(k)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise Refused(f"score: {k} must be a whole number >= 0")
+    return v
+
+
 def _score_file(path, role, m) -> dict:
     s = read_json(path, f"{role} score")
-    if s.get("format") != SCORE_FORMAT or s.get("role") != role:
+    if s.get("format") != SCORE_FORMAT or s.get("role") != role or s.get("design_data_not_evidence") is not False:
         raise Refused(f"{role} score: not a {role} score file")
+    if m["frozen"] is None or s.get("frozen") != m["frozen"] or s.get("rule_digest") != m["frozen"]["rule_digest"]:
+        raise Refused(f"{role} score: not made by the frozen rule")
+    if not claim_path(Path(m["_path"]), role).exists():
+        raise Refused(f"{role} score: no claim was taken for it")
     if m["scored"].get(role) != sha256_file(Path(path)):
         raise Refused(f"{role} score: not the file the frozen run recorded")
+    meth = s.get("methods")
+    if not isinstance(meth, dict) or set(meth) != {"glove", "bytetrack", "linker"} \
+            or not all(isinstance(meth[k], dict) for k in meth):
+        raise Refused(f"{role} score: methods must be glove, bytetrack and linker")
+    g = meth["glove"]
+    sc, dec, cor, wr = (_count(g, k) for k in ("scored", "decided", "correct", "wrong"))
+    if not (cor + wr == dec <= sc):
+        raise Refused(f"{role} score: glove counts are inconsistent")
+    spr = g.get("swaps_per_round")
+    if spr is not None and (isinstance(spr, bool) or not isinstance(spr, (int, float)) or not spr >= 0):
+        raise Refused(f"{role} score: swaps_per_round must be a number >= 0 or null")
+    for b in ("bytetrack", "linker"):
+        cs = meth[b].get("correct_share")
+        if cs is not None and (isinstance(cs, bool) or not isinstance(cs, (int, float)) or not 0 <= cs <= 1):
+            raise Refused(f"{role} score: {b} correct_share must be in [0, 1] or null")
     return s
 
 
 def cmd_gate(a, ctx) -> int:
     m = load_manifest(a.manifest)
+    m["_path"] = str(Path(a.manifest))
     out = out_path(a.out, ctx, (".json",), a.overwrite)
     v = glovescore.gate_verdict(_score_file(a.test, "test", m), _score_file(a.fail_case, "fail_case", m))
     write_json(out, v)
     for k, val in v.items():
         print(f"  {k}: {val}")
     return 0 if v["PASS"] else 2
-
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -325,11 +403,27 @@ def main(argv=None, participant_root=None, syncthing_configs=None, git=None, sam
         return {"roles": cmd_roles, "compute": cmd_compute, "template": cmd_template, "freeze": cmd_freeze,
                 "score": cmd_score, "gate": cmd_gate}[a.cmd](a, ctx)
     except Refused as e:
-        print(f"refused: {e}", file=sys.stderr)
+        print(scrub(f"refused: {e}", argv), file=sys.stderr)
         return 1
     except OSError as e:          # never a traceback: it would print a path, and a path may carry a name
-        print(f"refused: a file could not be read or written ({e.strerror or type(e).__name__})", file=sys.stderr)
+        print(scrub(f"refused: a file could not be read or written ({e.strerror or type(e).__name__})", argv),
+              file=sys.stderr)
         return 1
+
+
+def scrub(msg: str, argv) -> str:
+    """Remove every path given on the command line (as typed, resolved, and its file name) from a message:
+    a file name may carry a person's name, and loaders name the file they refuse."""
+    names = set()
+    for tok in list(argv if argv is not None else sys.argv[1:])[1:]:     # [0] is the subcommand
+        tok = str(tok)
+        if tok.startswith("-"):
+            continue
+        p = Path(tok)
+        names.update({tok, str(p), str(p.resolve()), p.name})
+    for n in sorted((n for n in names if len(n) >= 3), key=len, reverse=True):
+        msg = msg.replace(n, "<file>")
+    return msg
 
 
 if __name__ == "__main__":

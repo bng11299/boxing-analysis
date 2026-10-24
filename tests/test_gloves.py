@@ -91,7 +91,7 @@ def paint(img, cx, cy, gl, gr):
 
 
 def scene(n=900, ga=(RED, RED), gb=(BLUE, BLUE), swap_at=450, wrist_conf=0.9, light=None, gap=0.0,
-          clinch=None, seed=1, hop=None, hop_drop=False):
+          clinch=None, seed=1, hop=None, hop_drop=False, hop_hidden=False, b_reads_as=None):
     """A starts left and walks right, B the reverse; they cross at the middle. ByteTrack swaps their ids at
     `swap_at` (A = id 1 before, id 2 after). `light(f)` scales a frame; `clinch` = frames they stand together.
     Returns (table, frames(), truth) with truth[row] = "A" / "B"."""
@@ -112,6 +112,8 @@ def scene(n=900, ga=(RED, RED), gb=(BLUE, BLUE), swap_at=450, wrist_conf=0.9, li
                     tid = 2 if who == "A" else 6
                 if hop_drop == who:                          # ... while the lender is not detected at all
                     continue
+                if hop_hidden and hop_drop and who != hop_drop:   # ... and the borrower's gloves are hidden
+                    c[[9, 10]] = 0.2
             c = np.full(N_JOINTS, 0.9)
             c[[9, 10]] = wrist_conf
             rows["frame"].append(f)
@@ -132,7 +134,10 @@ def scene(n=900, ga=(RED, RED), gb=(BLUE, BLUE), swap_at=450, wrist_conf=0.9, li
             img[:] = BG
             ax, bx = pos[f]
             paint(img, ax, 120, *ga)
-            paint(img, bx, 120, *gb)
+            if b_reads_as is not None and b_reads_as[0] <= f < b_reads_as[1]:
+                paint(img, bx, 120, *ga)          # B's gloves read as A's colour for a stretch (a colour cast)
+            else:
+                paint(img, bx, 120, *gb)
             img += rng.normal(0, 6, img.shape)
             if light is not None:
                 img *= light(f)
@@ -210,7 +215,7 @@ check("check_table accepts its own table", True)
 
 def variant(name, **over):
     base = {"format": np.array(gloves.FORMAT), "source": np.array(cnt.source), "video_fp": np.array(cnt.video_fp),
-            "table_sha256": np.array(cnt.table_sha256),
+            "table_sha256": np.array(cnt.table_sha256), "provenance": np.array(cnt.provenance),
             "meta": np.array([cnt.n_frames, cnt.n_table_rows, cnt.every], dtype=np.int64),
             "rows": cnt.rows, "hand": cnt.hand, "bins": cnt.bins, "n": cnt.n, "contested": cnt.contested}
     base.update(over)
@@ -263,6 +268,12 @@ raises("check_table: same shape, different content", lambda: back.check_table(t2
 raises("check_table: other source", lambda: back.check_table(PoseTable(**{**table.__dict__, "source": "x"})), "sources")
 raises("check_table: other fingerprint", lambda: back.check_table(PoseTable(**{**table.__dict__, "video_fp": "cd" * 32})), "fingerprints")
 raises("check_table: other frame count", lambda: back.check_table(PoseTable(**{**table.__dict__, "n_frames": 901})), "frames")
+raises("check_table: same rows, other fps (sampling and smoothing depend on it)",
+       lambda: back.check_table(PoseTable(**{**table.__dict__, "fps": 29.97})), "different content")
+check("provenance survives save -> load", GloveCounts.load(
+    (lambda q: (gloves.GloveCounts(**{**cnt.__dict__, "provenance": "cd" * 32}).save(q), q)[1])(tmp / "prov.npz")
+).provenance == "cd" * 32)
+raises("counts refused: provenance not a digest", lambda: GloveCounts.load(variant("prov_bad.npz", provenance=np.array("x"))), "provenance")
 
 # ---- the rule --------------------------------------------------------------------------------
 print("identify: when it should and should not speak")
@@ -330,12 +341,36 @@ sh, wr = named_agreement(idn, tr)
 check("a track id lent to the other boxer for 1 s: no named row wrong",
       idn.verdict == "separable" and wr == 0.0, f"{idn.verdict} wrong {wr:.4f}")
 for lender in ("A", "B"):
+    tb, fs, tr = scene(swap_at=None, hop=(300, 312), hop_drop=lender)
+    idn = gloves.identify(tb, gloves.compute_gloves(None, tb, frames=fs()))
+    sh, wr = named_agreement(idn, tr)
+    check(f"an id lent for 0.4 s ({lender} undetected): the window says the old boxer, the row's own glove "
+          "says the other -> unsure, none wrong", idn.verdict == "separable" and wr == 0.0, f"wrong {wr:.4f}")
     tb, fs, tr = scene(swap_at=None, hop=(300, 330), hop_drop=lender)
     idn = gloves.identify(tb, gloves.compute_gloves(None, tb, frames=fs()))
     sh, wr = named_agreement(idn, tr)
     check(f"... {lender}'s id lent while {lender} goes undetected (no row to clash with): none wrong "
           "(the 75% majority, both directions)", idn.verdict == "separable" and wr == 0.0,
           f"{idn.verdict} wrong {wr:.4f}")
+
+tb, fs, tr = scene(swap_at=None, hop=(300, 330), hop_drop="A", hop_hidden=True)
+idn = gloves.identify(tb, gloves.compute_gloves(None, tb, frames=fs()))
+lab_, fr_ = idn.label, tb.frame
+named_ = lab_ >= 0
+nm0 = (tr[named_ & (fr_ < 250)] == "A")
+c_a = int(np.bincount(lab_[named_ & (fr_ < 250)][nm0]).argmax())
+wrong_frames = fr_[named_ & (((lab_ == c_a) & (tr == "B")) | ((lab_ != c_a) & (tr == "A")))]
+edge = int(round(gloves.SUPPORT_S * FPS)) + gloves.sample_every(FPS)
+check("an id lent while the borrower's gloves are hidden: wrong names only within 0.3 s (+1 sample) of glove "
+      "evidence, never in the middle of the lend", all((300 <= f < 300 + edge) or (330 - edge <= f < 330)
+                                                      for f in wrong_frames.tolist()),
+      f"wrong at frames {sorted(set(wrong_frames.tolist()))[:20]}")
+
+tb, fs, tr = scene(swap_at=None, b_reads_as=(150, 300))
+idn = gloves.identify(tb, gloves.compute_gloves(None, tb, frames=fs()))
+sh, wr = named_agreement(idn, tr)
+check("B's gloves read as A's colour for 5 s: both would be named A, so neither is (one name per frame)",
+      idn.verdict == "separable" and wr == 0.0, f"{idn.verdict} wrong {wr:.4f} split {idn.diagnostics.get('copresent_split')}")
 
 # two glove colours that are barely different: a clean split, but too fragile to name anybody
 tb, _, tr = scene(n=300, swap_at=None)
@@ -399,25 +434,34 @@ check("a method that never decides: no anchor, nothing decided, accuracy None",
       none["anchor_t"] is None and none["decided"] == 0 and none["accuracy"] is None and none["wilson95"] is None)
 check("... and every scored moment counts as unsure (6 of 6)", none["scored"] == 6 and none["unsure_share"] == 1.0)
 
-good = {"accuracy": 0.95, "wilson95": [0.85, 0.99], "decided": 40, "unsure_share": 0.2, "swaps_per_round": 0.5,
-        "correct_share": 0.76, "scored": 50, "wrong": 2}
+def G(scored, decided, correct, spr=0.5):
+    return {"scored": scored, "decided": decided, "correct": correct, "wrong": decided - correct,
+            "swaps_per_round": spr}
+
+
+good = G(50, 40, 38)
 base = {"correct_share": 0.5}
-fc_ok = {"scored": 40, "wrong": 3, "accuracy": None, "wilson95": None, "decided": 3, "unsure_share": 0.9,
-         "swaps_per_round": None, "correct_share": 0.0}
+fc_ok = G(40, 3, 0, None)
 T = lambda gl, b=base: {"methods": {"glove": gl, "bytetrack": b, "linker": {"correct_share": 0.3}}}  # noqa: E731
 check("gate: all four bars met -> PASS", glovescore.gate_verdict(T(good), T(fc_ok))["PASS"] is True)
-for nm, over, bar in [("accuracy 0.89", {"accuracy": 0.89}, "1_accuracy"),
-                      ("Wilson lower bound 0.79", {"wilson95": [0.79, 0.99]}, "1_accuracy"),
-                      ("29 decided", {"decided": 29}, "1_accuracy"),
-                      ("unsure 0.31", {"unsure_share": 0.31}, "2_unsure"),
-                      ("1.1 swaps a round", {"swaps_per_round": 1.1}, "3_better_than_tracking"),
-                      ("no span for swaps", {"swaps_per_round": None}, "3_better_than_tracking"),
-                      ("correct share not above the baseline", {"correct_share": 0.5}, "3_better_than_tracking")]:
-    v = glovescore.gate_verdict(T({**good, **over}), T(fc_ok))
+for nm, gl, bar in [("accuracy 35 / 40 = 0.875", G(50, 40, 35), "1_accuracy"),
+                    ("Wilson lower bound under 0.80 (27 / 30 = 0.90)", G(40, 30, 27), "1_accuracy"),
+                    ("29 decided", G(35, 29, 29), "1_accuracy"),
+                    ("unsure 18 / 58 = 0.31", G(58, 40, 38), "2_unsure"),
+                    ("1.1 swaps a round", G(50, 40, 38, 1.1), "3_better_than_tracking"),
+                    ("no span for swaps", G(50, 40, 38, None), "3_better_than_tracking"),
+                    ("correct share 25 / 50, not above the baseline 0.5", G(50, 40, 25), "3_better_than_tracking")]:
+    v = glovescore.gate_verdict(T(gl), T(fc_ok))
     check(f"gate fails on {nm}", v[bar] is False and v["PASS"] is False, str(v))
-v = glovescore.gate_verdict(T(good), T({**fc_ok, "wrong": 5}))
+v = glovescore.gate_verdict(T(G(50, 35, 34)), T(fc_ok))
+check("bar 2 holds at exactly 0.30 unsure (15 / 50; 1 - 35/50 is 0.30000000000000004 in floats)", v["2_unsure"] is True, str(v))
+v = glovescore.gate_verdict(T(G(100, 80, 72)), T(fc_ok))
+check("bar 1 accuracy holds at exactly 0.90 (72 / 80)", v["1_accuracy"] is True, str(v))
+v = glovescore.gate_verdict(T(good), T(G(30, 3, 0, None)))
+check("bar 4 holds at exactly 10% wrong (3 / 30)", v["4_fails_safe"] is True, str(v))
+v = glovescore.gate_verdict(T(good), T(G(40, 5, 0)))
 check("gate fails when FAIL-CASE is confidently wrong on > 10%", v["4_fails_safe"] is False and not v["PASS"])
-v = glovescore.gate_verdict(T(good), T({**fc_ok, "scored": 0, "wrong": 0}))
+v = glovescore.gate_verdict(T(good), T(G(0, 0, 0, None)))
 check("gate fails (not evaluated) when FAIL-CASE has no scored moment", v["4_fails_safe"] is False)
 broken = {"methods": {"glove": good, "bytetrack": base, "linker": {"error": "no fragment", "correct_share": None}}}
 v = glovescore.gate_verdict(broken, T(fc_ok))
@@ -472,6 +516,12 @@ q = tmp / "bin.csv"; q.write_bytes(b"\xff\xfe\x00junk")
 raises("labels refused: not UTF-8", lambda: glovescore.parse_labels(q, table), "UTF-8")
 q = tmp / "big.csv"; q.write_bytes(b"#" * (glovescore.MAX_LABEL_BYTES + 1))
 raises("labels refused: over 1 MB", lambda: glovescore.parse_labels(q, table), "bytes")
+q = filled()
+q.write_text(q.read_text().replace("\n5,L", "\n5,\"" + "L" * 140_000 + "\""), encoding="utf-8")
+raises("labels refused: a 140,000-character field (csv's own limit), not a crash", lambda: glovescore.parse_labels(q, table), "CSV")
+absurd = PoseTable(**{**table.__dict__, "fps": 1e-300, "n_frames": 900})
+raises("template refused for a table claiming an absurd duration (fps 1e-300), before any grid is built",
+       lambda: glovescore.write_template(absurd, tmp / "absurd.csv"), "s of video")
 
 # ---- faceblur's location check, now with suffixes --------------------------------------------
 print("output location (shared with the face blur)")
@@ -524,7 +574,7 @@ for i, role in ((1, "dev"), (0, "test"), (2, "fail_case")):
     t_ = PoseTable(**{**t_.__dict__, "video_fp": fps_[i]})
     tp_ = tmp / f"{role}.tracks.npz"
     t_.save(tp_)
-    c_ = gloves.compute_gloves(None, t_, frames=f_())
+    c_ = gloves.compute_gloves(None, t_, frames=f_(), provenance=glove_identity.provenance())
     cp_ = tmp / f"{role}.gloves.npz"
     c_.save(cp_)
     tab[role] = (t_, tp_, cp_)
@@ -556,13 +606,27 @@ check("a missing video is refused without a traceback and without printing its p
       rc == 1 and "Firstname" not in err.getvalue() and str(tmp) not in err.getvalue(), err.getvalue())
 check("compute through ffmpeg decode", run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1],
                                            "--out", proot / "test.gloves.npz") == 0)
+outside = tmp / "outside-shared.npz"
+outside.write_bytes(b"keep me")
+import os  # noqa: E402
+os.link(outside, proot / "linked.gloves.npz")
+check("compute --overwrite onto a planted hard link replaces the entry, never writes through it",
+      run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--out",
+          proot / "linked.gloves.npz", "--overwrite") == 0 and outside.read_bytes() == b"keep me")
 dec = GloveCounts.load(proot / "test.gloves.npz")
+check("counts written by compute carry this code's provenance", dec.provenance == glove_identity.provenance())
 idd = gloves.identify(tab["test"][0], dec)
 check("decoded H.264 clip: still separable (a real decode, not painted arrays)", idd.verdict == "separable",
       f"{idd.verdict} {idd.diagnostics}")
-gitdir = proot / "repo"; (gitdir / ".git").mkdir(parents=True)
-check("template refused inside a git checkout", run("template", "--manifest", man, "--tracks", tab["dev"][1],
-                                                    "--out", gitdir / "l.csv") == 1)
+gitdir = proot / "Firstname-repo"; (gitdir / ".git").mkdir(parents=True)
+err = io.StringIO()
+real_err, sys.stderr = sys.stderr, err
+try:
+    rc = run("template", "--manifest", man, "--tracks", tab["dev"][1], "--out", gitdir / "l.csv")
+finally:
+    sys.stderr = real_err
+check("template refused inside a git checkout, and the refusal names no folder", rc == 1
+      and "git_checkout" in err.getvalue() and "Firstname" not in err.getvalue(), err.getvalue())
 check("template refused with a .txt name", run("template", "--manifest", man, "--tracks", tab["dev"][1],
                                                "--out", proot / "l.txt") == 1)
 for role in ("dev", "test", "fail_case"):
@@ -585,6 +649,31 @@ def score(role, **kw):
                proot / f"{role}.labels.csv", "--out", proot / f"{role}.score.json", **kw)
 
 
+old = gloves.GloveCounts.load(tab["dev"][2])
+stale = tmp / "dev.stale.gloves.npz"
+gloves.GloveCounts(**{**old.__dict__, "provenance": ""}).save(stale)
+check("counts without this code's provenance are refused (computed by another rule or version)", run(
+    "score", "--manifest", man, "--tracks", tab["dev"][1], "--counts", stale, "--labels",
+    proot / "dev.labels.csv", "--out", proot / "stale.score.json") == 1)
+nm_labels = tmp / "Firstname-Lastname-sparring.labels.csv"
+nm_labels.write_text("", encoding="utf-8")
+err = io.StringIO()
+real_err, sys.stderr = sys.stderr, err
+try:
+    rc = run("score", "--manifest", man, "--tracks", tab["dev"][1], "--counts", tab["dev"][2], "--labels",
+             nm_labels, "--out", proot / "named.score.json")
+finally:
+    sys.stderr = real_err
+check("a refused label file is not named in the message (names may be people's)",
+      rc == 1 and "Firstname" not in err.getvalue() and "<file>" in err.getvalue(), err.getvalue())
+err = io.StringIO()
+real_err, sys.stderr = sys.stderr, err
+try:
+    rc = run("template", "--manifest", man, "--tracks", tab["dev"][1], "--out", proot / "Firstname.txt")
+finally:
+    sys.stderr = real_err
+check("an output refusal gives its reason code only", rc == 1 and "Firstname" not in err.getvalue()
+      and "bad_suffix" in err.getvalue(), err.getvalue())
 check("TEST refused before the freeze", score("test") == 1)
 check("FAIL-CASE refused before the freeze", score("fail_case") == 1)
 check("DEV scored before the freeze", score("dev") == 0)
@@ -613,7 +702,7 @@ try:
     check("a failing JSON write raises", False)
 except TypeError:
     pass
-leftovers = list(proot.glob("*.tmp"))
+leftovers = list(proot.glob("*.tmp*"))
 check("no temp files left in the participant folder after a failed write", not leftovers
       and not (proot / "half.json").exists(), str(leftovers))
 check("freeze refused with uncommitted rule files", run("freeze", "--manifest", man, git=lambda: ("a" * 40, False)) == 1)
@@ -621,7 +710,13 @@ check("freeze", run("freeze", "--manifest", man, git=lambda: ("a" * 40, True)) =
 check("a second freeze refused", run("freeze", "--manifest", man, git=lambda: ("a" * 40, True)) == 1)
 saved = gloves.MARGIN_MIN
 gloves.MARGIN_MIN = 0.21
-check("TEST refused when the rule changed after the freeze", score("test") == 1)
+recomputed = tmp / "test.recomputed.gloves.npz"
+gloves.GloveCounts(**{**gloves.GloveCounts.load(tab["test"][2]).__dict__,
+                      "provenance": glove_identity.provenance()}).save(recomputed)
+check("TEST refused when the rule changed after the freeze, even with counts recomputed under the new rule",
+      run("score", "--manifest", man, "--tracks", tab["test"][1], "--counts", recomputed, "--labels",
+          proot / "test.labels.csv", "--out", proot / "test.score.json") == 1
+      and not (proot / "m.test.claim").exists())
 gloves.MARGIN_MIN = saved
 check("TEST refused when the rule files differ from the frozen commit (logic change, same constants)",
       score("test", same=lambda c: False) == 1)
@@ -631,7 +726,16 @@ check("the manifest records the TEST score's sha256",
 (proot / "test.score.json").rename(proot / "test.score.moved")
 check("TEST refused a second time, even with its first output moved away", score("test") == 1
       and not (proot / "test.score.json").exists())
+check("a claim file marks the TEST run", (proot / "m.test.claim").exists())
+(proot / "m.test.claim").rename(proot / "m.test.claim.x")
+check("TEST refused a second time even with its claim removed too (the manifest's record)",
+      score("test") == 1 and not (proot / "test.score.json").exists())
+(proot / "m.test.claim.x").rename(proot / "m.test.claim")
 (proot / "test.score.moved").rename(proot / "test.score.json")
+(proot / "m.fail_case.claim").write_text("claimed by a run that was interrupted\n")
+check("FAIL-CASE refused while a claim exists (a concurrent or interrupted run), labels never read",
+      score("fail_case") == 1 and not (proot / "fail_case.score.json").exists())
+(proot / "m.fail_case.claim").unlink()       # the owner's deliberate decision, in a real run recorded with why
 ts = json.loads((proot / "test.score.json").read_text())
 check("TEST: glove 4 of 4 correct, ByteTrack 2 of 4 (the id swap)",
       ts["methods"]["glove"]["correct"] == 4 and ts["methods"]["bytetrack"]["correct"] == 2, json.dumps(ts["methods"]))
@@ -644,10 +748,23 @@ rc = gate(proot / "gate.json")
 gv = json.loads((proot / "gate.json").read_text())
 check("gate runs; 4 decided moments cannot pass bar 1 (needs 30): exit 2", rc == 2 and gv["1_accuracy"] is False
       and gv["4_fails_safe"] is True, str(gv))
+mj = json.loads(man.read_text())
+man.write_text(json.dumps({**mj, "frozen": None}))
+check("gate refused when the manifest is not frozen (score hashes alone prove nothing)", gate(proot / "g3.json") == 1)
+man.write_text(json.dumps({**mj, "frozen": {"rule_digest": "e" * 64, "commit": "b" * 40}}))
+check("gate refused when the scores were made under another freeze", gate(proot / "g4.json") == 1)
+man.write_text(json.dumps(mj))
+(proot / "m.fail_case.claim").rename(proot / "m.fail_case.claim.x")
+check("gate refused when a score has no claim behind it", gate(proot / "g5.json") == 1)
+(proot / "m.fail_case.claim.x").rename(proot / "m.fail_case.claim")
+check("gate runs again on the restored manifest", gate(proot / "g6.json") == 2)
 shutil.copy(proot / "test.score.json", tmp / "keep.json")
 tsx = dict(ts); tsx["methods"] = {**ts["methods"], "glove": {**ts["methods"]["glove"], "correct": 99}}
 (proot / "test.score.json").write_text(json.dumps(tsx))
-check("gate refused for a score file edited after the run", gate(proot / "gate2.json") == 1)
+check("gate refused for a score file edited after the run (inconsistent counts)", gate(proot / "gate2.json") == 1)
+(proot / "test.score.json").write_text(json.dumps({**ts, "label_minutes": 1.0}))
+check("gate refused for a score file edited after the run (consistent, but not the recorded file)",
+      gate(proot / "gate2b.json") == 1)
 mj = json.loads(man.read_text())
 for nm, bad in [("an extra key", {**mj, "x": 1}),
                 ("two roles on one video", {**mj, "roles": {**mj["roles"], "test": mj["roles"]["dev"]}}),
@@ -657,6 +774,9 @@ for nm, bad in [("an extra key", {**mj, "x": 1}),
     man.write_text(json.dumps(bad))
     check(f"manifest refused: {nm}", run("template", "--manifest", man, "--tracks", tab["dev"][1],
                                          "--out", proot / "z.csv") == 1)
+man.write_text("[" * 100_000 + "]" * 100_000)
+check("manifest refused: 100,000 levels of nesting (no RecursionError traceback)", run(
+    "template", "--manifest", man, "--tracks", tab["dev"][1], "--out", proot / "z.csv") == 1)
 man.write_text("{not json")
 check("manifest refused: not JSON", run("template", "--manifest", man, "--tracks", tab["dev"][1],
                                         "--out", proot / "z.csv") == 1)

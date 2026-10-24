@@ -30,6 +30,7 @@ LABEL_FORMAT = "glove-identity-labels-1"
 MAX_LABEL_BYTES = 1024 * 1024
 MAX_MINUTES = 600.0
 MAX_A_CHARS = 80
+MAX_DURATION_S = 6 * 3600.0
 _FP = re.compile(r"[0-9a-f]{64}")
 _HEADER_KEYS = ("format", "video_fp", "every_s", "A", "minutes")
 
@@ -51,7 +52,10 @@ def score_constants() -> dict:
 
 # ---- labels -------------------------------------------------------------------------------
 def label_times(table) -> "list[int]":
-    """Seconds 0, 5, 10, ... whose frame round(t x fps) lies inside the video."""
+    """Seconds 0, 5, 10, ... whose frame round(t x fps) lies inside the video. A video longer than
+    MAX_DURATION_S (an absurd fps in a crafted table) is refused before the grid is built."""
+    if not (math.isfinite(table.fps) and table.fps > 0) or table.n_frames / table.fps > MAX_DURATION_S:
+        raise ValueError(f"the pose table claims more than {MAX_DURATION_S:.0f} s of video: not a sparring video")
     out, t = [], 0
     while int(round(t * table.fps)) < table.n_frames:
         out.append(t)
@@ -124,7 +128,10 @@ def parse_labels(path, table) -> Labels:
         bad("minutes must be a number")
     if not (math.isfinite(minutes) and 0 < minutes <= MAX_MINUTES):
         bad(f"minutes must be in (0, {MAX_MINUTES}]")
-    rows = list(csv.reader(io.StringIO("\n".join(body))))
+    try:
+        rows = list(csv.reader(io.StringIO("\n".join(body))))
+    except csv.Error:
+        bad("not a readable CSV (a field too long, or broken quoting)")
     if not rows or [c.strip() for c in rows[0]] != ["t_s", "a_side"]:
         bad("the column header must be t_s,a_side")
     want = label_times(table)
@@ -249,14 +256,17 @@ def gate_verdict(test: dict, fail_case: dict) -> dict:
     g, fc = test["methods"]["glove"], fail_case["methods"]["glove"]
     baselines_ran = all("error" not in test["methods"][b] for b in ("bytetrack", "linker"))
     base = max((test["methods"][b]["correct_share"] or 0.0) for b in ("bytetrack", "linker"))
-    w = g["wilson95"]
-    b1 = (g["accuracy"] is not None and g["accuracy"] >= BAR_ACCURACY and w is not None
-          and w[0] >= BAR_WILSON_LO and g["decided"] >= BAR_MIN_DECIDED)
-    b2 = g["unsure_share"] is not None and g["unsure_share"] <= BAR_MAX_UNSURE
+    # the share bars compare whole counts (a share computed in floats misses its bar at exact equality:
+    # 1 - 35/50 = 0.30000000000000004); the bars are tenths, so x/y <= k/10 is 10x <= ky
+    dec, cor, sc = g["decided"], g["correct"], g["scored"]
+    w = wilson(cor, dec)
+    b1 = dec >= BAR_MIN_DECIDED and 10 * cor >= round(10 * BAR_ACCURACY) * dec and w is not None \
+        and w[0] >= BAR_WILSON_LO
+    b2 = sc > 0 and 10 * (sc - dec) <= round(10 * BAR_MAX_UNSURE) * sc
     spr = g["swaps_per_round"]
-    b3 = (baselines_ran and spr is not None and spr <= BAR_MAX_SWAPS_PER_ROUND and g["correct_share"] is not None
-          and g["correct_share"] > base)
+    b3 = (baselines_ran and spr is not None and spr <= BAR_MAX_SWAPS_PER_ROUND and sc > 0
+          and cor / sc > base)
     fc_scored = fc["scored"]
-    b4 = fc_scored > 0 and fc["wrong"] <= BAR_FAILCASE_MAX_WRONG * fc_scored
+    b4 = fc_scored > 0 and 10 * fc["wrong"] <= round(10 * BAR_FAILCASE_MAX_WRONG) * fc_scored
     return {"1_accuracy": b1, "2_unsure": b2, "3_better_than_tracking": b3, "4_fails_safe": b4,
             "baseline_best_correct_share": base, "PASS": bool(b1 and b2 and b3 and b4)}

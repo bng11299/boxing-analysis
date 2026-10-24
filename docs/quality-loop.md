@@ -3746,3 +3746,40 @@ integrity, scoring TEST with a rule changed after seeing it.
   tracks file is the one input not capped here); the counts loader checks the zip and then reopens it with
   `np.load` (a local file swapped in between is out of scope); the rule constants are first-principles
   guesses, untested on any real glove.
+
+### Iteration 2 -- review gate (Astra, read-only, effort medium, on a fresh clone of `6c05b7a`): FIX FIRST, 5 blockers + 4 should-fix, all fixed
+- **B1 freeze boundary too narrow:** only the three glove files were pinned, so a change to `headgear.wilson` after
+  the freeze passed. Now the freeze and the TEST check cover `src/boxingvi/` whole and the CLI (`git status` /
+  `git diff --quiet <commit>`).
+- **B2 counts had no rule provenance; table digest left out fps:** counts now carry `provenance` = sha256(rule
+  and score constants | every library file and the CLI as on disk); `score` refuses counts of another rule or
+  code version. The table digest now includes fps, frame count and size.
+- **B3 once-only scoring was not atomic:** a role is CLAIMED by exclusive create (`<manifest>.<role>.claim`)
+  before its labels are read. A run that dies after that has used the role up; recovering needs the owner to
+  delete the claim deliberately and say why.
+- **B4 gate provenance self-asserted:** `gate` now needs a frozen manifest, both scores made under that freeze
+  (digest and commit), a claim behind each, the sha256 the run recorded, and a consistent schema
+  (correct + wrong = decided <= scored). **Accepted residual:** an owner who deliberately rewrites the manifest
+  and the scores together can still forge a pass. Closing that needs a record the owner cannot edit, and
+  Brendan is the only user.
+- **B5 hard-link escape on `--overwrite`:** every output (npz, csv, json) is written to a fresh temp file and
+  swapped in with `os.replace`, so a planted link is replaced, never written through.
+- **S1 file names in messages:** output refusals give the reason code only; every path on the command line
+  (as typed, resolved, and its file name) is scrubbed from any message.
+- **S2 parser and resource failures:** a table claiming over 6 h is refused before the label grid is built (an
+  fps of 1e-300 looped effectively forever); `csv.Error` (a 140,000-character field) and `RecursionError`
+  (JSON nested 100,000 deep) become refusals.
+- **S3 float equality at a bar:** `1 - 35/50` is `0.30000000000000004` and failed bar 2. All share bars now
+  compare whole counts (10 x unsure <= 3 x scored, etc.); tested at exactly 0.90, 0.30 and 10%.
+- **S4 smoothing overrode direct evidence:** a named row is now unsure if ANY confident raw decision of its
+  track within one sampling step disagrees. A first version used the nearest decision only, and a new fixture
+  showed it missed the last frame of a lend. Then a second hole, found while chasing a surviving mutant: an id
+  lent while the borrower's gloves are hidden had no evidence at all, and the 1 s window named the borrower
+  as the lender. **New rule constant `SUPPORT_S = 0.3`:** a row is named only with an agreeing raw decision of its
+  track within 0.3 s. Tested: wrong names occur only within 0.3 s (+1 sample) of the last glove seen.
+  Both are rule changes made before any study frame, on synthetic fixtures only.
+- **Test:** 189 / 189. **Mutants: 36 of 37 killed.** The survivor is the 75% majority (made 50%): the support and
+  contradiction rules now cover every case it was added for. It stays as defence in depth and is recorded
+  here rather than given a contrived fixture. Four survivors on the way were each one guard masked by another
+  (digest vs provenance, scored-record vs claim, edited score vs schema, name in a message vs scrub); each
+  test now defeats the other guard first.
