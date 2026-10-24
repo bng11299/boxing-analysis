@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,16 +56,43 @@ def full_digest() -> str:
     return hashlib.sha256(json.dumps(both, sort_keys=True).encode()).hexdigest()
 
 
-def code_digest() -> str:
-    """sha256 of every library file and this one, as they are on disk."""
+def code_digest(root: Path = ROOT) -> str:
+    """sha256 of EVERY file under src/boxingvi (subfolders too: a package folder there would shadow a module)
+    and this one, as they are on disk; only __pycache__ is skipped (it is derived and gitignored)."""
+    lib = root / "src" / "boxingvi"
+    files = sorted(p for p in lib.rglob("*") if p.is_file() and "__pycache__" not in p.relative_to(lib).parts)
     h = hashlib.sha256()
-    for p in sorted((ROOT / "src" / "boxingvi").glob("*.py")) + [ROOT / "glove_identity.py"]:
-        h.update(p.relative_to(ROOT).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
+    for p in files + [root / "glove_identity.py"]:
+        h.update(p.relative_to(root).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
     return h.hexdigest()
+
+
+def check_imports(modules=None, root: Path = ROOT) -> None:
+    """Every loaded boxingvi module must be one of the top-level .py files under src/boxingvi (or its
+    __init__): a module loaded from anywhere else (an untracked package folder, another checkout on sys.path)
+    is code the digest and the freeze do not describe."""
+    lib = (root / "src" / "boxingvi").resolve()
+    for name, mod in list((modules if modules is not None else sys.modules).items()):
+        if name != "boxingvi" and not name.startswith("boxingvi."):
+            continue
+        if name == "boxingvi" and getattr(mod, "__file__", None) is None:
+            # a namespace package (src/boxingvi has no __init__.py): it merges every `boxingvi` folder on
+            # sys.path, so it must have exactly one portion, this library's folder
+            portions = {Path(p).resolve() for p in getattr(mod, "__path__", [])}   # one folder twice is fine
+            if portions != {lib}:
+                raise Refused("the boxingvi package is assembled from more than this library's folder: "
+                              "refusing to run")
+            continue
+        f = getattr(mod, "__file__", None)
+        p = Path(f).resolve() if f else None
+        if p is None or p.parent != lib or p.suffix != ".py" \
+                or p.stem != (name.split(".")[-1] if "." in name else "__init__"):
+            raise Refused(f"module {name} was not loaded from the library's own files: refusing to run")
 
 
 def provenance() -> str:
     """What a counts file must carry to be scored: the rule's constants and the code that computed it."""
+    check_imports()
     return hashlib.sha256(f"{full_digest()}|{code_digest()}".encode()).hexdigest()
 
 
@@ -167,19 +195,22 @@ def load_table(path) -> PoseTable:
 def git_head() -> "tuple[str, bool]":
     """(commit, rule files clean) of this checkout; argument arrays, no shell."""
     head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True)
-    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--", *RULE_FILES],
-                           capture_output=True, text=True)
+    dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=all", "--",
+                            *RULE_FILES], capture_output=True, text=True)
     if head.returncode != 0 or dirty.returncode != 0:
         raise Refused("not a git checkout: the freeze needs a commit to record")
     return head.stdout.strip(), dirty.stdout.strip() == ""
 
 
-def git_same(commit: str) -> bool:
-    """True when the rule files on disk are byte-identical to `commit`'s (a logic change that leaves every
-    constant alone still changes the rule; the digest alone cannot see it)."""
-    r = subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", commit, "--", *RULE_FILES],
+def git_same(commit: str, root: Path = ROOT) -> bool:
+    """True when the library and CLI on disk are exactly `commit`'s: no tracked change (a logic change that
+    leaves every constant alone still changes the rule) and no UNTRACKED file (an untracked package folder
+    shadows a tracked module, and `git diff` never sees it)."""
+    r = subprocess.run(["git", "-C", str(root), "diff", "--quiet", commit, "--", *RULE_FILES],
                        capture_output=True, text=True)
-    return r.returncode == 0
+    s = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all", "--",
+                        *RULE_FILES], capture_output=True, text=True)
+    return r.returncode == 0 and s.returncode == 0 and s.stdout.strip() == ""
 
 
 # ---- commands -------------------------------------------------------------------------------
@@ -241,16 +272,42 @@ def cmd_template(a, ctx) -> int:
 
 def cmd_freeze(a, ctx) -> int:
     mp = out_path(a.manifest, ctx, (".json",), overwrite=True)
-    m = load_manifest(mp)
-    if m["frozen"] is not None:
-        raise Refused("already frozen: the rule is not changed after a freeze (the gate)")
     commit, clean = ctx["git"]()
     if not clean:
-        raise Refused("commit the library and CLI first: the freeze records a commit that must hold this code")
-    m["frozen"] = {"rule_digest": full_digest(), "commit": commit}
-    write_json(mp, m)
+        raise Refused("commit the library and CLI first (no untracked files either): the freeze records a "
+                      "commit that must hold this code")
+    with manifest_lock(mp, ctx.get("lock_timeout_s", 30.0)):
+        m = load_manifest(mp)
+        if m["frozen"] is not None:
+            raise Refused("already frozen: the rule is not changed after a freeze (the gate)")
+        m["frozen"] = {"rule_digest": full_digest(), "commit": commit}
+        write_json(mp, m)
     print(f"frozen at {commit[:12]}, rule digest {m['frozen']['rule_digest'][:12]}")
     return 0
+
+
+class manifest_lock:
+    """Serialise read-modify-write of the manifest (TEST and FAIL-CASE finishing at once must not overwrite
+    each other's record): an exclusive-create lock file, waited for up to `timeout_s`, removed on exit."""
+
+    def __init__(self, mp: Path, timeout_s: float = 30.0):
+        self.path, self.timeout_s = mp.with_name(f"{mp.stem}.lock"), timeout_s
+
+    def __enter__(self):
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            try:
+                os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return self
+            except FileExistsError:
+                if time.monotonic() > deadline:
+                    raise Refused("the manifest is locked by another run (or a stale lock file is left: "
+                                  "remove it only if no run is going)") from None
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
+        return False
 
 
 def claim_path(mp: Path, role: str) -> Path:
@@ -308,9 +365,10 @@ def cmd_score(a, ctx) -> int:
            "glove_diagnostics": ident.diagnostics, "methods": methods}
     write_json(out, res)
     if role != "dev":
-        m = load_manifest(mp)                 # re-read: record onto the manifest as it is now
-        m["scored"][role] = sha256_file(out)
-        write_json(mp, m)
+        with manifest_lock(mp, ctx.get("lock_timeout_s", 30.0)):
+            m = load_manifest(mp)             # re-read under the lock: record onto the manifest as it is now
+            m["scored"][role] = sha256_file(out)
+            write_json(mp, m)
     g = methods["glove"]
     print(f"{role}: verdict {ident.verdict}; moments {res['moments']}; glove decided {g['decided']} of "
           f"{g['scored']}, correct {g['correct']}, swaps {g['swaps']}")
@@ -395,10 +453,11 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main(argv=None, participant_root=None, syncthing_configs=None, git=None, same=None) -> int:
+def main(argv=None, participant_root=None, syncthing_configs=None, git=None, same=None,
+         lock_timeout_s: float = 30.0) -> int:
     a = build_parser().parse_args(argv)
     ctx = {"root": participant_root or faceblur.PARTICIPANT_ROOT, "syncthing": syncthing_configs,
-           "git": git or git_head, "git_same": same or git_same}
+           "git": git or git_head, "git_same": same or git_same, "lock_timeout_s": lock_timeout_s}
     try:
         return {"roles": cmd_roles, "compute": cmd_compute, "template": cmd_template, "freeze": cmd_freeze,
                 "score": cmd_score, "gate": cmd_gate}[a.cmd](a, ctx)

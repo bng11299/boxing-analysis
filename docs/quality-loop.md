@@ -3783,3 +3783,27 @@ integrity, scoring TEST with a rule changed after seeing it.
   here rather than given a contrived fixture. Four survivors on the way were each one guard masked by another
   (digest vs provenance, scored-record vs claim, edited score vs schema, name in a message vs scrub); each
   test now defeats the other guard first.
+
+### Iteration 3 -- review gate (Astra, second round, on a fresh clone of `8efc7bd`): FIX FIRST; 5 of 9 fixed, 4 partly, 3 new; all fixed
+- **B1/B2 partly (blocker): untracked code.** After a freeze, an untracked `src/boxingvi/appearance/__init__.py`
+  shadows `appearance.py`, and `git diff` never sees it; the code digest hashed top-level files only. Now:
+  `git_same` also needs `git status --porcelain --untracked-files=all` empty for `src/boxingvi` and the CLI
+  (the freeze's own check too); `code_digest` hashes every file under `src/boxingvi`, subfolders included
+  (`__pycache__` skipped); and `check_imports` refuses to run unless every loaded `boxingvi.*` module is a
+  top-level file of this library under its own name. Found while building it: `boxingvi` is a NAMESPACE package
+  (no `__init__.py`), which merges every `boxingvi` folder on `sys.path`, so it must have exactly one portion.
+  Tested on a throwaway git repo (untracked shadow, tracked change, unknown commit) and with fake modules.
+- **S1 partly: the CSV parser echoed bad values** (a `t_s` of `Firstname-Lastname.mp4` reached stderr; it is not
+  on the command line, so `scrub` cannot remove it). Messages now give the row number only. The first test was
+  case-sensitive and missed an echo of the upper-cased side; a mutant showed it.
+- **NEW-1 (blocker): the evidence filters ran before one-name-per-frame,** so a filter could remove the right
+  boxer and leave the wrong one named. `resolve_labels` judges duplicates on the smoothed names before any
+  filter, then applies the filters; unit-tested on a hand-built two-frame table.
+- **NEW-2: my hidden-borrower fixture never hid anything.** It lowered the PREVIOUS row's confidence, and the
+  current row was then created with visible wrists. Fixed, and the test now asserts its premise (no read
+  during the lend, no row of the lender) and that nobody is named in the middle of the lend. So the previous
+  "wrong only near the edges" pass was on an easier case than the one claimed.
+- **NEW-3: manifest read-modify-write was unlocked** (TEST and FAIL-CASE finishing together could overwrite each
+  other's record). `manifest_lock` (exclusive-create lock file, bounded wait) around the freeze and both
+  record steps.
+- **Test:** 210 / 210. **Mutants: 43 of 44 killed;** the survivor is still the redundant 75% majority.

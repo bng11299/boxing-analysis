@@ -491,33 +491,45 @@ def identify(table, counts: GloveCounts) -> GloveIdentity:
                 label[r] = 0
     # direct evidence wins over the window: a row whose own track has ANY confident raw decision within one
     # sampling step that contradicts the smoothed name is unsure (an id lent to the other boxer for a moment;
-    # "the nearest one only" missed the last frame of a lend, whose nearest sample is already the old boxer)
+    # "the nearest one only" missed the last frame of a lend, whose nearest sample is already the old boxer),
+    # and a row needs an AGREEING raw decision within +-SUPPORT_S (no guessing across hidden gloves)
+    smoothed = label.copy()
+    ok = np.ones(n_rows, dtype=bool)
     every = sample_every(table.fps)
+    sup = SUPPORT_S * table.fps
     for t in np.unique(table.track_id):
         vote = dec & (table.track_id[rows] == t)
         vf = table.frame[rows][vote]
         vl = raw[vote]
         if not len(vf):
-            label[table.track_id == t] = -1
+            ok[table.track_id == t] = False
             continue
         order = np.argsort(vf, kind="stable")
         vf, vl = vf[order], vl[order]
-        sup = SUPPORT_S * table.fps
-        for r in np.flatnonzero((table.track_id == t) & (label >= 0)).tolist():
+        for r in np.flatnonzero((table.track_id == t) & (smoothed >= 0)).tolist():
             f = int(table.frame[r])
             lo, hi = np.searchsorted(vf, f - every, "left"), np.searchsorted(vf, f + every, "right")
             slo, shi = np.searchsorted(vf, f - sup, "left"), np.searchsorted(vf, f + sup, "right")
-            if (vl[lo:hi] != label[r]).any() or not (vl[slo:shi] == label[r]).any():
-                label[r] = -1
-    for f in np.unique(table.frame):
-        idx = np.flatnonzero((table.frame == f) & (label >= 0))
-        for k in (0, 1):
-            same = idx[label[idx] == k]
-            if len(same) > 1:
-                label[same] = -1
+            if (vl[lo:hi] != smoothed[r]).any() or not (vl[slo:shi] == smoothed[r]).any():
+                ok[r] = False
+    label = resolve_labels(table, smoothed, ok)
     diag["named_rows_share"] = float((label >= 0).mean()) if n_rows else None
     return GloveIdentity("separable", label, diag)
 
+
+def resolve_labels(table, smoothed: np.ndarray, ok: np.ndarray) -> np.ndarray:
+    """Final names: the evidence filters (`ok`) applied, and ONE NAME PER FRAME judged on the smoothed names
+    BEFORE those filters. Two rows of a frame smoothed to the same name are both unsure even if a filter has
+    already removed one of them: otherwise the filter can remove the right boxer and leave the wrong one."""
+    smoothed = np.asarray(smoothed, dtype=np.int64)
+    label = np.where(np.asarray(ok, dtype=bool), smoothed, -1)
+    named = smoothed >= 0
+    key = table.frame.astype(np.int64) * 2 + np.where(named, smoothed, 0)
+    _, inv, cnt = np.unique(key[named], return_inverse=True, return_counts=True)
+    conflict = np.zeros(len(smoothed), dtype=bool)
+    conflict[np.flatnonzero(named)] = cnt[inv] > 1
+    label[conflict] = -1
+    return label
 
 def rule_digest() -> str:
     return hashlib.sha256(json.dumps(rule_constants(), sort_keys=True).encode()).hexdigest()

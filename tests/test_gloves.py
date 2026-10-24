@@ -105,6 +105,8 @@ def scene(n=900, ga=(RED, RED), gb=(BLUE, BLUE), swap_at=450, wrist_conf=0.9, li
         pos[f] = (ax, bx)
         for who, cx in (("A", ax), ("B", bx)):
             tid = (1 if who == "A" else 2) if (swap_at is None or f < swap_at) else (2 if who == "A" else 1)
+            c = np.full(N_JOINTS, 0.9)
+            c[[9, 10]] = wrist_conf
             if hop is not None and hop[0] <= f < hop[1]:
                 if hop_drop != "B":                          # ByteTrack lends A's id to B for a moment
                     tid = 5 if who == "A" else 1
@@ -114,8 +116,6 @@ def scene(n=900, ga=(RED, RED), gb=(BLUE, BLUE), swap_at=450, wrist_conf=0.9, li
                     continue
                 if hop_hidden and hop_drop and who != hop_drop:   # ... and the borrower's gloves are hidden
                     c[[9, 10]] = 0.2
-            c = np.full(N_JOINTS, 0.9)
-            c[[9, 10]] = wrist_conf
             rows["frame"].append(f)
             rows["tid"].append(tid)
             rows["box"].append((cx - 55, 58, cx + 55, 210))
@@ -354,7 +354,11 @@ for lender in ("A", "B"):
           f"{idn.verdict} wrong {wr:.4f}")
 
 tb, fs, tr = scene(swap_at=None, hop=(300, 330), hop_drop="A", hop_hidden=True)
-idn = gloves.identify(tb, gloves.compute_gloves(None, tb, frames=fs()))
+cnh = gloves.compute_gloves(None, tb, frames=fs())
+in_hop = (tb.frame[cnh.rows] >= 300) & (tb.frame[cnh.rows] < 330)
+check("fixture: during the lend the borrower's gloves give no read at all, and A has no row",
+      not in_hop.any() and not ((tb.frame >= 300) & (tb.frame < 330) & (tr == "A")).any(), str(int(in_hop.sum())))
+idn = gloves.identify(tb, cnh)
 lab_, fr_ = idn.label, tb.frame
 named_ = lab_ >= 0
 nm0 = (tr[named_ & (fr_ < 250)] == "A")
@@ -365,6 +369,20 @@ check("an id lent while the borrower's gloves are hidden: wrong names only withi
       "evidence, never in the middle of the lend", all((300 <= f < 300 + edge) or (330 - edge <= f < 330)
                                                       for f in wrong_frames.tolist()),
       f"wrong at frames {sorted(set(wrong_frames.tolist()))[:20]}")
+mid = (fr_ >= 300 + edge) & (fr_ < 330 - edge)
+check("... and in the middle of the lend nobody is named at all (no glove evidence, no guess)",
+      mid.any() and not named_[mid].any(), f"{int(named_[mid].sum())} named of {int(mid.sum())}")
+
+print("one name per frame is judged before the evidence filters")
+tiny = PoseTable(frame=np.array([0, 0, 1, 1], np.int64), track_id=np.array([1, 2, 1, 2], np.int64),
+                 box=np.tile([0.0, 0.0, 10.0, 10.0], (4, 1)), xy=np.zeros((4, N_JOINTS, 2)),
+                 conf=np.full((4, N_JOINTS), 0.9), n_frames=2, fps=FPS, width=W, height=H, source="t", video_fp=FP)
+res = gloves.resolve_labels(tiny, np.array([0, 0, 0, 1]), np.array([False, True, True, True]))
+check("frame 0: both smoothed to the same name; a filter removed one; the other is NOT left named",
+      res[0] == -1 and res[1] == -1, str(res))
+check("frame 1: two different names, both kept", res[2] == 0 and res[3] == 1, str(res))
+res = gloves.resolve_labels(tiny, np.array([-1, 0, 1, -1]), np.array([True, False, True, True]))
+check("a filter alone makes a row unsure; an unsure row never causes a conflict", list(res) == [-1, -1, 1, -1], str(res))
 
 tb, fs, tr = scene(swap_at=None, b_reads_as=(150, 300))
 idn = gloves.identify(tb, gloves.compute_gloves(None, tb, frames=fs()))
@@ -512,6 +530,21 @@ raises("labels refused: a time off the grid", lambda: glovescore.parse_labels(q,
 q = filled()
 q.write_text(q.read_text().replace("# A: red gloves", "# A: red gloves\n# A: blue"), encoding="utf-8")
 raises("labels refused: a header twice", lambda: glovescore.parse_labels(q, table), "twice")
+q = filled()
+q.write_text(q.read_text().replace("\n10,L", "\nFirstname-Lastname.mp4,L").replace("\n15,?", "\n15,Firstname"),
+             encoding="utf-8")
+try:
+    glovescore.parse_labels(q, table)
+    check("labels refused: a value off the grid", False)
+except ValueError as e:
+    check("labels refused without echoing the bad value (it may carry a name)", "firstname" not in str(e).lower(), str(e))
+q2 = filled()
+q2.write_text(q2.read_text().replace("\n15,?", "\n15,Firstname"), encoding="utf-8")
+try:
+    glovescore.parse_labels(q2, table)
+    check("labels refused: a bad side", False)
+except ValueError as e:
+    check("a bad side is refused without echoing it (in any case)", "firstname" not in str(e).lower() and "a_side" in str(e), str(e))
 q = tmp / "bin.csv"; q.write_bytes(b"\xff\xfe\x00junk")
 raises("labels refused: not UTF-8", lambda: glovescore.parse_labels(q, table), "UTF-8")
 q = tmp / "big.csv"; q.write_bytes(b"#" * (glovescore.MAX_LABEL_BYTES + 1))
@@ -531,6 +564,51 @@ raises("default suffix still .mp4 only", lambda: faceblur.check_output_location(
     proot / "a.npz", allowed_root=proot, syncthing_configs=[]), "mp4", faceblur.UnsafeOutput)
 check("an allowed suffix passes", faceblur.check_output_location(
     proot / "a.npz", allowed_root=proot, syncthing_configs=[], suffixes=(".npz",)) == (proot / "a.npz").resolve())
+
+# ---- what the freeze and the provenance cover ------------------------------------------------
+print("freeze boundary: untracked code, subfolders, import origins, the manifest lock")
+from types import SimpleNamespace  # noqa: E402
+import subprocess  # noqa: E402
+
+repo = tmp / "minirepo"
+(repo / "src" / "boxingvi").mkdir(parents=True)
+(repo / "src" / "boxingvi" / "appearance.py").write_text("def hsv(x):\n    return x\n")
+(repo / "glove_identity.py").write_text("# cli\n")
+g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)  # noqa: E731
+g("init", "-q"); g("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x")
+head = g("rev-parse", "HEAD").stdout.strip()
+check("git_same: a clean checkout at the frozen commit", glove_identity.git_same(head, repo))
+d0 = glove_identity.code_digest(repo)
+shadow = repo / "src" / "boxingvi" / "appearance"
+shadow.mkdir()
+(shadow / "__init__.py").write_text("def hsv(x):\n    return 0\n")
+check("git_same refuses an UNTRACKED package folder that shadows a tracked module (git diff never sees it)",
+      not glove_identity.git_same(head, repo))
+check("code_digest covers subfolders (the shadow changes it)", glove_identity.code_digest(repo) != d0)
+shutil.rmtree(shadow)
+(repo / "src" / "boxingvi" / "__pycache__").mkdir()
+(repo / "src" / "boxingvi" / "__pycache__" / "x.pyc").write_bytes(b"\0")
+check("code_digest ignores __pycache__ (derived)", glove_identity.code_digest(repo) == d0)
+(repo / "src" / "boxingvi" / "appearance.py").write_text("def hsv(x):\n    return 1\n")
+check("git_same refuses a tracked change", not glove_identity.git_same(head, repo))
+check("git_same refuses a commit that does not exist", not glove_identity.git_same("f" * 40, repo))
+
+lib = ROOT / "src" / "boxingvi"
+glove_identity.check_imports()
+check("check_imports passes for this process's own library", True)
+for nm, mods in [("a module from another folder", {"boxingvi.appearance": SimpleNamespace(__file__=str(tmp / "x" / "appearance.py"))}),
+                 ("a module from a package folder inside the library", {"boxingvi.appearance": SimpleNamespace(__file__=str(lib / "appearance" / "__init__.py"))}),
+                 ("a module file under another name", {"boxingvi.gloves": SimpleNamespace(__file__=str(lib / "headgear.py"))}),
+                 ("a module with no file", {"boxingvi.gloves": SimpleNamespace()}),
+                 ("a namespace package with a second portion", {"boxingvi": SimpleNamespace(__path__=[str(lib), str(tmp / "other" / "boxingvi")])})]:
+    raises(f"check_imports refuses {nm}", lambda m=mods: glove_identity.check_imports(m), "refusing to run", glove_identity.Refused)
+
+lk = proot / "lockme.json"
+with glove_identity.manifest_lock(lk, 0.2):
+    raises("a second writer waits, then is refused, while the manifest is locked",
+           lambda: glove_identity.manifest_lock(lk, 0.2).__enter__(), "locked", glove_identity.Refused)
+check("the lock is released on exit", not (proot / "lockme.lock").exists())
 
 # ---- the CLI ----------------------------------------------------------------------------------
 print("glove_identity.py")

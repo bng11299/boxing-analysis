@@ -143,9 +143,9 @@ def parse_labels(path, table) -> Labels:
             bad(f"row {i}: needs exactly two fields")
         ts, side = row[0].strip(), row[1].strip().upper()
         if ts != str(t):
-            bad(f"row {i}: time {ts!r} is not the template's {t}")
+            bad(f"row {i}: the time is not the template's {t} s")
         if side not in ("L", "R", "?"):
-            bad(f"row {i}: a_side must be L, R or ? (got {side!r})")
+            bad(f"row {i}: a_side must be L, R or ?")
         items.append((t, side))
     return Labels(a, minutes, tuple(items))
 
