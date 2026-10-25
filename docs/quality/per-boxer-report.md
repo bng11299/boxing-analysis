@@ -77,3 +77,22 @@ legal extent rule with a zero lead width passed the punch stage and was refused 
 extent check now uses read_extent's own bounds (still range before float). Test added (164 passed).
 Astra could not execute a symbolic-link write here (read-only; this machine cannot create symlinks without
 privilege); that case is covered statically and by the hard-link test.
+
+### Exit -- all gates green
+- **Test gate:** `tests/test_boxers.py` 164 passed; every existing suite unchanged and green.
+- **Reproduce gate:** a fresh clone at `d5c0090` with no `data/` or `results/` ran all 20 Python suites and the
+  machine scripts green, with the same counts as the working tree (analyse_clip 113, appearance 171, blur 177,
+  boxers 163, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99, headgear 140,
+  ingest 185, labels 50, linking 266, olympic 29, pipeline 314, poseswitch 30, render_punches 66, report 289,
+  tracks 100, machine scripts 38). The last commit, `4d71b37`, touched only `boxers.py` and its test; a fresh
+  clone at it ran the two suites that import that module: boxers 164, analyse_clip 113.
+- **Review gate:** Astra, two rounds on fresh clones: FIX FIRST (4 blocking, fixed), then SHIP (1 low, fixed).
+- **Security gate:** own pass plus Astra R2-R4; closed: claimed-PASS without evidence, non-ValueError escapes,
+  participant output outside its folder, link-following writes, csv.Error tracebacks.
+- **Real-world facts asserted:** on 29 Olympic videos the per-boxer finder reproduces RESULTS rows 7b, 7c and 7d
+  exactly (1,585 of 2,423 owned; 7,984 on A + B; 10,077 on credited fragments) and equals `find_bursts` on 29/29.
+- **Residual risks, accepted and stated:** identity error cannot be measured on Olympic Boxing (no label pins a
+  boxer), so per-boxer counts there are conditional on the linker; a gate result file is unsigned JSON; the
+  tracks file is hashed by path after loading (local check-then-use); the template summary's punch rate divides
+  by the whole footage, not the time the boxer was identified (the header states that time beside it); punch TYPES
+  in the boxers CSV are bound by hashes only, as in the solo report (the finder columns are re-derived).
