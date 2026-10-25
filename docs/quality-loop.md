@@ -34,3 +34,4 @@ Records are in log order (some iterations live inside another feature's record).
 - 2026-10-08 — [`feat/corner-colour`, version 2](quality/corner-colour-v2.md)
 - 2026-10-22 — [`feat/appearance-identity`](quality/appearance-identity.md)
 - 2026-10-19 — [`feat/analyse-clip`](quality/analyse-clip.md)
+- 2026-10-24 — [`olympic-swap-rate`](quality/olympic-swap-rate.md)
