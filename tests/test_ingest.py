@@ -471,6 +471,11 @@ big = bomb(tmp / "big.npz", pose_yolo.MAX_POSE_FRAMES + 1)
 mb = peak_mb(lambda: PoseSequence.load(big))
 check("one frame over the cap: refused with nothing allocated (it took ~272 MB before)",
       mb < 5, f"peak {mb:.1f} MB")
+padded = pose_npz(tmp / "padded.npz", **{f"pad{i:05d}": b"" for i in range(5000)})
+refuses("a pose file padded with 5,000 empty members is refused from its zip end record",
+        lambda: PoseSequence.load(padded), "zip directory of 5,008 members")
+mb = peak_mb(lambda: PoseSequence.load(padded))
+check("... before zipfile builds the 5,000 entries", mb < 1, f"peak {mb:.2f} MB")
 refuses("... and the refusal is the cap, not the missing data",
         lambda: PoseSequence.load(big), "the cap is")
 check("the cap is ~9 h at 60 fps, the video timing scan's bound",
