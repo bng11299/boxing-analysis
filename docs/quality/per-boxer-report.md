@@ -68,3 +68,12 @@ internally consistent, not that the gate was actually run (it is not signed).
 
 ### Iteration 2 -- test gate
 `tests/test_boxers.py` 163 passed, 0 failed. Olympic re-run on the fixed code: identical aggregates.
+
+### Iteration 2 -- review gate (Astra, read-only, effort medium, fresh clone at `d5c0090`): SHIP
+R1-R4 confirmed closed, with variants: unsure segments and hand-written adjacent same-track segments (R1); the
+glove document absent from main fails closed until #31 merges (R2); the identity writer and the workbook use the
+link-safe write (R4). One new finding, low, non-blocking, verified against `classify.read_extent` and fixed: a
+legal extent rule with a zero lead width passed the punch stage and was refused by the report stage; the report's
+extent check now uses read_extent's own bounds (still range before float). Test added (164 passed).
+Astra could not execute a symbolic-link write here (read-only; this machine cannot create symlinks without
+privilege); that case is covered statically and by the hard-link test.

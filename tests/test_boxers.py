@@ -814,6 +814,16 @@ rc = quiet(boxer_punches.main, punches_args(eo, idf=edge))
 rc2 = quiet(report_boxers.main, report_args(eo, eo / "BOUT01.boxers.csv", idf=edge))
 check("what the punch stage writes on it, the report stage accepts", rc == 0 and rc2 == 0)
 
+print("== every extent rule the punch stage accepts, the report stage accepts ==")
+ext0 = tmp / "extent0.json"
+ext0.write_text(json.dumps({**json.loads(extent.read_text(encoding="utf-8")), "lead_widths": 0}), encoding="utf-8")
+eo0 = fresh("extent0")
+a0 = punches_args(eo0)
+a0[a0.index("--extent") + 1] = str(ext0)
+rc = quiet(boxer_punches.main, a0)
+rc2 = quiet(report_boxers.main, report_args(eo0, eo0 / "BOUT01.boxers.csv"))
+check("a zero lead width (legal for classify.read_extent) passes both stages", rc == 0 and rc2 == 0)
+
 print("== outputs replace a planted link, never write through it ==")
 outside = tmp / "outside-root.txt"
 outside.write_text("must not change", encoding="utf-8")

@@ -700,12 +700,15 @@ def _extent_of(d, variant: str) -> dict:
     if d["variant"] != variant:
         raise ValueError("the sidecar's extent was measured with another wrist-speed variant than the classifier's")
     out = {}
-    for k in ("frac", "lead_widths", "tail_widths"):
+    # classify.read_extent's own bounds, so the report accepts every rule the punch stage accepted (Astra, review
+    # 2); each range is checked before any float operation: a 400-digit JSON integer must not reach isfinite
+    for k, lo, hi in (("frac", 0.0, 1.0), ("lead_widths", 0.0, 20.0), ("tail_widths", 0.0, 20.0)):
         v = d.get(k)
-        # the range is checked before any float operation: a 400-digit JSON integer must not reach isfinite
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v < 100 or not math.isfinite(v):
-            raise ValueError(f"the sidecar's extent {k} is not a positive number")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi or not math.isfinite(v):
+            raise ValueError(f"the sidecar's extent {k} is not a number in [{lo:g}, {hi:g}]")
         out[k] = float(v)
+    if not (0 < out["frac"] < 1 and out["lead_widths"] + out["tail_widths"] > 0):
+        raise ValueError("the sidecar's extent: frac must be strictly inside (0, 1) and the extent non-empty")
     return out
 
 
