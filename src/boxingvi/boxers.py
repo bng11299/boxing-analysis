@@ -35,12 +35,15 @@ their punches are counted, by wrist, and never named or assigned.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import io
 import json
 import math
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -120,6 +123,27 @@ def _csv_rows(raw: bytes, name: str):
         return list(csv.reader(io.StringIO(raw.decode("utf-8"), newline="")))
     except (UnicodeDecodeError, csv.Error) as e:
         raise ValueError(f"{name}: not a readable UTF-8 CSV ({type(e).__name__})") from None
+
+
+def replace_file(path, write) -> None:
+    """Write an output without following anything already at `path`: `write(tmp)` fills a NEW file created
+    exclusively in the same folder, which then replaces `path` (os.replace swaps the directory entry: a link
+    planted at `path` is replaced, never written through; Astra, review 1). The temporary file is removed on any
+    failure."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    try:
+        write(Path(tmp))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def replace_bytes(path, data: bytes) -> None:
+    replace_file(path, lambda p: p.write_bytes(data))
 
 
 # Participant footage lives here only (encrypted desktop; vault ISSUES-LOG O63-O65). Both paths the project uses.
@@ -243,9 +267,33 @@ def check_segments(table: PoseTable, segments) -> None:
             raise ValueError(f"boxer {b} is two people in one frame: the identity contradicts itself")
 
 
-def _check_gate(gate, gate_result) -> dict:
+# The identity methods with a PRE-REGISTERED gate (deny by default: any other method can only be "ungated"), the
+# gate document committed before its rule, and the bars its result file must carry. Glove colour's result is what
+# `glove_identity.py gate` writes (glovescore.gate_verdict): four bars and PASS = all four. Headgear colour (#29)
+# failed its gate and has no result format registered, so it can record "fail" without a result, never "pass".
+GATES = {"glove-colour": {"document": "docs/gates/glove-identity.md",
+                          "bars": ("1_accuracy", "2_unsure", "3_better_than_tracking", "4_fails_safe")},
+         "headgear-colour": {"document": "docs/gates/appearance-identity.md", "bars": None}}
+
+
+def _check_result(raw: bytes, name: str, bars) -> bool:
+    """A gate result file's verdict, accepted only in the registered format: every bar a true / false, and PASS
+    exactly all of them. A file that only says PASS is not evidence of anything (Astra, review 1)."""
+    d = _json_object(raw, name)
+    if bars is None:
+        raise ValueError(f"{name}: no result format is registered for this gate, so its result cannot be checked")
+    vals = [d.get(b) for b in bars]
+    passed = d.get("PASS")
+    if not all(isinstance(v, bool) for v in vals) or not isinstance(passed, bool):
+        raise ValueError(f"{name}: not this gate's result (every bar and PASS must be true or false)")
+    if passed != all(vals):
+        raise ValueError(f"{name}: PASS is not what its bars say")
+    return passed
+
+
+def _check_gate(gate, gate_result, method: str) -> dict:
     """The sidecar's gate block, and the gate result file when one is given (module docstring)."""
-    if not isinstance(gate, dict) or gate.get("verdict") not in VERDICTS:
+    if not isinstance(gate, dict) or not isinstance(gate.get("verdict"), str) or gate["verdict"] not in VERDICTS:
         raise ValueError(f"the gate verdict must be one of {VERDICTS}")
     v = gate["verdict"]
     if v == "ungated":
@@ -259,6 +307,10 @@ def _check_gate(gate, gate_result) -> dict:
     doc, sha = gate["document"], gate["result_sha256"]
     if not isinstance(doc, str) or not _GATE_DOC.fullmatch(doc):
         raise ValueError("the gate document must be docs/gates/<name>.md")
+    if method not in GATES:
+        raise ValueError(f"no gate is registered for the method {method}: record it as ungated")
+    if doc != GATES[method]["document"]:
+        raise ValueError(f"{doc} is not the gate pre-registered for {method}")
     path = (ROOT / doc).resolve()
     if not path.is_relative_to((ROOT / "docs" / "gates").resolve()) or not path.is_file():
         raise ValueError(f"no pre-registered gate {doc} in this repository")
@@ -272,9 +324,7 @@ def _check_gate(gate, gate_result) -> dict:
     raw = _read_capped(gate_result, MAX_SIDECAR_BYTES, "gate result")
     if hashlib.sha256(raw).hexdigest() != sha:
         raise ValueError(f"{Path(gate_result).name} is not the gate result the identity recorded")
-    passed = _json_object(raw, Path(gate_result).name).get("PASS")
-    if not isinstance(passed, bool):
-        raise ValueError(f"{Path(gate_result).name} says neither PASS true nor PASS false")
+    passed = _check_result(raw, Path(gate_result).name, GATES[method]["bars"])
     if passed != (v == "pass"):
         raise ValueError(f"the identity records a gate {v.upper()}, its gate result says "
                          f"{'PASS' if passed else 'FAIL'}")
@@ -323,7 +373,7 @@ def read_identity(csv_path, table: PoseTable, tracks_path, gate_result=None) -> 
         raise ValueError(f"{side_p.name}: not a {FORMAT} sidecar")
     if not isinstance(side["method"], str) or not _METHOD.fullmatch(side["method"]):
         raise ValueError(f"{side_p.name}: the method must be lower-case letters and hyphens (at most 40)")
-    gate = _check_gate(side["gate"], gate_result)
+    gate = _check_gate(side["gate"], gate_result, side["method"])
     check_binding(side["tracks"], table, tracks_path, f"identity {csv_path.name}")
     raw = _read_capped(csv_path, MAX_CSV_BYTES, "identity")
     if not isinstance(side["csv_sha256"], str) or hashlib.sha256(raw).hexdigest() != side["csv_sha256"]:
@@ -344,9 +394,9 @@ def write_identity(csv_path, table: PoseTable, tracks_path, segments, method: st
         raise ValueError("the method must be lower-case letters and hyphens (at most 40)")
     gate = dict(gate)
     if gate.get("verdict") == "pass":   # the result file is checked on reading; here only its shape
-        _check_gate({**gate, "verdict": "fail"}, None)
+        _check_gate({**gate, "verdict": "fail"}, None, method)
     else:
-        _check_gate(gate, None)
+        _check_gate(gate, None, method)
     segments = sorted(segments, key=lambda s: (s.track_id, s.first))
     check_segments(table, segments)
     buf = io.StringIO(newline="")
@@ -355,10 +405,10 @@ def write_identity(csv_path, table: PoseTable, tracks_path, segments, method: st
     for s in segments:
         w.writerow([int(s.track_id), int(s.first), int(s.last), s.boxer])
     data = buf.getvalue().encode("utf-8")
-    csv_path.write_bytes(data)
-    sidecar_path(csv_path).write_text(json.dumps(
+    replace_bytes(csv_path, data)
+    replace_bytes(sidecar_path(csv_path), json.dumps(
         {"format": FORMAT, "csv_sha256": hashlib.sha256(data).hexdigest(), "method": method, "gate": gate,
-         "tracks": tracks_binding(table, tracks_path)}, indent=1, allow_nan=False), encoding="utf-8")
+         "tracks": tracks_binding(table, tracks_path)}, indent=1, allow_nan=False).encode("utf-8"))
 
 
 # ---------------------------------------------------------------------- adapters from methods ---
@@ -413,17 +463,16 @@ def boxer_rows(table: PoseTable, identity: Identity, who: str) -> np.ndarray:
 
 
 def scan_segments_of(table: PoseTable, identity: Identity, who: str, max_gap: int) -> "list[np.ndarray]":
-    """The row segments the finder runs on. A boxer is one person per frame: its rows in frame order, cut
-    wherever the track id changes or a hole exceeds `max_gap` (completeness._split_rows, as boxer_segments
-    cuts a linked boxer). Unsure rows can be two people at once, so they are cut per track id."""
-    rows = boxer_rows(table, identity, who)
-    if who in BOXERS:
-        return completeness._split_rows(table, rows[np.argsort(table.frame[rows], kind="stable")], max_gap)
+    """The row segments the finder runs on: each identity segment of `who` on its own, cut further wherever a
+    hole exceeds `max_gap` (completeness._split_rows, as boxer_segments cuts a linked boxer). An identity
+    segment's edge is ALWAYS a cut: frames the method left unsure, gave the other boxer, or did not name are
+    never bridged back into this boxer, however short (Astra, review 1). In frame order."""
+    by_track = _rows_by_track(table)
     out = []
-    for t in np.unique(table.track_id[rows]).tolist():
-        mine = rows[table.track_id[rows] == t]
-        out += completeness._split_rows(table, mine[np.argsort(table.frame[mine], kind="stable")], max_gap)
-    return out
+    for s in identity.segments:
+        if s.boxer == who:
+            out += completeness._split_rows(table, segment_rows(table, s, by_track), max_gap)
+    return sorted(out, key=lambda r: (int(table.frame[r[0]]), int(table.track_id[r[0]])))
 
 
 def finder_params(fps: float) -> "tuple[int, int]":
@@ -517,18 +566,21 @@ def write_boxers(out_dir, clip: str, table: PoseTable, tracks_path, identity: Id
     data = _csv_bytes(BOXERS_HEADER, rows)
     udata = _csv_bytes(UNSURE_HEADER, unsure_rows(table, found[UNSURE]["kept"]))
     p, up = out_dir / f"{clip}.boxers.csv", out_dir / f"{clip}.unsure.csv"
-    p.write_bytes(data)
-    up.write_bytes(udata)
+    replace_bytes(p, data)
+    replace_bytes(up, udata)
     side = {"format": BOXERS_FORMAT, "clip": clip, "csv_sha256": hashlib.sha256(data).hexdigest(),
             "unsure_csv_sha256": hashlib.sha256(udata).hexdigest(), "classifier_sha256": man["sha256"],
-            "stances": dict(stances), "rule": rule, "extent": ex,
+            "stances": dict(stances), "rule": rule,
+            # classify.read_extent has checked the rule was measured with the classifier's variant
+            "extent": {**{k: ex[k] for k in ("frac", "lead_widths", "tail_widths")},
+                       "variant": man["geometry"].variant},
             "cuts": {b: None if cuts[b] is None else {"per": "clip", **cuts[b]._asdict()} for b in BOXERS},
             "pose_frames": int(table.n_frames), "fps": float(table.fps),
             "tracks": tracks_binding(table, tracks_path),
             "identity": {"csv_sha256": identity.csv_sha256, "sidecar_sha256": identity.sidecar_sha256,
                          "method": identity.method, "gate_verdict": identity.verdict},
             "scan": {w: found[w]["stats"] for w in NAMES}}
-    (out_dir / f"{clip}.boxers.json").write_text(json.dumps(side, indent=1, allow_nan=False), encoding="utf-8")
+    replace_bytes(out_dir / f"{clip}.boxers.json", json.dumps(side, indent=1, allow_nan=False).encode("utf-8"))
     return p, up
 
 
@@ -560,14 +612,15 @@ def read_boxers(csv_path, table: PoseTable, tracks_path, identity: Identity, man
     check_binding(side["tracks"], table, tracks_path, f"{csv_path.name}")
     want_id = {"csv_sha256": identity.csv_sha256, "sidecar_sha256": identity.sidecar_sha256,
                "method": identity.method, "gate_verdict": identity.verdict}
-    if side["identity"] != want_id:
+    if not _same(side["identity"], want_id):
         raise ValueError(f"{csv_path.name} was split between the boxers by another identity file than this one")
     if side["classifier_sha256"] != man["sha256"]:
         raise ValueError("these punches were named by another classifier than this manifest describes; its "
                          "reliability does not apply")
     report.check_pose(side, table.n_frames, table.fps)
     st = side["stances"]
-    if not isinstance(st, dict) or set(st) != set(BOXERS) or any(st[b] not in classify.STANCES for b in BOXERS):
+    if (not isinstance(st, dict) or set(st) != set(BOXERS)
+            or any(not isinstance(st[b], str) or st[b] not in classify.STANCES for b in BOXERS)):
         raise ValueError(f"{side_p.name}: a stance per boxer, each one of {sorted(classify.STANCES)}")
     if not isinstance(side["cuts"], dict) or set(side["cuts"]) != set(BOXERS):
         raise ValueError(f"{side_p.name}: a cut (or null) per boxer")
@@ -630,14 +683,27 @@ def read_boxers(csv_path, table: PoseTable, tracks_path, identity: Identity, man
     return out
 
 
-def _extent_of(d) -> dict:
-    """The sidecar's punch-extent rule: the three numbers a cut is computed from."""
-    if not isinstance(d, dict):
+def _same(a, b) -> bool:
+    """Equal as JSON, types included: Python's == calls True equal to 1, JSON does not, and a recorded count of
+    true is not a count."""
+    try:
+        return json.dumps(a, sort_keys=True, allow_nan=False) == json.dumps(b, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+
+
+def _extent_of(d, variant: str) -> dict:
+    """The sidecar's punch-extent rule: exactly the three numbers a cut is computed from and the wrist-speed
+    variant, which must be the classifier's."""
+    if not isinstance(d, dict) or set(d) != {"frac", "lead_widths", "tail_widths", "variant"}:
         raise ValueError("the sidecar's extent is not a punch-extent rule")
+    if d["variant"] != variant:
+        raise ValueError("the sidecar's extent was measured with another wrist-speed variant than the classifier's")
     out = {}
     for k in ("frac", "lead_widths", "tail_widths"):
         v = d.get(k)
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (math.isfinite(v) and 0 < v < 100):
+        # the range is checked before any float operation: a 400-digit JSON integer must not reach isfinite
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v < 100 or not math.isfinite(v):
             raise ValueError(f"the sidecar's extent {k} is not a positive number")
         out[k] = float(v)
     return out
@@ -649,13 +715,13 @@ def check_against_finder(got: dict, found: dict, table: PoseTable, man: dict) ->
     the scan statistics, and each boxer's cut, recomputed from those punches and the recorded extent rule. A
     sidecar re-hashed over an edited CSV is refused here: the hashes detect staleness, this detects anything
     the finder did not find."""
-    ex = _extent_of(got["side"]["extent"])
+    ex = _extent_of(got["side"]["extent"], man["geometry"].variant)
     for b in BOXERS:
         peaks = _peak_rows(table, found[b]["kept"])
         kept = found[b]["kept"]
         cut = classify.cut_from_widths([punchfind.peak_width(kept[k][1], kept[k][2], f, h, ex["frac"])
                                         for f, h, _t, k, _c in peaks], ex, man["geometry"])
-        if got["side"]["cuts"][b] != (None if cut is None else {"per": "clip", **cut._asdict()}):
+        if not _same(got["side"]["cuts"][b], None if cut is None else {"per": "clip", **cut._asdict()}):
             raise ValueError(f"the cut the sidecar records for boxer {b} is not the one its punches give")
     for who in NAMES:
         want = [(tid, cols) for _f, _h, tid, _k, cols in _peak_rows(table, found[who]["kept"])]
@@ -663,7 +729,7 @@ def check_against_finder(got: dict, found: dict, table: PoseTable, man: dict) ->
         if have != want:
             raise ValueError(f"the punches recorded for {'boxer ' + who if who in BOXERS else 'unsure segments'} "
                              "are not what the finder finds on these tracks with this identity and rule")
-    if got["side"]["scan"] != {w: found[w]["stats"] for w in NAMES}:
+    if not _same(got["side"]["scan"], {w: found[w]["stats"] for w in NAMES}):
         raise ValueError("the scan the sidecar records is not the finder's on these tracks with this identity")
 
 

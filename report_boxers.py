@@ -82,10 +82,11 @@ def main(argv=None, participant_roots=boxers.PARTICIPANT_ROOTS) -> int:
     for b in boxers.BOXERS:
         stats = found[b]["stats"]
         text, _ = boxer_text(b, identity, stats, facts[b], n_unsure, n_all, duration, table.fps, bench, finder)
-        report.write_workbook(a.out_dir / f"{clip}.{b}.report.xlsx", f"{clip}, boxer {b}", got["rows"][b], rounds,
-                              facts[b], bench, text, table.fps, report.cut_line({"cut": side["cuts"][b]}),
-                              extra=(("Identity", boxers.identity_sheet(identity, b, stats, n_unsure, n_all)),))
-        (a.out_dir / f"{clip}.{b}.summary.txt").write_text(text + "\n", encoding="utf-8")
+        sheet = boxers.identity_sheet(identity, b, stats, n_unsure, n_all)
+        boxers.replace_file(a.out_dir / f"{clip}.{b}.report.xlsx", lambda p, b=b, text=text, sheet=sheet: (
+            report.write_workbook(p, f"{clip}, boxer {b}", got["rows"][b], rounds, facts[b], bench, text, table.fps,
+                                  report.cut_line({"cut": side["cuts"][b]}), extra=(("Identity", sheet),))))
+        boxers.replace_bytes(a.out_dir / f"{clip}.{b}.summary.txt", (text + "\n").encode("utf-8"))
         print(f"== boxer {b} ==\n{text}\n")
     print(f"-> {a.out_dir / f'{clip}.A.report.xlsx'}, {clip}.B.report.xlsx and both summaries")
     return 0

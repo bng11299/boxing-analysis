@@ -17,6 +17,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -391,10 +392,24 @@ for bad in (("C", "linker", "pass"), ("A", "linker2", "pass"), ("A", "linker", "
     refused(f"header refuses {bad}", lambda bad=bad: boxers.header(*bad, 0, 0, 1.0, 1.0), "out of range")
 
 print("== gated identities ==")
-GATE_DOC = "docs/gates/appearance-identity.md"
+GATE_DOC = boxers.GATES["glove-colour"]["document"]
+REAL_ROOT = boxers.ROOT
+if not (REAL_ROOT / GATE_DOC).is_file():   # on feat/glove-identity (#31) until it merges
+    refused("a registered gate whose document is not in this repository is refused", lambda: boxers._check_gate(
+        {"verdict": "fail", "document": GATE_DOC, "result_sha256": "0" * 64}, None, "glove-colour"),
+        "no pre-registered gate")
+else:
+    check("the glove gate document is in this repository", True)
+# The rest stands a repository root in which both registered gate documents exist.
+fake_root = tmp / "root"
+(fake_root / "docs" / "gates").mkdir(parents=True)
+for g in boxers.GATES.values():
+    (fake_root / g["document"]).write_text("# a pre-registered gate\n", encoding="utf-8")
+boxers.ROOT = fake_root
 
 
-def gated(name: str, verdict: str, result: "bytes | None") -> "tuple[Path, Path | None]":
+def gated(name: str, verdict: str, result: "bytes | None", method: str = "glove-colour",
+          doc: str = GATE_DOC) -> "tuple[Path, Path | None]":
     d = data / name
     d.mkdir()
     res = None
@@ -402,13 +417,19 @@ def gated(name: str, verdict: str, result: "bytes | None") -> "tuple[Path, Path 
         res = d / "gate.json"
         res.write_bytes(result)
     p = d / "BOUT01.identity.csv"
-    boxers.write_identity(p, table, tracks, idn.segments, "glove-colour",
-                          {"verdict": verdict, "document": GATE_DOC,
+    boxers.write_identity(p, table, tracks, idn.segments, method,
+                          {"verdict": verdict, "document": doc,
                            "result_sha256": hashlib.sha256(result or b"none").hexdigest()})
     return p, res
 
 
-PASSED, FAILED = b'{"PASS": true, "1_accuracy": true}', b'{"PASS": false}'
+def result_json(passed: bool, bars=(True, True, True, True)) -> bytes:
+    """What glove_identity.py gate writes (glovescore.gate_verdict)."""
+    keys = boxers.GATES["glove-colour"]["bars"]
+    return json.dumps({**dict(zip(keys, bars)), "baseline_best_correct_share": 0.5, "PASS": passed}).encode()
+
+
+PASSED, FAILED = result_json(True), result_json(False, (True, False, True, True))
 p_pass, r_pass = gated("pass", "pass", PASSED)
 check("a pass with its gate result is read", boxers.read_identity(p_pass, table, tracks, r_pass).verdict == "pass")
 out = fresh("passrun")
@@ -434,7 +455,29 @@ refused("fail whose gate result says PASS", lambda: boxers.read_identity(p_fl, t
         "its gate result says PASS")
 p_np, r_np = gated("nopass", "fail", b'{"verdict": "pass"}')
 refused("a gate result with no PASS boolean", lambda: boxers.read_identity(p_np, table, tracks, r_np),
-        "neither PASS true nor PASS false")
+        "not this gate's result")
+p_bare, r_bare = gated("bare", "pass", b'{"PASS": true}')
+refused("a PASS that is only an assertion (no bars) is not evidence",
+        lambda: boxers.read_identity(p_bare, table, tracks, r_bare), "not this gate's result")
+p_inc, r_inc = gated("inconsistent", "pass", result_json(True, (True, False, True, True)))
+refused("a PASS its own bars contradict", lambda: boxers.read_identity(p_inc, table, tracks, r_inc),
+        "PASS is not what its bars say")
+p_str, r_str = gated("strbars", "pass", result_json(True, ("yes", True, True, True)))
+refused("a bar that is not true or false", lambda: boxers.read_identity(p_str, table, tracks, r_str),
+        "not this gate's result")
+refused("a gated verdict for a method with no registered gate (the linker)", lambda: gated(
+    "linkergate", "fail", FAILED, method="linker"), "no gate is registered for the method linker")
+refused("a gate document that is not the method's own", lambda: gated(
+    "wrongdoc", "fail", FAILED, doc=boxers.GATES["headgear-colour"]["document"]), "is not the gate pre-registered")
+p_hg, r_hg = gated("headgear", "fail", FAILED, method="headgear-colour",
+                   doc=boxers.GATES["headgear-colour"]["document"])
+check("headgear colour (#29) can record its failed gate", boxers.read_identity(p_hg, table, tracks).verdict == "fail")
+refused("... but no result file for it can be checked", lambda: boxers.read_identity(p_hg, table, tracks, r_hg),
+        "no result format is registered")
+refused("... and it can never record a pass", lambda: boxers.read_identity(
+    gated("headgearpass", "pass", PASSED, method="headgear-colour",
+          doc=boxers.GATES["headgear-colour"]["document"])[0], table, tracks, data / "headgearpass" / "gate.json"),
+    "no result format is registered")
 refused("a gate result for an ungated identity", lambda: boxers.read_identity(ident, table, tracks, r_fail),
         "records no gate")
 quiet(boxer_punches.main, punches_args(fresh("failrun"), idf=p_fail))
@@ -496,7 +539,7 @@ refused("forged sidecar: a gate document outside docs/gates", read(variant("trav
     "must be docs/gates/<name>.md")
 refused("forged sidecar: a gate that was never pre-registered", read(variant("nodoc", side_edit=lambda s: s.update(
     gate={"verdict": "fail", "document": "docs/gates/made-up.md", "result_sha256": "0" * 64}))),
-    "no pre-registered gate")
+    "is not the gate pre-registered for glove-colour")
 refused("forged sidecar: wrong tracks hash", read(variant("hash", side_edit=lambda s: s["tracks"].update(
     sha256="0" * 64))), "with other content")
 refused("forged sidecar: tracks binding missing a field", read(variant("bind", side_edit=lambda s: s["tracks"].pop(
@@ -608,6 +651,7 @@ def full_check(p, idt=None, tbl=table, tr=tracks):
     def go():
         idt_ = idt or idn
         got = boxers.read_boxers(p, tbl, tr, idt_, man)
+        report.finder_reliability(rule_p, got["side"].get("rule"))   # as report_boxers.py does
         boxers.check_against_finder(got, boxers.find(tbl, idt_, RULE), tbl, man)
     return go
 
@@ -690,6 +734,122 @@ refused("boxers CSV with a NUL byte, sidecar re-hashed", full_check(punch_varian
     "pnul", lambda t: t.replace(",no,", ",no\x00,", 1))), "interpolated flag")
 refused("unsure CSV with a NUL byte, sidecar re-hashed", full_check(punch_variant(
     "unul", unsure_edit=lambda t: t + "\x00\n")), "not a punch on an unsure segment")
+
+print("== every sidecar field, mutated: refused with a ValueError, never accepted, never a crash ==")
+BAD = ([], {}, None, "x", 10 ** 400, -1, True, 1.5)
+
+
+def leaves(d, path=()):
+    for k, v in d.items():
+        if isinstance(v, dict) and v:
+            yield from leaves(v, path + (k,))
+        else:
+            yield path + (k,)
+
+
+def mutate(s, path, value):
+    for k in path[:-1]:
+        s = s[k]
+    s[path[-1]] = value
+
+
+def sweep(name: str, sidecar: dict, attempt, valid=()) -> None:
+    """`valid`: (path, repr(value)) pairs that are well formed by the format's own rules and rightly accepted."""
+    accepted, crashed, n = [], [], 0
+    for path in leaves(sidecar):
+        for val in BAD:
+            if ("/".join(path), repr(val)) in valid:
+                continue
+            n += 1
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    attempt(path, val)
+                accepted.append(("/".join(path), repr(val)[:12]))
+            except ValueError:
+                pass
+            except Exception as e:   # noqa: BLE001
+                crashed.append(("/".join(path), repr(val)[:12], type(e).__name__))
+    check(f"{name}: {n} mutations, none accepted", not accepted, str(accepted[:6]))
+    check(f"{name}: none escapes as another exception", not crashed, str(crashed[:6]))
+
+
+id_side = json.loads(boxers.sidecar_path(ident).read_text(encoding="utf-8"))
+_k = {"n": 0}
+
+
+def try_identity(path, val):
+    _k["n"] += 1
+    boxers.read_identity(variant(f"m{_k['n']}", side_edit=lambda s: mutate(s, path, val)), table, tracks)
+
+
+# An ungated method's name is its writer's label: "x" is a valid one. Renaming it changes the sidecar's hash, which
+# the punches made with the old identity refuse ("punches made with the same segments but a failed-gate identity").
+sweep("identity sidecar", id_side, try_identity, valid={("method", "'x'")})
+bx_side = json.loads((run / "BOUT01.boxers.json").read_text(encoding="utf-8"))
+
+
+def try_boxers(path, val):
+    _k["n"] += 1
+    full_check(punch_variant(f"m{_k['n']}", side_edit=lambda s: mutate(s, path, val)))()
+
+
+sweep("boxers sidecar", bx_side, try_boxers)
+
+print("== an identity segment's edge is always a scan boundary ==")
+edge_names = glove_like_names(table)
+for r in np.flatnonzero((table.track_id == 1) & (table.frame >= 100) & (table.frame <= 102)).tolist():
+    edge_names[r] = boxers.UNSURE           # three frames inside A's track 1: shorter than the bridge
+edge = data / "EDGE" / "BOUT01.identity.csv"
+edge.parent.mkdir()
+boxers.write_identity(edge, table, tracks, boxers.segments_from_row_names(table, edge_names), "glove-colour", UNGATED)
+edge_id = boxers.read_identity(edge, table, tracks)
+check("the method's three unsure frames are never bridged back into A",
+      spans(boxers.scan_segments_of(table, edge_id, "A", bridge)) == [(0, 99, 1), (103, HANDOVER - 1, 1),
+                                                                       (HANDOVER, N - 1, 4)],
+      str(spans(boxers.scan_segments_of(table, edge_id, "A", bridge))))
+check("... and no A row of the scan lies in them", not any(
+    100 <= int(table.frame[r]) <= 102 for s in boxers.scan_segments_of(table, edge_id, "A", bridge) for r in s))
+eo = fresh("edgerun")
+rc = quiet(boxer_punches.main, punches_args(eo, idf=edge))
+rc2 = quiet(report_boxers.main, report_args(eo, eo / "BOUT01.boxers.csv", idf=edge))
+check("what the punch stage writes on it, the report stage accepts", rc == 0 and rc2 == 0)
+
+print("== outputs replace a planted link, never write through it ==")
+outside = tmp / "outside-root.txt"
+outside.write_text("must not change", encoding="utf-8")
+lo = fresh("linked")
+os.link(outside, lo / "BOUT01.boxers.csv")            # a hard link needs no privilege on NTFS
+try:
+    os.symlink(outside, lo / "BOUT01.A.summary.txt")
+    symlinked = True
+except OSError:
+    symlinked = False
+rc = quiet(boxer_punches.main, punches_args(lo))
+rc2 = quiet(report_boxers.main, report_args(lo, lo / "BOUT01.boxers.csv"))
+check("hard link planted at an output: the file outside is unchanged, the output is the real one",
+      rc == 0 and outside.read_text(encoding="utf-8") == "must not change"
+      and (lo / "BOUT01.boxers.csv").read_bytes() == box_csv.read_bytes())
+if symlinked:
+    check("symbolic link planted at an output: replaced, not followed",
+          rc2 == 0 and not (lo / "BOUT01.A.summary.txt").is_symlink()
+          and outside.read_text(encoding="utf-8") == "must not change")
+else:
+    print("  (symbolic links cannot be created without privilege here; the hard-link case covers the same write)")
+check("no temporary file is left beside the outputs", not any(p.name.endswith(".tmp") for p in lo.iterdir()))
+
+
+def boom(p):
+    p.write_bytes(b"half")
+    raise RuntimeError("disk full")
+
+
+try:
+    boxers.replace_file(lo / "BOUT01.unsure.csv", boom)
+except RuntimeError:
+    pass
+check("a failed write leaves the old output and no temporary file",
+      (lo / "BOUT01.unsure.csv").read_bytes() == (run / "BOUT01.unsure.csv").read_bytes()
+      and not any(p.name.endswith(".tmp") for p in lo.iterdir()))
 
 print("== participant data never leaves its folder ==")
 proot = data   # stands in for ~/comps-participant-data
