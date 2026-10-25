@@ -440,6 +440,49 @@ raises("an xy with 16 joints is refused",
        lambda: PoseTable.load(table_npz(tmp / "tj16.npz", xy=old_fields["xy"][:, :16])), "xy has shape")
 raises("a file that is not a zip is a ValueError",
        lambda: PoseTable.load((tmp / "tnot.npz").write_bytes(b"not a zip") and tmp / "tnot.npz"), "not a readable")
+
+# The zip's own directory is bounded before zipfile reads it (Astra review of #28: ZipFile
+# built one object per member, however many, before any cap).
+many = table_npz(tmp / "tmany.npz", **{f"pad{i:05d}": b"" for i in range(5000)})
+raises("a table padded with 5,000 empty members is refused from its end record",
+       lambda: PoseTable.load(many), "zip directory of 5,011 members")      # 11 old-format members + 5,000
+mb = peak_mb(lambda: PoseTable.load(many))
+check("... before zipfile builds the 5,000 entries (peak under 1 MB)", mb < 1, f"{mb:.2f} MB")
+good = table_npz(tmp / "tgood.npz")
+check("the member-by-member test table itself loads", PoseTable.load(good).n_frames == table.n_frames)
+z64 = bytearray(good.read_bytes())
+z64[-12:-10] = (0xFFFF).to_bytes(2, "little")      # end record: total entries -> the zip64 marker
+(tmp / "tz64.npz").write_bytes(bytes(z64))
+raises("an end record that defers to a zip64 directory is refused",
+       lambda: PoseTable.load(tmp / "tz64.npz"), "zip64 or multi-disk")
+with zipfile.ZipFile(tmp / "tcomment.npz", "w") as zf:
+    for k, v in old_fields.items():
+        zf.writestr(k + ".npy", npy_bytes(v))
+    zf.comment = b"np.savez never writes one"
+raises("an archive comment (end record not at the end) is not a readable table",
+       lambda: PoseTable.load(tmp / "tcomment.npz"), "not a readable")
+forged = bytearray(good.read_bytes())
+forged[-2:] = (1).to_bytes(2, "little")           # the end record claims a 1-byte comment that is not there
+(tmp / "tforged.npz").write_bytes(bytes(forged))
+raises("an end record claiming a comment is not a readable table (zipfile alone would accept it)",
+       lambda: PoseTable.load(tmp / "tforged.npz"), "not a readable")
+import warnings  # noqa: E402
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")                 # zipfile warns on the duplicate it is told to write
+    with zipfile.ZipFile(tmp / "tdup.npz", "w") as zf:
+        for k, v in old_fields.items():
+            zf.writestr(k + ".npy", npy_bytes(v))
+        zf.writestr("frame.npy", npy_bytes(old_fields["frame"]))
+raises("two members with one name are refused (which one is read would be zipfile's choice)",
+       lambda: PoseTable.load(tmp / "tdup.npz"), "each named once")
+saved_cap = pose_yolo.MAX_NPZ_MEMBERS
+pose_yolo.MAX_NPZ_MEMBERS = 5
+try:
+    raises("the member cap is read when the loader runs, not at import",
+           lambda: PoseTable.load(good), "at most 5 members")
+finally:
+    pose_yolo.MAX_NPZ_MEMBERS = saved_cap
+
 rt_src = dataclasses.replace(table, video_fp="ab" * 32)
 rt_src.save(tmp / "trt.npz")
 rt = PoseTable.load(tmp / "trt.npz")

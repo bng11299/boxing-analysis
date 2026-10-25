@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import struct
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -58,6 +59,11 @@ MAX_POSE_FRAMES = 2_000_000
 # ~880 MB at float64; it covers ~2.8 h of 50 fps footage with four people tracked.
 MAX_TABLE_ROWS = 2_000_000
 MAX_POSE_TEXT = 4096   # characters in `source` / `model`; a 'U' scalar's size is in its header
+# A pose file has at most 9 members and a tracks table 12; 32 leaves room without letting a file of
+# millions of empty members through. 64 KiB of central directory is ~1,400 entries at most.
+MAX_NPZ_MEMBERS = 32
+MAX_ZIP_DIRECTORY = 64 * 1024
+_EOCD = struct.Struct("<4s4H2LH")   # end-of-central-directory record, 22 bytes
 
 
 _FP = re.compile(r"[0-9a-f]{64}")
@@ -312,6 +318,35 @@ def _npy_header(member, key: str, name: str, kinds: "dict[str, str]" = _POSE_KIN
     return shape, fortran, dtype
 
 
+def _check_zip_directory(fh, name: str, what: str) -> None:
+    """Bound the zip's central directory BEFORE `zipfile.ZipFile` reads it: ZipFile reads
+    as many bytes as the end-of-central-directory record declares and builds one object
+    per entry, so a file of millions of tiny members costs memory no array cap sees.
+    np.savez writes the end record last, with no archive comment, no zip64 directory
+    (it needs > 65,535 members or > 2 GiB, far past the row caps) and one disk."""
+    size = os.fstat(fh.fileno()).st_size
+    if size < _EOCD.size:
+        raise zipfile.BadZipFile("too short to be a zip")
+    fh.seek(size - _EOCD.size)
+    (sig, disk, cd_disk, n_disk, n_total, cd_size, cd_offset,
+     comment) = _EOCD.unpack(fh.read(_EOCD.size))
+    if sig != b"PK\x05\x06" or comment:
+        raise zipfile.BadZipFile("no end-of-directory record at the end of the file")
+    zip64 = False
+    if size >= _EOCD.size + 20:
+        fh.seek(size - _EOCD.size - 20)
+        zip64 = fh.read(4) == b"PK\x06\x07"
+    if (zip64 or 0xFFFF in (n_disk, n_total) or 0xFFFFFFFF in (cd_size, cd_offset)
+            or disk or cd_disk or n_disk != n_total):
+        raise ValueError(f"{name}: zip64 or multi-disk directory; a {what} written by "
+                         f"np.savez has neither")
+    if n_total > MAX_NPZ_MEMBERS or cd_size > MAX_ZIP_DIRECTORY:
+        raise ValueError(f"{name}: zip directory of {n_total:,} members in {cd_size:,} bytes; "
+                         f"a {what} has at most {MAX_NPZ_MEMBERS} members in "
+                         f"{MAX_ZIP_DIRECTORY:,} bytes")
+    fh.seek(0)
+
+
 def _read_pose_npz(fh, name: str, kinds: "dict[str, str]" = _POSE_KINDS,
                    shapes=_pose_shapes, row_key: str = "detected",
                    cap: "int | None" = None, what: str = "pose file",
@@ -322,8 +357,13 @@ def _read_pose_npz(fh, name: str, kinds: "dict[str, str]" = _POSE_KINDS,
     it is a 0-d scalar), and `cap` (default MAX_POSE_FRAMES, read at call time) bounds
     the rows before anything is allocated."""
     cap = MAX_POSE_FRAMES if cap is None else cap
+    _check_zip_directory(fh, name, what)
     with zipfile.ZipFile(fh) as zf:
-        names = set(zf.namelist())
+        listed = zf.namelist()
+        if len(listed) > MAX_NPZ_MEMBERS or len(set(listed)) != len(listed):
+            raise ValueError(f"{name}: {len(listed)} zip members ({len(set(listed))} distinct names); "
+                             f"a {what} has at most {MAX_NPZ_MEMBERS}, each named once")
+        names = set(listed)
         missing = [k for k in kinds
                    if k + ".npy" not in names and k not in _POSE_OPTIONAL]
         if missing:
