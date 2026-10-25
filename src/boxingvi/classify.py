@@ -547,12 +547,20 @@ def clip_cut(track: Track, signal: np.ndarray, peaks: "list[tuple[int, int]]", r
     """
     if not peaks:
         return None
+    return cut_from_widths([peak_width(track, signal, peak, hand, rule["frac"]) for peak, hand in peaks], rule, geom)
+
+
+def cut_from_widths(widths: "list[tuple[float, bool]]", rule: dict, geom: WindowGeometry) -> "ClipCut | None":
+    """`clip_cut` from the punches' (peak width in seconds, cut off by the edge of the signal) pairs, however
+    they were measured. Two-boxer footage measures each width on the segment its punch is in (a punch is never
+    read across a fragment handover) and pools one boxer's punches into one cut, as a clip pools its own."""
+    if not widths:
+        return None
     per_width = rule["lead_widths"] + rule["tail_widths"]
     whole, cut_off = [], []
-    for peak, hand in peaks:
-        w, censored = peak_width(track, signal, peak, hand, rule["frac"])
+    for w, censored in widths:
         (cut_off if censored else whole).append(w * per_width)
-    if len(peaks) < MIN_CLIP_PUNCHES:
+    if len(widths) < MIN_CLIP_PUNCHES:
         # cut_window's window, as a span: its n_frames samples run (n_frames - 1) steps from first to
         # last, which is what length_s holds. geom.duration_s counts samples (n / fps), one step more:
         # using it read 10 frames at 24 fps where cut_window reads 9 (Codex on PR #14). The pipeline
@@ -563,7 +571,7 @@ def clip_cut(track: Track, signal: np.ndarray, peaks: "list[tuple[int, int]]", r
     length = float(np.median(use))
     cap = max_span_s(geom)
     return ClipCut(min(length, cap), rule["lead_widths"] / per_width, len(use),
-                   len(peaks) - len(use), bool(length > cap), "clip")
+                   len(widths) - len(use), bool(length > cap), "clip")
 
 
 def clip_window(peak_frame: int, cut: ClipCut, fps: float) -> "tuple[int, int]":

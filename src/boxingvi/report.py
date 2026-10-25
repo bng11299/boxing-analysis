@@ -719,7 +719,9 @@ def _check_result(hc: dict) -> str:
 
 
 def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict, text: str,
-                   fps: float, how_cut: str = "") -> None:
+                   fps: float, how_cut: str = "", extra: "tuple[tuple[str, list], ...]" = ()) -> None:
+    """`extra`: further (sheet name, rows) written after the four standard sheets, every cell through `_cell`
+    (the per-boxer report's Identity sheet). Without it the workbook is exactly the solo report's."""
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -780,4 +782,8 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
                  f"Benchmark = BoxingVI, held-out videos {'/'.join(bench['videos'])}; skeletons from AlphaPose, "
                  "not the YOLO11-pose used on your footage. Counts are estimates."):
         ws.append([_cell(line)])
+    for name, sheet_rows in extra:
+        ws = wb.create_sheet(_cell(name))
+        for r in sheet_rows:
+            ws.append([_cell(v) for v in r])
     wb.save(path)
