@@ -9,7 +9,7 @@ Syncthing brings a clip dropped into data/own on the desktop to this machine. Ev
 has neither results/ingest/X.pose.npz nor results/ingest/X.pose.failed:
 
 1. waits until Syncthing has finished with it: no Syncthing temporary file for it, its
-   size and modification time the same on two passes (so never on the first look), and
+   size and modification time the same on at least two passes (never on the first look), and
    unchanged for --settle seconds by this watcher's clock (not the file's mtime, which
    Syncthing copies from the source);
 2. runs run_ingest.py (YOLO11-pose against the PINNED weights hash, the same pin
@@ -52,6 +52,7 @@ DEFAULT_INGEST = run_ingest.DEFAULT_OUT                  # results/ingest, the s
 DEFAULT_STAGING = Path("results/.pose-staging")        # same drive, never synced
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".avi"}
 MAX_REASON = 500
+MAX_UNRECORDED = 3   # failures with no .failed written before a clip is left alone until restart
 
 
 def log(msg: str, logfile: "Path | None" = None) -> None:
@@ -115,7 +116,8 @@ def outputs(ingest: Path, stem: str) -> "tuple[Path, Path]":
 
 
 def same_device(a: Path, b: Path, stat=os.stat) -> bool:
-    """os.replace only renames within one volume: staging and ingest must share one."""
+    """os.replace only renames within one volume: staging and ingest must share one. (--src is only read, never
+    renamed from, so it may live anywhere.)"""
     return stat(a).st_dev == stat(b).st_dev
 
 
@@ -143,6 +145,7 @@ class Watcher:
         self.settle, self.predict, self.logfile, self.clock = settle, predict, logfile, clock
         self.seen: "dict[Path, tuple[tuple[int, int], float]]" = {}   # state, when first seen in it
         self.waiting_logged: "set[Path]" = set()
+        self.unrecorded: "dict[Path, int]" = {}   # failures whose .failed could not be written
 
     def log(self, msg: str) -> None:
         log(msg, self.logfile)
@@ -207,8 +210,11 @@ class Watcher:
                 write_atomic(failed, reason + "\n", self.staging)
                 self.log(f"{video.name}: pose FAILED ({reason}); delete {failed.name} to retry")
             except Exception as e2:
+                n = self.unrecorded[video] = self.unrecorded.get(video, 0) + 1
+                then = (f"left alone until the watcher restarts ({n} failures)" if n >= MAX_UNRECORDED
+                        else "will try again next pass")
                 self.log(f"{video.name}: pose FAILED ({reason}), and {failed.name} could not be written "
-                         f"({type(e2).__name__}: {e2}); will try again next pass")
+                         f"({type(e2).__name__}: {e2}); {then}")
             return False
         finally:
             if work is not None:
@@ -221,9 +227,10 @@ class Watcher:
         for gone in set(self.seen) - set(current):
             del self.seen[gone]
         self.waiting_logged &= set(current)
+        self.unrecorded = {v: n for v, n in self.unrecorded.items() if v in current}
         for video in current:
             npz, failed = outputs(self.ingest, video.stem)
-            if npz.exists() or failed.exists():
+            if npz.exists() or failed.exists() or self.unrecorded.get(video, 0) >= MAX_UNRECORDED:
                 self.seen.pop(video, None)
                 continue
             if not self.ready(video):

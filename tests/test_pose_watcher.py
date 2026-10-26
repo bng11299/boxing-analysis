@@ -250,6 +250,19 @@ finally:
 check("every rename into the ingest folder failing: the watcher survives, publishes and marks nothing",
       survived and rc == 0 and not any(ingest.iterdir()) and "could not be written" in out, out)
 check("... and leaves nothing in staging", list(staging.iterdir()) == [], str(list(staging.iterdir())))
+n0 = calls["n"]
+pose_watcher.os.replace = cross_device
+try:
+    for _ in range(4):
+        quiet(w.poll)
+    runs = calls["n"] - n0
+    rc, out, _ = quiet(w.poll)
+finally:
+    pose_watcher.os.replace = real_replace
+check(f"... but after {pose_watcher.MAX_UNRECORDED} unrecorded failures it stops re-running pose on that clip",
+      w.unrecorded.get(clip) == pose_watcher.MAX_UNRECORDED and calls["n"] - n0 == runs
+      and runs == (pose_watcher.MAX_UNRECORDED - 1) * N, f"{runs} predictor calls, {w.unrecorded}")
+w.unrecorded.clear()          # what a restart does
 rc, _, _ = twice(w)
 check("... so the clip is tried again once renames work", rc == 1 and (ingest / "IMG_9008.pose.npz").is_file())
 
