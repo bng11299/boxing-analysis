@@ -99,3 +99,20 @@ stays under `~/comps-participant-data/`, and the tools refuse any other output l
 of it goes to the repo, its `results/`, the vault, git, slides, the poster, Astra, ChatGPT or any cloud service.
 Tests use synthetic fixtures only. Reported numbers are counts and shares; no file name, frame or person
 appears anywhere.
+
+## Addendum 2026-10-26 -- no FAIL-CASE exists (written before any glove count, label or score on the study videos)
+**Why.** Brendan watched the three blurred copies on 2026-10-26 and reports that in all three the two boxers
+wear different-colour gloves. The FAIL-CASE role above assumed one same-colour video; there is none. Nothing
+has yet been computed from the videos except pose tracks (no glove counts, labels, freeze or score), so no
+number can have influenced this change.
+
+**What changes (Brendan's decision, 2026-10-26).**
+- **Roles:** DEV is still chosen by rule, now the video with the lexicographically smallest ORIGINAL SHA-256
+  of all three. The other two are both TEST (`test` = the smaller remaining hash, `test2` = the larger).
+  Each is scored once, after the freeze.
+- **PASS:** bars 1-3 must hold on EACH TEST video, separately (not pooled). Bar 4 (fails safe on FAIL-CASE)
+  is reported as **NOT TESTABLE**, never as met. A pass is reported as "bars 1-3 passed on two held-out videos;
+  bar 4 not testable", never as a full four-bar pass.
+- **What it can show:** two held-out videos of the same pair of boxers, in the same gym and light. That is
+  still not evidence that the method generalises. Safety on same-colour gloves is untested and goes to Future Work.
+- Everything else above is unchanged: ground truth, scoring, baselines, freeze, data rules.
