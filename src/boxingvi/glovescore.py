@@ -253,7 +253,31 @@ def status_counts(ms) -> dict:
 
 def gate_verdict(test: dict, fail_case: dict) -> dict:
     """The four PASS bars from two score results (each: {"methods": {"glove", "bytetrack", "linker"}, ...})."""
-    g, fc = test["methods"]["glove"], fail_case["methods"]["glove"]
+    v = _bars_123(test)
+    fc = fail_case["methods"]["glove"]
+    fc_scored = fc["scored"]
+    b4 = fc_scored > 0 and 10 * fc["wrong"] <= round(10 * BAR_FAILCASE_MAX_WRONG) * fc_scored
+    return {**v, "4_fails_safe": b4, "PASS": bool(v["1_accuracy"] and v["2_unsure"]
+                                                    and v["3_better_than_tracking"] and b4)}
+
+
+_BARS_123 = ("1_accuracy", "2_unsure", "3_better_than_tracking")
+
+
+def gate_verdict_two_tests(test: dict, test2: dict) -> dict:
+    """Addendum 2026-10-26: no FAIL-CASE video exists. Bars 1-3 must hold on EACH of two TEST videos, never
+    pooled; bar 4 is NOT TESTABLE (None), never counted as met."""
+    a, b = _bars_123(test), _bars_123(test2)
+    return {**{f"test_{k}": a[k] for k in _BARS_123}, **{f"test2_{k}": b[k] for k in _BARS_123},
+            "4_fails_safe": None, "4_note": "not testable: no same-colour video (addendum 2026-10-26)",
+            "test_baseline_best_correct_share": a["baseline_best_correct_share"],
+            "test2_baseline_best_correct_share": b["baseline_best_correct_share"],
+            "PASS": bool(all(a[k] for k in _BARS_123) and all(b[k] for k in _BARS_123)),
+            "PASS_means": "bars 1-3 on both held-out videos; bar 4 not testable"}
+
+
+def _bars_123(test: dict) -> dict:
+    g = test["methods"]["glove"]
     baselines_ran = all("error" not in test["methods"][b] for b in ("bytetrack", "linker"))
     base = max((test["methods"][b]["correct_share"] or 0.0) for b in ("bytetrack", "linker"))
     # the share bars compare whole counts (a share computed in floats misses its bar at exact equality:
@@ -266,7 +290,4 @@ def gate_verdict(test: dict, fail_case: dict) -> dict:
     spr = g["swaps_per_round"]
     b3 = (baselines_ran and spr is not None and spr <= BAR_MAX_SWAPS_PER_ROUND and sc > 0
           and cor / sc > base)
-    fc_scored = fc["scored"]
-    b4 = fc_scored > 0 and 10 * fc["wrong"] <= round(10 * BAR_FAILCASE_MAX_WRONG) * fc_scored
-    return {"1_accuracy": b1, "2_unsure": b2, "3_better_than_tracking": b3, "4_fails_safe": b4,
-            "baseline_best_correct_share": base, "PASS": bool(b1 and b2 and b3 and b4)}
+    return {"1_accuracy": b1, "2_unsure": b2, "3_better_than_tracking": b3, "baseline_best_correct_share": base}

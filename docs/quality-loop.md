@@ -3851,3 +3851,43 @@ suites and mutants above, all run here and reproduced in a fresh clone.
   glove 30 px away does not change; a face-sized mosaic over a glove is counted, not excluded; outside the
   masked frames the counts are unchanged; plus loader negatives and CLI refusals (no `--faceboxes`, another
   original, unmasked counts). **Mutants: 49 of 50 killed** (the 6 new ones all; the survivor is still the redundant majority). The full re-run found one more guard masked by a new one: the unregistered-video refusal was being made by the face-box frame-count check, so that test now passes matching face boxes and only registration can refuse it.
+
+### Iteration 5 -- review gate (Astra, on a fresh clone of `01ee446`): FIX FIRST, 1 blocker + 1 should-fix, both fixed
+- **Blocker: the face boxes were bound to the original, not to the detector run that drew the mosaics.** A file
+  made from the right original with another threshold or model passed every check and could omit large
+  squares the blur actually drew. **Fix:**
+  - `compute` now requires the blur report and checks that it is the report of THIS blurred video
+    (`output_sha256`);
+  - it checks the same original as the face boxes and the manifest role, the deface policy, and the padding
+    `det_region` assumes (`face_det_pad`);
+  - and, the content binding, on every sampled frame exactly as many boxes as the blur says it found
+    (`gloves.check_blur_report`).
+  - The producer moved from a scratch script into `glove_identity.py faceboxes`: it re-runs the blur's
+    detector on the original at the report's own threshold, and refuses to write unless its counts match the
+    report.
+  - **Measured on the three study files: all 9,589 sampled frames agree with the blur reports, zero
+    differences.**
+  - Residual: someone who deliberately swaps one large box for a fake small one in the same frame keeps the
+    counts; that is forgery, outside this threat model.
+- **Should-fix: a 0-d `frame` array crashed `FaceMasks.load` with a TypeError** (`len()` before the shape
+  check). Now refused first; tested.
+- **Environment:** the desktop's pose venv lacked `lap`, which ultralytics' ByteTrack imports. It installs `lap`
+  on first use only when online, never with `YOLO_OFFLINE=1`, so the first pose run on the study videos
+  stopped at frame 0, with nothing written. Brendan approved the install (`lap` 0.5.13, a pre-built wheel from
+  PyPI), now pinned in `requirements-pose.txt`. `check_env.py --pose` will now flag any other `lap` version,
+  e.g. one ultralytics put on the GPU laptop.
+- **Found while running pose:** `run_ingest.py` does not set `YOLO_OFFLINE` (the blur does), and its default
+  `--out-dir` is `results/ingest`, a Syncthing folder. For participant footage both were set by hand. A guard
+  in `run_ingest.py` is a follow-up, not in this PR.
+
+### Iteration 6 -- no FAIL-CASE video exists (gate addendum `60a3e29`, 2026-10-26)
+- Brendan watched all three blurred copies: every pair of boxers wears different-colour gloves. The addendum
+  (committed before any glove count, label or score) makes DEV the smallest original sha256 of all three, both
+  others TEST, bars 1-3 on EACH (never pooled), and bar 4 NOT TESTABLE (`None`, never `True`).
+- **Code:** `roles --fail-case none` writes a `glove-identity-manifest-2` (roles dev / test / test2). The
+  manifest loader accepts each format only with its own role set. `gate` takes `--test2` for format 2 and
+  refuses `--fail-case`, and the reverse for format 1. `glovescore._bars_123` is shared by both verdicts.
+  The format-1 path is unchanged.
+- **Tests:** 272 / 272 (17 new: verdict unit cases incl. never-pooled and a baseline that failed on one video;
+  roles none / 0 / NONE; gate flag-mode refusals both ways; three cross-format manifest refusals).
+  **Mutants: 3 of 3 killed** (bar 4 reported True; pooled `or` instead of `and`; roles not hash-ordered).

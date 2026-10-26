@@ -7,9 +7,11 @@ manifest are read. Nothing prints a file name; output is counts and shares.
   roles     --pair BLURRED.mp4 BLURRED.blur.json (x3) --fail-case K --out M.json
             fixes DEV / TEST / FAIL-CASE before any frame is read (K = which pair has same-colour gloves;
             DEV = the other pair with the smaller ORIGINAL sha256, from the blur report)
-  compute   --manifest M.json --video BLURRED.mp4 --tracks T.tracks.npz --faceboxes F.faceboxes.npz --out C.npz
-            (F: face boxes measured on the ORIGINAL with the blur's detector; reads under a very large
-            face mosaic are contested)
+  faceboxes --manifest M.json --original ORIGINAL.mp4 --blur-report BLURRED.blur.json --out F.faceboxes.npz
+            the blur's own face detections, re-made on the original at the report's threshold and checked
+            against the report's per-frame face counts
+  compute   --manifest M.json --video BLURRED.mp4 --tracks T.tracks.npz --faceboxes F.faceboxes.npz
+            --blur-report BLURRED.blur.json --out C.npz   (reads under a very large face mosaic are contested)
   template  --manifest M.json --tracks T.tracks.npz --out L.labels.csv      (Brendan fills it in)
   freeze    --manifest M.json            records the rule digest and commit; TEST / FAIL-CASE need it
   score     --manifest M.json --tracks T --counts C --labels L --out S.json   (TEST / FAIL-CASE once each)
@@ -37,11 +39,17 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from boxingvi import faceblur, gloves, glovescore  # noqa: E402
 from boxingvi.pose_yolo import PoseTable  # noqa: E402
-from boxingvi.video import fingerprint  # noqa: E402
+from boxingvi.video import fingerprint, iter_frames, probe  # noqa: E402
+
+import numpy as np  # noqa: E402
 
 MANIFEST_FORMAT = "glove-identity-manifest-1"
 SCORE_FORMAT = "glove-identity-score-1"
 ROLES = ("dev", "test", "fail_case")
+# Addendum 2026-10-26 (docs/gates/glove-identity.md): no same-colour video exists, so DEV + two TEST videos.
+MANIFEST_FORMAT_2 = "glove-identity-manifest-2"
+ROLES_2 = ("dev", "test", "test2")
+ROLE_SETS = {MANIFEST_FORMAT: ROLES, MANIFEST_FORMAT_2: ROLES_2}
 MAX_JSON_BYTES = 4 * 1024 * 1024
 # Everything the result depends on: the whole library (the rule imports appearance, headgear, linking, video,
 # npyread, faceblur, punchfind ...) and this file. The freeze pins all of it, not just the glove files.
@@ -152,13 +160,14 @@ def read_json(path, what: str) -> dict:
 
 def load_manifest(path) -> dict:
     m = read_json(path, "manifest")
-    if m.get("format") != MANIFEST_FORMAT or set(m) != {"format", "roles", "frozen", "scored"}:
+    if m.get("format") not in ROLE_SETS or set(m) != {"format", "roles", "frozen", "scored"}:
         raise Refused("manifest: not a glove-identity manifest")
+    want = ROLE_SETS[m["format"]]
     roles = m["roles"]
-    if not isinstance(roles, dict) or set(roles) != set(ROLES):
-        raise Refused("manifest: roles must be exactly dev, test and fail_case")
+    if not isinstance(roles, dict) or set(roles) != set(want):
+        raise Refused(f"manifest: roles must be exactly {', '.join(want)}")
     fps = set()
-    for r in ROLES:
+    for r in want:
         v = roles[r]
         if not isinstance(v, dict) or set(v) != {"source_sha256", "blurred_fp"} \
                 or not all(isinstance(v[k], str) and _FP.fullmatch(v[k]) for k in v):
@@ -172,16 +181,16 @@ def load_manifest(path) -> dict:
                            or not isinstance(fr["commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", fr["commit"])):
         raise Refused("manifest: frozen must be null or a rule digest and a commit")
     sc = m["scored"]
-    if not isinstance(sc, dict) or not set(sc) <= {"test", "fail_case"} \
+    if not isinstance(sc, dict) or not set(sc) <= set(want[1:]) \
             or not all(isinstance(v, str) and _FP.fullmatch(v) for v in sc.values()):
-        raise Refused("manifest: scored must map test / fail_case to the score file's sha256")
+        raise Refused("manifest: scored must map the held-out roles to the score file's sha256")
     return m
 
 
 def role_of(manifest: dict, table) -> str:
     if not table.video_fp:
         raise Refused("the pose table carries no video fingerprint: re-run run_ingest.py --track")
-    for r in ROLES:
+    for r in manifest["roles"]:
         if manifest["roles"][r]["blurred_fp"] == table.video_fp:
             return r
     raise Refused("this pose table is not of a video registered in the manifest (only blurred copies are read)")
@@ -220,8 +229,8 @@ def cmd_roles(a, ctx) -> int:
     out = out_path(a.out, ctx, (".json",))
     if len(a.pair) != 3:
         raise Refused("give exactly three --pair BLURRED.mp4 REPORT.blur.json")
-    if a.fail_case not in (1, 2, 3):
-        raise Refused("--fail-case must be 1, 2 or 3 (the pair whose boxers wear same-colour gloves)")
+    if a.fail_case not in ("1", "2", "3", "none"):
+        raise Refused("--fail-case must be 1, 2, 3 (the pair whose boxers wear same-colour gloves) or none")
     entries = []
     for i, (vid, rep) in enumerate(a.pair, 1):
         r = read_json(rep, f"blur report {i}")
@@ -233,12 +242,22 @@ def cmd_roles(a, ctx) -> int:
         entries.append({"source_sha256": src, "blurred_fp": fingerprint(vid)})
     if len({e["source_sha256"] for e in entries}) != 3:
         raise Refused("the three reports must come from three different original videos")
-    fail = entries[a.fail_case - 1]
-    rest = sorted((e for i, e in enumerate(entries, 1) if i != a.fail_case), key=lambda e: e["source_sha256"])
+    # Deliberate difference (addendum 2026-10-26): with no FAIL-CASE, DEV is picked from ALL THREE originals;
+    # with one, from the two that are not FAIL-CASE. Do not "unify" these.
+    if a.fail_case == "none":     # DEV = smallest original sha256, the other two TEST
+        order = sorted(entries, key=lambda e: e["source_sha256"])
+        write_json(out, {"format": MANIFEST_FORMAT_2, "roles": dict(zip(ROLES_2, order)),
+                         "frozen": None, "scored": {}})
+        print("roles fixed (no FAIL-CASE): " + ", ".join(f"{r} = pair {entries.index(e) + 1}"
+                                                         for r, e in zip(ROLES_2, order)))
+        return 0
+    k = int(a.fail_case)
+    fail = entries[k - 1]
+    rest = sorted((e for i, e in enumerate(entries, 1) if i != k), key=lambda e: e["source_sha256"])
     write_json(out, {"format": MANIFEST_FORMAT, "roles": {"dev": rest[0], "test": rest[1], "fail_case": fail},
                      "frozen": None, "scored": {}})
     print(f"roles fixed: dev = pair {entries.index(rest[0]) + 1}, test = pair {entries.index(rest[1]) + 1}, "
-          f"fail_case = pair {a.fail_case}")
+          f"fail_case = pair {k}")
     return 0
 
 
@@ -250,10 +269,14 @@ def cmd_compute(a, ctx) -> int:
     if fingerprint(a.video) != table.video_fp:
         raise Refused("the video is not the one this pose table was extracted from")
     stats: dict = {}
+    report = read_json(a.blur_report, "blur report")
+    if report.get("output_sha256") != sha256_file(Path(a.video)):
+        raise Refused("the blur report describes another blurred video than this one")
     try:
         masks = gloves.FaceMasks.load(a.faceboxes)
         if masks.source_sha256 != m["roles"][role]["source_sha256"]:
             raise Refused("the face boxes were measured on another original than this video's")
+        gloves.check_blur_report(masks, report)
         counts = gloves.compute_gloves(a.video, table, provenance=provenance(), masks=masks, stats=stats)
     except ValueError as e:
         raise Refused(str(e)) from e
@@ -261,6 +284,51 @@ def cmd_compute(a, ctx) -> int:
     print(f"glove reads: {len(counts.rows)} ({int(counts.contested.sum())} contested); under a very large "
           f"face mosaic (contested): {stats.get('under_large_square', 0)}; under any face mosaic (counted, "
           f"not excluded): {stats.get('under_any_face_mosaic', 0)}")
+    return 0
+
+
+def cmd_faceboxes(a, ctx) -> int:
+    """The face boxes of the blur's own detector run, re-made on the ORIGINAL at the threshold the blur report
+    records, on the frames the glove reader samples; checked against the blur's per-frame face counts before
+    anything is written."""
+    m = load_manifest(a.manifest)
+    out = out_path(a.out, ctx, (".npz",), a.overwrite)
+    report = read_json(a.blur_report, "blur report")
+    src = sha256_file(Path(a.original))
+    if report.get("source_sha256") != src:
+        raise Refused("the blur report was made from another original than this one")
+    if src not in {v["source_sha256"] for v in m["roles"].values()}:
+        raise Refused("this original is not one the manifest registers")
+    params = report.get("params") if isinstance(report.get("params"), dict) else {}
+    thresh, fps = params.get("face_thresh"), report.get("fps")
+    if isinstance(thresh, bool) or not isinstance(thresh, (int, float)) or not 0 < thresh < 1 \
+            or isinstance(fps, bool) or not isinstance(fps, (int, float)) or not fps > 0:
+        raise Refused("the blur report has no usable face threshold or frame rate")
+    detect = ctx.get("detect_faces") or faceblur.load_centerface(float(thresh))
+    info = probe(Path(a.original))
+    every = gloves.sample_every(float(fps))
+    rows, n = [], 0
+    for f, frame in enumerate(iter_frames(Path(a.original), info)):
+        n = f + 1
+        if f % every:
+            continue
+        try:
+            dets = faceblur.validate_face_dets(detect(frame), info.width, info.height)
+        except Exception as e:    # the blur itself whole-blurred such a frame; the boxes would not match it
+            raise Refused(f"the face detector failed on frame {f}: not written") from e
+        for b in dets.reshape(-1, 5):
+            rows.append((f, *b))
+    arr = np.array(rows, dtype=np.float64).reshape(-1, 6)
+    data = {"frame": arr[:, 0].astype(np.int64), "box": arr[:, 1:5].copy(), "score": arr[:, 5].copy(),
+            "width": np.array(info.width), "height": np.array(info.height), "every": np.array(every),
+            "n_frames": np.array(n), "source_sha256": np.array(src)}
+    masks = gloves.FaceMasks(data["frame"], data["box"], data["score"], info.width, info.height, every, n, src)
+    try:
+        gloves.check_blur_report(masks, report)
+    except ValueError as e:
+        raise Refused(f"{e}: not written") from e
+    write_atomic(out, lambda q: np.savez_compressed(q, **data), ".npz")
+    print(f"face boxes: {len(arr)} on {len(range(0, n, every))} sampled frames; counts match the blur report")
     return 0
 
 
@@ -430,7 +498,14 @@ def cmd_gate(a, ctx) -> int:
     m = load_manifest(a.manifest)
     m["_path"] = str(Path(a.manifest))
     out = out_path(a.out, ctx, (".json",), a.overwrite)
-    v = glovescore.gate_verdict(_score_file(a.test, "test", m), _score_file(a.fail_case, "fail_case", m))
+    if m["format"] == MANIFEST_FORMAT_2:
+        if a.fail_case is not None or a.test2 is None:
+            raise Refused("this manifest has no FAIL-CASE: give --test and --test2, not --fail-case")
+        v = glovescore.gate_verdict_two_tests(_score_file(a.test, "test", m), _score_file(a.test2, "test2", m))
+    else:
+        if a.fail_case is None or a.test2 is not None:
+            raise Refused("this manifest has a FAIL-CASE: give --test and --fail-case, not --test2")
+        v = glovescore.gate_verdict(_score_file(a.test, "test", m), _score_file(a.fail_case, "fail_case", m))
     write_json(out, v)
     for k, val in v.items():
         print(f"  {k}: {val}")
@@ -441,10 +516,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("roles")
     p.add_argument("--pair", nargs=2, action="append", type=Path, metavar=("BLURRED", "REPORT"), required=True)
-    p.add_argument("--fail-case", type=int, required=True)
+    p.add_argument("--fail-case", required=True, help="1, 2, 3, or none (addendum 2026-10-26)")
     p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("faceboxes")
+    for k in ("--manifest", "--original", "--blur-report", "--out"):
+        p.add_argument(k, type=Path, required=True)
+    p.add_argument("--overwrite", action="store_true")
     p = sub.add_parser("compute")
-    for k in ("--manifest", "--video", "--tracks", "--faceboxes", "--out"):
+    for k in ("--manifest", "--video", "--tracks", "--faceboxes", "--blur-report", "--out"):
         p.add_argument(k, type=Path, required=True)
     p.add_argument("--overwrite", action="store_true")
     p = sub.add_parser("template")
@@ -457,19 +536,22 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(k, type=Path, required=True)
     p.add_argument("--overwrite", action="store_true", help="DEV only")
     p = sub.add_parser("gate")
-    for k in ("--manifest", "--test", "--fail-case", "--out"):
+    for k in ("--manifest", "--test", "--out"):
         p.add_argument(k, type=Path, required=True)
+    p.add_argument("--fail-case", type=Path)
+    p.add_argument("--test2", type=Path)
     p.add_argument("--overwrite", action="store_true")
     return ap
 
 
 def main(argv=None, participant_root=None, syncthing_configs=None, git=None, same=None,
-         lock_timeout_s: float = 30.0) -> int:
+         lock_timeout_s: float = 30.0, detect_faces=None) -> int:
     a = build_parser().parse_args(argv)
     ctx = {"root": participant_root or faceblur.PARTICIPANT_ROOT, "syncthing": syncthing_configs,
-           "git": git or git_head, "git_same": same or git_same, "lock_timeout_s": lock_timeout_s}
+           "git": git or git_head, "git_same": same or git_same, "lock_timeout_s": lock_timeout_s,
+           "detect_faces": detect_faces}
     try:
-        return {"roles": cmd_roles, "compute": cmd_compute, "template": cmd_template, "freeze": cmd_freeze,
+        return {"roles": cmd_roles, "faceboxes": cmd_faceboxes, "compute": cmd_compute, "template": cmd_template, "freeze": cmd_freeze,
                 "score": cmd_score, "gate": cmd_gate}[a.cmd](a, ctx)
     except Refused as e:
         print(scrub(f"refused: {e}", argv), file=sys.stderr)

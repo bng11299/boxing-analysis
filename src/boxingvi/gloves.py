@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 
 from .appearance import hsv
-from .faceblur import det_region
+from .faceblur import FACE_DET_PAD, det_region
 from .npyread import read_header
 from .punchfind import MIN_CONF
 from .video import iter_frames
@@ -274,9 +274,10 @@ class FaceMasks:
             if src.dtype.kind != "U" or src.shape != () or not _FP.fullmatch(str(src)):
                 bad("source_sha256 must be a sha256 hex digest")
             fr, box, sc = z["frame"], z["box"], z["score"]
+            if fr.dtype != np.int64 or fr.ndim != 1:          # before len(): a 0-d array has no length
+                bad("frame must be a 1-D int64 array")
             m = len(fr)
-            if fr.dtype != np.int64 or fr.ndim != 1 or box.dtype != np.float64 or box.shape != (m, 4) \
-                    or sc.dtype != np.float64 or sc.shape != (m,):
+            if box.dtype != np.float64 or box.shape != (m, 4) or sc.dtype != np.float64 or sc.shape != (m,):
                 bad("frame, box and score must be int64 (n,), float64 (n, 4) and float64 (n,)")
             if m and ((fr < 0).any() or (fr >= n).any() or (fr % every != 0).any()):
                 bad("frames must be sampled frames inside the video")
@@ -292,6 +293,31 @@ class FaceMasks:
                 for c in iter(lambda: f.read(1 << 20), b""):
                     h_.update(c)
             return cls(fr.copy(), box.copy(), sc.copy(), w, h, every, n, str(src), h_.hexdigest())
+
+
+def check_blur_report(masks: FaceMasks, report: dict) -> None:
+    """The face boxes must be the detector run the blur actually used, not just boxes from the same original:
+    same original (sha256), the deface policy with the mosaic padding `det_region` assumes, the same frame
+    count, and on EVERY sampled frame exactly as many boxes as the blur says it found there. A run with
+    another threshold or model changes those counts somewhere."""
+    if not isinstance(report, dict):
+        raise ValueError("the blur report is not a JSON object")
+    if report.get("source_sha256") != masks.source_sha256:
+        raise ValueError("the blur report and the face boxes come from different originals")
+    if report.get("face_policy") != "deface":
+        raise ValueError("the blur did not use the deface policy: its mosaics are not the face boxes")
+    params = report.get("params")
+    if not isinstance(params, dict) or params.get("face_det_pad") != FACE_DET_PAD:
+        raise ValueError("the blur report's mosaic padding is not the one the glove rule assumes")
+    pf = report.get("per_frame")
+    faces = pf.get("faces") if isinstance(pf, dict) else None
+    if not isinstance(faces, list) or len(faces) != masks.n_frames \
+            or not all(isinstance(k, int) and not isinstance(k, bool) and k >= 0 for k in faces):
+        raise ValueError("the blur report's per-frame face counts are missing or cover another length")
+    got = np.bincount(masks.frame, minlength=masks.n_frames)
+    sampled = np.arange(0, masks.n_frames, masks.every)
+    if (got[sampled] != np.asarray(faces, dtype=np.int64)[sampled]).any():
+        raise ValueError("the face boxes are not the blur's own detections (box counts differ on sampled frames)")
 
 
 def _checked_npz(p: Path, keys: set, what: str):

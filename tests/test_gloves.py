@@ -355,6 +355,35 @@ for nm, kw, why in [("a box outside the frame", {"boxes": [(0, 300, 10, 330, 50,
 q = tmp / "mobj.npz"
 np.savez(q, **{k: np.array([None], dtype=object) for k in gloves.MASK_FORMAT_KEYS})
 raises("face boxes refused: object arrays (pickles)", lambda: gloves.FaceMasks.load(q), "not allowed")
+q = write_masks(tmp / "mscalar.npz", mbox, frame=np.array(0, dtype=np.int64))
+raises("face boxes refused: a 0-d frame array (a ValueError, not a TypeError crash)", lambda: gloves.FaceMasks.load(q), "1-D")
+
+
+def blur_report(masks, n=900, **over):
+    faces = np.bincount(masks.frame, minlength=n).tolist() if len(masks.frame) else [0] * n
+    r = {"source_sha256": masks.source_sha256, "output_sha256": "0" * 64, "face_policy": "deface", "fps": 30.0,
+         "params": {"face_thresh": 0.2, "face_det_pad": faceblur.FACE_DET_PAD}, "per_frame": {"faces": faces}}
+    r.update(over)
+    return r
+
+
+gloves.check_blur_report(fm, blur_report(fm))
+check("the blur's own per-frame face counts match these boxes", True)
+rb = blur_report(fm)
+rb["per_frame"]["faces"][early[2]] += 1
+raises("boxes from another detector run (one sampled frame's count differs) are refused",
+       lambda: gloves.check_blur_report(fm, rb), "not the blur's own")
+rb = blur_report(fm)
+rb["per_frame"]["faces"][1] += 3                      # frame 1 is not sampled: the boxes never covered it
+gloves.check_blur_report(fm, rb)
+check("an unsampled frame is not compared (the boxes only cover the sampled ones)", True)
+for nm, over, why in [("another original", {"source_sha256": "9" * 64}, "different originals"),
+                      ("the trust policy", {"face_policy": "trust"}, "deface"),
+                      ("another mosaic padding", {"params": {"face_thresh": 0.2, "face_det_pad": 1.5}}, "padding"),
+                      ("a per-frame list of another length", {"per_frame": {"faces": [0] * 899}}, "another length"),
+                      ("a negative count", {"per_frame": {"faces": [-1] * 900}}, "missing"),
+                      ("no per-frame counts", {"per_frame": None}, "missing")]:
+    raises(f"blur report refused: {nm}", lambda o=over: gloves.check_blur_report(fm, blur_report(fm, **o)), why)
 
 # ---- the rule --------------------------------------------------------------------------------
 print("identify: when it should and should not speak")
@@ -566,6 +595,20 @@ broken = {"methods": {"glove": good, "bytetrack": base, "linker": {"error": "no 
 v = glovescore.gate_verdict(broken, T(fc_ok))
 check("gate bar 3 not met when a baseline failed to run (never compared against zero)",
       v["3_better_than_tracking"] is False and not v["PASS"])
+# addendum 2026-10-26: no FAIL-CASE video; two TEST videos, each must pass bars 1-3, bar 4 not testable
+v = glovescore.gate_verdict_two_tests(T(good), T(good))
+check("two-TEST gate: bars 1-3 on both -> PASS, bar 4 reported None (never True)",
+      v["PASS"] is True and v["4_fails_safe"] is None and "not testable" in v["4_note"], str(v))
+for nm, a_, b_ in [("TEST fails bar 1", G(50, 40, 35), good), ("TEST2 fails bar 2", good, G(58, 40, 38)),
+                   ("TEST2 fails bar 3", good, G(50, 40, 38, 1.1))]:
+    v = glovescore.gate_verdict_two_tests(T(a_), T(b_))
+    check(f"two-TEST gate fails when {nm} (never pooled)", v["PASS"] is False, str(v))
+v = glovescore.gate_verdict_two_tests(T(G(100, 80, 80)), T(G(29, 29, 29)))
+check("two-TEST gate: a strong TEST does not carry a TEST2 under 30 decided", v["test2_1_accuracy"] is False
+      and v["PASS"] is False, str(v))
+v = glovescore.gate_verdict_two_tests(broken, T(good))
+check("two-TEST gate: bar 3 not met when a baseline failed on one video", v["test_3_better_than_tracking"] is False
+      and not v["PASS"])
 
 # ---- labels ---------------------------------------------------------------------------------
 print("label files")
@@ -710,13 +753,17 @@ man = proot / "m.json"
 
 
 FB_TEST = write_masks(tmp / "test-role.faceboxes.npz", [], source="3" * 64)   # pair 1 = the TEST role's original
+RP_TEST = tmp / "test-role.blur.json"
+RP_TEST.write_text(json.dumps(blur_report(gloves.FaceMasks.load(FB_TEST), output_sha256=glove_identity.sha256_file(clip))))
 
 
 def run(*argv, **kw):
-    """CLI call; `compute` gets the TEST role's (empty) face boxes unless the call names its own."""
+    """CLI call; `compute` gets the TEST role's (empty) face boxes and its blur report unless it names its own."""
     argv = [str(a) for a in argv]
     if argv and argv[0] == "compute" and "--faceboxes" not in argv:
         argv += ["--faceboxes", str(FB_TEST)]
+    if argv and argv[0] == "compute" and "--blur-report" not in argv:
+        argv += ["--blur-report", str(RP_TEST)]
     return glove_identity.main(argv, **{**ctx, **kw})
 
 
@@ -732,6 +779,15 @@ check("DEV = the non-fail pair with the smaller original sha256 (pair 2), TEST =
       m["roles"]["dev"]["source_sha256"] == "1" * 64 and m["roles"]["test"]["source_sha256"] == "3" * 64
       and m["roles"]["fail_case"]["source_sha256"] == "2" * 64)
 check("roles refused when the manifest exists", run("roles", *pairs, "--fail-case", "3", "--out", man) == 1)
+man2 = proot / "m2.json"
+check("roles refused with --fail-case 0", run("roles", *pairs, "--fail-case", "0", "--out", man2) == 1)
+check("roles refused with --fail-case NONE (exact word only)", run("roles", *pairs, "--fail-case", "NONE", "--out", man2) == 1)
+check("roles written with --fail-case none (addendum 2026-10-26)", run("roles", *pairs, "--fail-case", "none", "--out", man2) == 0)
+m2 = json.loads(man2.read_text())
+check("no FAIL-CASE: DEV = smallest original sha256 of all three, then test, test2 in hash order",
+      m2["format"] == glove_identity.MANIFEST_FORMAT_2 and set(m2["roles"]) == {"dev", "test", "test2"}
+      and [m2["roles"][r]["source_sha256"] for r in ("dev", "test", "test2")] == ["1" * 64, "2" * 64, "3" * 64])
+man2.unlink()
 
 fps_ = {i: video.fingerprint(v) for i, v in enumerate(vids)}
 no_masks = gloves.FaceMasks(np.zeros(0, np.int64), np.zeros((0, 4)), np.zeros(0), W, H, 3, 900, "1" * 64, "cd" * 32)
@@ -778,6 +834,18 @@ try:
     check("compute without --faceboxes is refused", False, "ran")
 except SystemExit as e:
     check("compute without --faceboxes is refused (argparse)", e.code == 2 and not (proot / "nofb.npz").exists())
+rp_bad = tmp / "other-video.blur.json"
+rp_bad.write_text(json.dumps(blur_report(gloves.FaceMasks.load(FB_TEST))))           # output_sha256 is not the clip's
+check("compute refused when the blur report describes another blurred video",
+      run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--blur-report", rp_bad,
+          "--out", proot / "badrep.npz") == 1 and not (proot / "badrep.npz").exists())
+rp_cnt = tmp / "other-run.blur.json"
+r_ = blur_report(gloves.FaceMasks.load(FB_TEST), output_sha256=glove_identity.sha256_file(clip))
+r_["per_frame"]["faces"][0] = 2
+rp_cnt.write_text(json.dumps(r_))
+check("compute refused when the face boxes are not the blur's own run (counts differ)",
+      run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--blur-report", rp_cnt,
+          "--out", proot / "badcnt.npz") == 1 and not (proot / "badcnt.npz").exists())
 wrong_src = write_masks(tmp / "other-original.faceboxes.npz", [], source="1" * 64)
 check("compute refused when the face boxes were measured on another original",
       run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--faceboxes", wrong_src,
@@ -791,6 +859,51 @@ os.link(outside, proot / "linked.gloves.npz")
 check("compute --overwrite onto a planted hard link replaces the entry, never writes through it",
       run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--out",
           proot / "linked.gloves.npz", "--overwrite") == 0 and outside.read_bytes() == b"keep me")
+print("faceboxes: the blur's own detections, re-made on the original")
+clip_sha = glove_identity.sha256_file(clip)
+man2 = proot / "m2.json"
+man2.write_text(json.dumps({"format": glove_identity.MANIFEST_FORMAT, "frozen": None, "scored": {},
+                            "roles": {"dev": {"source_sha256": clip_sha, "blurred_fp": "a1" * 32},
+                                      "test": {"source_sha256": "8" * 64, "blurred_fp": "a2" * 32},
+                                      "fail_case": {"source_sha256": "9" * 64, "blurred_fp": "a3" * 32}}}))
+
+
+def one_face(frame):
+    return np.array([[10.0, 10.0, 40.0, 50.0, 0.9]])
+
+
+def fb_report(faces, source=clip_sha):
+    q = tmp / f"fbrep-{len(list(tmp.glob('fbrep-*')))}.blur.json"
+    q.write_text(json.dumps({"source_sha256": source, "output_sha256": "0" * 64, "face_policy": "deface", "fps": 30.0,
+                             "params": {"face_thresh": 0.2, "face_det_pad": faceblur.FACE_DET_PAD},
+                             "per_frame": {"faces": faces}}))
+    return q
+
+
+fbr = lambda rep, out, **kw: run("faceboxes", "--manifest", man2, "--original", clip, "--blur-report", rep,  # noqa: E731
+                                 "--out", out, detect_faces=one_face, **kw)
+check("faceboxes: written when its counts match the blur report", fbr(fb_report([1] * 900), proot / "fb.npz") == 0)
+fbm = gloves.FaceMasks.load(proot / "fb.npz")
+check("faceboxes: sampled frames only, bound to the original", fbm.every == 3 and len(fbm.frame) == 300
+      and fbm.source_sha256 == clip_sha and fbm.n_frames == 900)
+check("faceboxes: refused, nothing written, when the counts differ from the blur's",
+      fbr(fb_report([0] * 900), proot / "fb2.npz") == 1 and not (proot / "fb2.npz").exists())
+check("faceboxes: refused when the report was made from another original",
+      fbr(fb_report([1] * 900, source="8" * 64), proot / "fb3.npz") == 1 and not (proot / "fb3.npz").exists())
+check("faceboxes: refused for an original the manifest does not register",
+      run("faceboxes", "--manifest", man, "--original", clip, "--blur-report", fb_report([1] * 900), "--out",
+          proot / "fb4.npz", detect_faces=one_face) == 1 and not (proot / "fb4.npz").exists())
+check("faceboxes: refused outside the participant root",
+      fbr(fb_report([1] * 900), tmp / "fb5.npz") == 1 and not (tmp / "fb5.npz").exists())
+
+
+def broken(frame):
+    raise RuntimeError("model error")
+
+
+check("faceboxes: a detector failure is a refusal, not a traceback, and nothing is written",
+      run("faceboxes", "--manifest", man2, "--original", clip, "--blur-report", fb_report([1] * 900), "--out",
+          proot / "fb6.npz", detect_faces=broken) == 1 and not (proot / "fb6.npz").exists())
 dec = GloveCounts.load(proot / "test.gloves.npz")
 check("counts written by compute carry this code's provenance", dec.provenance == glove_identity.provenance())
 idd = gloves.identify(tab["test"][0], dec)
@@ -963,6 +1076,25 @@ check("manifest refused: 100,000 levels of nesting (no RecursionError traceback)
 man.write_text("{not json")
 check("manifest refused: not JSON", run("template", "--manifest", man, "--tracks", tab["dev"][1],
                                         "--out", proot / "z.csv") == 1)
+man.write_text(json.dumps(mj))
+check("format-1 gate refused with --test2 added", run("gate", "--manifest", man, "--test", proot / "test.score.json",
+      "--fail-case", proot / "fail_case.score.json", "--test2", proot / "fail_case.score.json", "--out", proot / "g7.json") == 1)
+check("format-1 gate refused without --fail-case", run("gate", "--manifest", man, "--test", proot / "test.score.json",
+      "--out", proot / "g8.json") == 1)
+r2 = {"dev": mj["roles"]["dev"], "test": mj["roles"]["test"], "test2": mj["roles"]["fail_case"]}
+mj2 = {**mj, "format": glove_identity.MANIFEST_FORMAT_2, "roles": r2,
+       "scored": {"test": mj["scored"]["test"], "test2": mj["scored"]["fail_case"]}}
+man.write_text(json.dumps(mj2))
+check("format-2 gate refused with --fail-case", run("gate", "--manifest", man, "--test", proot / "test.score.json",
+      "--fail-case", proot / "fail_case.score.json", "--out", proot / "g9.json") == 1)
+check("format-2 gate refused when the TEST2 file is another role's score", run("gate", "--manifest", man, "--test",
+      proot / "test.score.json", "--test2", proot / "fail_case.score.json", "--out", proot / "g10.json") == 1)
+for nm, bad in [("format 2 with a fail_case role", {**mj2, "roles": mj["roles"]}),
+                ("format 1 with a test2 role", {**mj, "roles": r2, "scored": {}}),
+                ("format 2 scored for fail_case", {**mj2, "scored": {"fail_case": "a" * 64}})]:
+    man.write_text(json.dumps(bad))
+    check(f"manifest refused: {nm}", run("template", "--manifest", man, "--tracks", tab["dev"][1],
+                                         "--out", proot / "z.csv") == 1)
 
 print(f"\n{PASS} passed, {FAIL} failed")
 shutil.rmtree(tmp, ignore_errors=True)
