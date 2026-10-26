@@ -62,6 +62,10 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 7h | Mask cost: exposure removed; own-labelled punches hidden (min 1; min 2) | 8.7%, 104 of 2,407 (4.3%); 8.3%, 72 of 1,741 (4.1%) | C14 | same | body: 8.5%, 4.3%; log: 8.7% / 8.3%, 4.3% / 4.1% | #13, quality-loop | match (note 5) |
 | 7i | Sample rows still unexplained with skips (min-2 sample) | 29 of 40 (11 drop out) | C14 | `results/repro/olympic_completeness_credited_min2_sample_skipcheck.csv` | 29 of 40, 11 | #13 | match |
 | 8 | Face blur, own footage: frames with no face found | not re-run | C15 | — | 89 of 2,353 (3.8%); 843 of 2,659 (31.7%) | #21 | **not re-run: needs Brendan's OK** (note 6) |
+| 9a | Per-boxer path, Olympic, linker (#11) as the identity input (ungated): identity files written and read back through every check; finder punches identical to linked completeness | 29 of 29 videos both; 7,984 punches on A + B (= row 7c), 10,077 on credited fragments (= row 7d) | C16 | `results/repro/olympic_boxers.json` | new, 2026-10-25 | `feat/per-boxer-report` | **new** (note 9) |
+| 9b | Punches the linker identity leaves unassigned (on credited fragments in neither chain) | 3,772 of 11,756 found (32.1%) | C16 | same | new | `feat/per-boxer-report` | **new** (note 9) |
+| 9c | Labels with no owner among boxers A and B | 3,020 of 4,605 (65.6%): 2,182 credited to nobody, 838 to a fragment in neither chain; owned 1,585 of 2,423 credited (65.4%, = row 7b) | C16 | same | new | `feat/per-boxer-report` | **new** (note 9) |
+| 9d | Punches found per labelled punch: per boxer against its owned labels (conditional on the linker's identity); whole video; credited fragments | per boxer 5.04 (left 4.34, right 6.23; per boxer-video relative error median +4.32, IQR +3.31 to +5.53, 58 boxer-videos); whole video 2.55; credited fragments 4.16 | C16 | same | new | `feat/per-boxer-report` | **new: NOT a count error** (note 9) |
 
 **Suites:** all 18 green in a fresh `git clone` of main at `664a511` (no data present): analyse_clip
 113, blur 177, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99,
@@ -110,6 +114,17 @@ report 289, tracks 79, machine scripts 38.
    CPU shared with training). The Olympic attribution and linking files bind tracks by file name
    only (`video_bound: false`), as the tables predate fingerprints.
 
+9. **Rows 9a–9d (per-boxer report, 2026-10-25) measure the plumbing and the coverage, not identity.** The
+   Olympic labels name the target and the thrower's own hand only; nothing pins which boxer threw a punch
+   (`docs/quality/olympic-swap-rate.md`). So no ground-truth identity exists, no perfect-identity run can be
+   built, and the share of per-boxer count error that is identity error cannot be measured; an identity swap
+   moves punches and their owned labels together and is invisible to 9d. Punch types are not scored either:
+   the labels are not the six BoxingVI types and the stances are unknown, so 9a–9d run the finder only. 9d is
+   not the finder's count error: two thirds of the labels have no owner among A and B (9c), and the finder's
+   own over-count on V6 is 1.6 (row 3). Run on 2026-10-25 against the main checkout's
+   `results/punch_finder_v6.json` (the rule rows 7c/7d were made with: both reproduce exactly), not
+   `results/repro/`; the identity files went to the gitignored `results/olympic_boxers/`.
+
 ## Commands
 
 From the repo root, PowerShell, with the venv's `python`.
@@ -153,6 +168,8 @@ python olympic_framechange.py --data data/olympic --tracks T
 python olympic_completeness.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --credited --min-punches N --skips --out results/repro/olympic_completeness_credited[_min2]_skips.json --sample-out results/repro/olympic_completeness_credited[_min2]_skips_sample.csv
 python olympic_completeness.py ...same, with --skips-measure in place of --skips (they cannot be combined)... --out results/repro/olympic_completeness_credited[_min2]_skipsmeasure.json --sample-out results/repro/olympic_completeness_credited[_min2]_skipsmeasure_sample.csv
 python olympic_completeness.py ...same, --skips... --skipcheck results/repro/olympic_completeness_credited_min2_sample.csv --skipcheck-out results/repro/olympic_completeness_credited_min2_sample_skipcheck.csv
+# C16 per-boxer path on Olympic Boxing, linker identity (rows 9a-9d)
+python olympic_boxers.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --out results/repro/olympic_boxers.json --identity-dir results/repro/olympic_boxers
 # C15 face blur, own footage only (row 8; not run here, note 6); CLIP = IMG_4406, IMG_4395
 python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
 ```

@@ -42,13 +42,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+import boxer_punches  # noqa: E402
 import classify_punches  # noqa: E402
 import find_punches  # noqa: E402
 import render_punches  # noqa: E402
+import report_boxers  # noqa: E402
 import report_punches  # noqa: E402
 import run_ingest  # noqa: E402
-from boxingvi import classify, report  # noqa: E402
-from boxingvi.pose_yolo import PoseSequence, verify_binding  # noqa: E402
+from boxingvi import boxers, classify, report  # noqa: E402
+from boxingvi.pose_yolo import PoseSequence, PoseTable, verify_binding  # noqa: E402
 from boxingvi.video import VideoInfo, probe  # noqa: E402
 
 DEFAULT_OUT = Path("results/analyse")
@@ -66,6 +68,23 @@ _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 OUTPUTS = (("pose.npz", "pose"), ("punches.csv", "punches"), ("classified.csv", "classified"),
            ("classified.json", "provenance"), ("report.xlsx", "report"), ("summary.txt", "summary"),
            ("overlay.mp4", "overlay"))
+TWO_BOXER_OUTPUTS = (("boxers.csv", "punches A+B"), ("boxers.json", "provenance"), ("unsure.csv", "unassigned"),
+                     ("A.report.xlsx", "report A"), ("A.summary.txt", "summary A"),
+                     ("B.report.xlsx", "report B"), ("B.summary.txt", "summary B"))
+TWO_BOXER_DOC = """Two boxers, one report each (opt-in; the solo path above is unchanged).
+
+  python analyse_clip.py --two-boxer --video data/X.mp4 --tracks results/ingest/X.tracks.npz \\
+      --identity results/identity/X.identity.csv --stance-a orthodox --stance-b southpaw
+  ... --gate-result G.json      # required when the identity records a gate PASS
+
+The tracks file (run_ingest.py --track) and the identity file made from it (boxingvi.boxers, vault ADR-0016:
+which tracked person is boxer A, B or unsure, with the method's gate verdict) are inputs: they are checked
+against the video and against each other before any stage runs, and never rewritten. Then boxer_punches.py
+(each boxer's punches, found segment by segment and named with that boxer's stance) and report_boxers.py (one
+report per boxer, led by the identity method's verdict and the share of punches it could not assign). Outputs
+in --out-dir: X.boxers.csv, X.boxers.json, X.unsure.csv, X.A.report.xlsx, X.A.summary.txt and the same for B,
+published together only when every stage has passed. No overlay is drawn in this mode.
+"""
 
 
 class StageFailed(Exception):
@@ -205,14 +224,16 @@ def check_classified(csv_path: Path, a, clip: str, pose: PoseSequence) -> None:
         raise ValueError(f"{csv_path.name} was classified on another pose: {e}") from None
 
 
-def publish(staging: Path, out_dir: Path, clip: str, produced: "list[str]", keep: "set[str]") -> None:
+def publish(staging: Path, out_dir: Path, clip: str, produced: "list[str]", keep: "set[str]",
+            outputs=OUTPUTS) -> None:
     """Replace the previous run's outputs with this run's: move the old set aside into the
     staging folder, then move the new set in. Every step is a rename, so a file another
     program holds open (a report open in Excel) stops it, and then every move made so far
-    is undone: --out-dir is never left holding two runs mixed."""
+    is undone: --out-dir is never left holding two runs mixed. `outputs` is the mode's own
+    set (solo or two-boxer), so one mode never moves the other's files."""
     aside = staging / "previous"
     aside.mkdir()
-    old = [out_dir / f"{clip}.{suffix}" for suffix, _ in OUTPUTS if suffix not in keep]
+    old = [out_dir / f"{clip}.{suffix}" for suffix, _ in outputs if suffix not in keep]
     old = [p for p in old if p.exists() or p.is_symlink()]
     for p in old:
         if not (p.is_file() or p.is_symlink()):   # a folder with an output's name is not ours to move
@@ -240,7 +261,118 @@ def publish(staging: Path, out_dir: Path, clip: str, produced: "list[str]", keep
         done.append((src, dst))
 
 
+def check_tracks(table: PoseTable, info: VideoInfo, video: Path) -> None:
+    """The tracks file is this video's, whole: name and (when recorded) content fingerprint, length, rate, size."""
+    verify_binding(table, Path(video).resolve())
+    n = video_frames(info)
+    if table.n_frames != n:
+        raise ValueError(f"the tracks cover {table.n_frames} frames, the video has {n}: not the same video")
+    if abs(table.fps - info.fps) > 1e-6 or (table.width, table.height) != (info.width, info.height):
+        raise ValueError("the tracks were extracted at another frame rate or frame size than this video's")
+
+
+def preflight_two_boxer(a, info: VideoInfo) -> None:
+    """Everything the two-boxer stages need, read and checked before any of them runs: the solo preflight,
+    the tracks file against the video, and the identity file against the tracks (boxers.read_identity)."""
+    boxers.check_output_location((a.video, a.tracks, a.identity, a.gate_result), a.out_dir)
+    preflight(a)
+    table = PoseTable.load(a.tracks)
+    check_tracks(table, info, a.video)
+    boxers.read_identity(a.identity, table, a.tracks, a.gate_result)
+
+
+def main_two_boxer(argv) -> int:
+    """analyse_clip.py --two-boxer: one report per boxer (module docstring of boxer_punches.py and
+    report_boxers.py). Opt-in; the solo path is untouched by it."""
+    ap = argparse.ArgumentParser(prog="analyse_clip.py --two-boxer", description=TWO_BOXER_DOC,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
+    ap.add_argument("--two-boxer", action="store_true", required=True)
+    ap.add_argument("--video", type=Path, required=True)
+    ap.add_argument("--tracks", type=Path, required=True, help="the tracks file the identity was made from")
+    ap.add_argument("--identity", type=Path, required=True, help="<clip>.identity.csv, its .json beside it")
+    ap.add_argument("--gate-result", type=Path, help="the identity method's gate result (needed for a PASS)")
+    ap.add_argument("--stance-a", choices=sorted(classify.STANCES), required=True, help="never guessed")
+    ap.add_argument("--stance-b", choices=sorted(classify.STANCES), required=True, help="never guessed")
+    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--classifier", type=Path, default=DEFAULT_CLASSIFIER)
+    ap.add_argument("--rule", type=Path, default=find_punches.DEFAULT_RULE)
+    ap.add_argument("--extent", type=Path, default=classify_punches.DEFAULT_EXTENT)
+    ap.add_argument("--reference", type=Path, default=report_punches.DEFAULT_REFERENCE)
+    ap.add_argument("--rounds", help="round boundaries in seconds, e.g. 0-180,240-420")
+    a = ap.parse_args(argv)
+
+    clip = a.video.stem
+    if not _CLIP_NAME.fullmatch(clip):
+        ap.error(f"{a.video.name}: name the video with letters, digits, _ and - only (not starting with -), "
+                 "then one extension (every output is named <clip>.<what>)")
+    for p in (a.tracks, a.identity):
+        if boxers.clip_of(p) != clip:
+            ap.error(f"{p.name} does not name the clip {clip}")
+    try:
+        info = probe(a.video)
+        report.parse_rounds(a.rounds, video_frames(info) / info.fps)
+    except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        ap.error(str(e))
+    try:
+        tracks_sha = run_stage("preflight", _sha256, a.tracks)
+        identity_sha = _sha256(a.identity)
+        run_stage("preflight (tracks and identity)", preflight_two_boxer, a, info)
+    except (StageFailed, OSError) as e:
+        print(f"analyse_clip: {e}\nNothing was run or written.", file=sys.stderr)
+        return 1
+
+    out_dir = a.out_dir
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{clip}.", dir=out_dir))
+    except OSError as e:
+        print(f"analyse_clip: cannot write in {out_dir}: {e}", file=sys.stderr)
+        return 1
+    print(f"{clip}: two boxers; working in {staging}; outputs move to {out_dir} when every stage has passed")
+    staged = lambda suffix: staging / f"{clip}.{suffix}"  # noqa: E731
+    gate = [f"--gate-result={_abs(a.gate_result)}"] if a.gate_result else []
+    produced, keep_staging = [], False
+    try:
+        run_stage("boxer_punches", boxer_punches.main,
+                  ["--tracks", _abs(a.tracks), "--identity", _abs(a.identity), f"--stance-a={a.stance_a}",
+                   f"--stance-b={a.stance_b}", "--classifier", _abs(a.classifier), "--rule", _abs(a.rule),
+                   "--extent", _abs(a.extent), "--out-dir", _abs(staging)] + gate, is_main=True)
+        for suffix in ("boxers.csv", "boxers.json", "unsure.csv"):
+            _expect(staged(suffix), "boxer_punches")
+            produced.append(suffix)
+        run_stage("report_boxers", report_boxers.main,
+                  ["--tracks", _abs(a.tracks), "--boxers", _abs(staged("boxers.csv")), "--identity", _abs(a.identity),
+                   "--classifier", _abs(a.classifier), "--reference", _abs(a.reference), "--rule", _abs(a.rule),
+                   "--out-dir", _abs(staging)] + gate + ([f"--rounds={a.rounds}"] if a.rounds else []), is_main=True)
+        for suffix in ("A.report.xlsx", "A.summary.txt", "B.report.xlsx", "B.summary.txt"):
+            _expect(staged(suffix), "report_boxers")
+            produced.append(suffix)
+        run_stage("tracks unchanged", unchanged, a.tracks, tracks_sha)
+        run_stage("identity unchanged", unchanged, a.identity, identity_sha)
+        run_stage("publish", publish, staging, out_dir, clip, produced, set(), TWO_BOXER_OUTPUTS)
+    except StageFailed as e:
+        state = getattr(e, "state", "it was not changed")
+        print(f"\nanalyse_clip: stopped at {e}\nNo later stage ran. {out_dir}: {state}.", file=sys.stderr)
+        keep_staging = getattr(e, "keep", False)   # it holds the only copy of part of a run
+        return 1
+    finally:
+        if not keep_staging:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    lines = [f"\n==== {clip}: done (two boxers: A {a.stance_a}, B {a.stance_b}) ===="]
+    for suffix, label in TWO_BOXER_OUTPUTS:
+        p = out_dir / f"{clip}.{suffix}"
+        lines.append(f"  {label:<14} {p}  sha256 {_sha256(p)[:12]}")
+    for b in ("A", "B"):
+        lines += ["", (out_dir / f"{clip}.{b}.summary.txt").read_text(encoding="utf-8").strip()]
+    print("\n".join(lines))
+    return 0
+
+
 def main(argv=None, predict=None) -> int:
+    args = sys.argv[1:] if argv is None else list(argv)
+    if "--two-boxer" in args:
+        return main_two_boxer(args)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--video", type=Path, required=True)
     ap.add_argument("--stance", choices=sorted(classify.STANCES), required=True,
