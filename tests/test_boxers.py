@@ -353,6 +353,16 @@ check("the unassigned share counts the unsure punches against all found",
       texts["B"][:400])
 check("each report states that boxer's own count", f"the tool found {n_a} punches" in texts["A"]
       and f"the tool found {n_b} punches" in texts["B"])
+check("a boxer's report says 'this boxer's', never 'your', for the boxer's hand and rate",
+      all("your lead hand" not in t and "Your punch rate" not in t for t in texts.values())
+      and all("this boxer's lead hand" in t for t in texts.values() if "lead hand" in t), texts["A"][:600])
+check("each report also gives the rate over the time that boxer was identified",
+      all(f"a minute of the time boxer {b} was identified." in texts[b] for b in "AB"), texts["A"][:600])
+try:
+    report.summary(None, None, None, None, who="their")
+    check("summary refuses a possessive outside its fixed set", False)
+except ValueError:
+    check("summary refuses a possessive outside its fixed set", True)
 wb = load_workbook(run / "BOUT01.A.report.xlsx")
 check("the workbook has the solo sheets plus Identity", wb.sheetnames == ["Punches", "Rounds", "Reliability", "About",
                                                                           "Identity"])

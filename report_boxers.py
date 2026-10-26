@@ -39,9 +39,10 @@ DEFAULT_OUT = Path("results/reports")
 def boxer_text(boxer: str, identity, stats: dict, facts: dict, n_unsure: int, n_all: int, duration_s: float,
                fps: float, bench: dict, finder: dict) -> "tuple[str, list[str]]":
     """The header, then the solo summary of this boxer's punches; every number through the templates."""
-    head, n_head = boxers.header(boxer, identity.method, identity.verdict, n_unsure, n_all,
-                                 stats["identified_frames"] / fps, duration_s)
-    body, n_body = report.summary(facts, bench, finder, None)
+    identified_s = stats["identified_frames"] / fps
+    head, n_head = boxers.header(boxer, identity.method, identity.verdict, n_unsure, n_all, identified_s, duration_s)
+    body, n_body = report.summary(facts, bench, finder, None, who="this boxer's",
+                                  identified=(f"boxer {boxer}", identified_s / 60))
     text, numbers = head + " " + body, n_head + n_body
     if Counter(report.numbers_in(text)) != Counter(t for n in numbers for t in report.numbers_in(n)):
         raise RuntimeError("a number in the summary did not come from its templates")
