@@ -14,7 +14,12 @@ synthetic fixtures, BEFORE any study frame was read; DEV-only changes are record
      A forearm under MIN_FOREARM_PX or a disc wider than MAX_RADIUS_FRAC of the frame is not read.
   3. A read is CONTESTED when another person's confident wrist is within CONTEST_FACTOR x radius of the
      disc centre: two gloves together (a clinch, a parry, a glove on the other's glove) mix colours.
-     Contested reads are counted and never used.
+     A read whose disc centre lies under the mosaic of a VERY LARGE face box (taller than LARGE_FACE_PX; a
+     false detection the face blur mosaicked; Brendan 2026-10-25) is contested too: the mosaic is not the
+     glove's colour. The boxes come from the same detector on the original (`FaceMasks`), and the mosaic
+     rectangle is the blur's own (`faceblur.det_region`). LARGE_FACE_PX = 160 was read off the face-box
+     size distribution of the three study videos (real faces 40-100 px, the false large squares above
+     160), before any glove was read and with no label. Contested reads are counted and never used.
   4. Each disc pixel goes to exactly one of 16 classes in HSV: DARK (value < DARK_V; black clothes and
      shadow), SKIN (hue < SKIN_HUE_MAX with NEUTRAL_S <= saturation < SKIN_SAT_MAX), GREY / WHITE (saturation
      < NEUTRAL_S, split at WHITE_V), or one of 12 HUE bins of 30 degrees (bin 0 centred on red). Skin is
@@ -58,6 +63,7 @@ from pathlib import Path
 import numpy as np
 
 from .appearance import hsv
+from .faceblur import det_region
 from .npyread import read_header
 from .punchfind import MIN_CONF
 from .video import iter_frames
@@ -97,14 +103,16 @@ SMOOTH_S = 1.0
 SMOOTH_MIN_VOTES = 3
 SMOOTH_MAJORITY = 0.75
 SUPPORT_S = 0.3
+LARGE_FACE_PX = 160.0     # a face box taller than this is a false detection: its mosaic hides what is under it
 
 VERDICTS = ("separable", "not_separable", "too_few_rows", "too_few_copresent")
-FORMAT = "boxingvi-gloves-1"
+FORMAT = "boxingvi-gloves-2"
+MASK_FORMAT_KEYS = {"frame", "box", "score", "width", "height", "every", "n_frames", "source_sha256"}
 MAX_FILE_BYTES = 256 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 MAX_REGION_PX = 3840 * 2160
-_KEYS = {"format", "source", "video_fp", "table_sha256", "provenance", "meta", "rows", "hand", "bins", "n",
-         "contested"}
+_KEYS = {"format", "source", "video_fp", "table_sha256", "provenance", "mask_sha256", "meta", "rows", "hand",
+         "bins", "n", "contested"}
 _FP = re.compile(r"[0-9a-f]{64}")
 
 
@@ -114,7 +122,7 @@ def rule_constants() -> dict:
              "MAX_RADIUS_FRAC", "MIN_DISC_PX", "CONTEST_FACTOR", "DARK_V", "NEUTRAL_S", "WHITE_V",
              "SKIN_HUE_MAX", "SKIN_SAT_MAX", "HUE_BINS", "MIN_GLOVE_PX", "MIN_FIT_ROWS", "SEP_MIN",
              "MIN_CLUSTER_SHARE", "MARGIN_MIN", "COPRESENT_SPLIT_MIN", "MIN_COPRESENT_FRAMES", "KMEANS_ITERS",
-             "SMOOTH_S", "SMOOTH_MIN_VOTES", "SMOOTH_MAJORITY", "SUPPORT_S", "FORMAT")
+             "SMOOTH_S", "SMOOTH_MIN_VOTES", "SMOOTH_MAJORITY", "SUPPORT_S", "LARGE_FACE_PX", "FORMAT")
     g = globals()
     return {k: g[k] for k in names}
 
@@ -176,9 +184,15 @@ def disc_classes(frame: np.ndarray, disc):
     return pixel_classes(frame[y0:y1 + 1, x0:x1 + 1][m]), n
 
 
-def frame_reads(frame: np.ndarray, table, rows_here, read_rows):
+def _inside(rects, x: float, y: float) -> bool:
+    return any(r[0] <= x < r[2] and r[1] <= y < r[3] for r in rects)
+
+
+def frame_reads(frame: np.ndarray, table, rows_here, read_rows, blocked=(), mosaics=(), stats=None):
     """Glove reads of the rows in `read_rows` (a subset of `rows_here`, all rows of this frame):
-    a list of (row, hand, counts, n, contested)."""
+    a list of (row, hand, counts, n, contested). A read whose disc centre lies under a `blocked` rectangle
+    (the mosaic of a very large face box, Brendan 2026-10-25) is contested: the mosaic is not the glove's
+    colour. `mosaics` (every face mosaic) are only counted in `stats`, never excluded."""
     H, W = frame.shape[:2]
     wrists = {}
     for r in rows_here:
@@ -195,8 +209,124 @@ def frame_reads(frame: np.ndarray, table, rows_here, read_rows):
             cx, cy, rad = disc
             contested = any(math.hypot(p[0] - cx, p[1] - cy) <= CONTEST_FACTOR * rad
                             for o in rows_here if o != r for p in wrists[o])
-            out.append((r, hand, got[0], got[1], contested))
+            under_large = _inside(blocked, cx, cy)
+            if stats is not None:
+                stats["reads"] = stats.get("reads", 0) + 1
+                stats["under_large_square"] = stats.get("under_large_square", 0) + int(under_large)
+                stats["under_any_face_mosaic"] = stats.get("under_any_face_mosaic", 0) + int(_inside(mosaics, cx, cy))
+            out.append((r, hand, got[0], got[1], contested or under_large))
     return out
+
+
+# ---- the face mosaics of one video (measured on the ORIGINAL, the same detector as the blur) ------
+@dataclass(frozen=True)
+class FaceMasks:
+    """Face boxes per sampled frame of one video, from the detector the blur used, bound to the ORIGINAL by
+    its sha256. Every sampled frame was run, so a frame with no row simply had no face found."""
+
+    frame: np.ndarray
+    box: np.ndarray
+    score: np.ndarray
+    width: int
+    height: int
+    every: int
+    n_frames: int
+    source_sha256: str
+    file_sha256: str = ""
+
+    def check_table(self, table) -> None:
+        if (self.width, self.height) != (table.width, table.height):
+            raise ValueError("the face boxes are for a video of another size")
+        if self.n_frames != table.n_frames:
+            raise ValueError(f"the face boxes cover {self.n_frames} frames, the pose table {table.n_frames}")
+        if self.every != sample_every(table.fps):
+            raise ValueError("the face boxes were not measured on the frames the glove reader samples")
+
+    def regions(self, frame: int):
+        """(very large face mosaics, all face mosaics) of one frame, as the blur drew them (det_region)."""
+        sel = np.flatnonzero(self.frame == frame)
+        big, every_one = [], []
+        for i in sel.tolist():
+            r = det_region(self.box[i], self.width, self.height)
+            if r is None:
+                continue
+            every_one.append(r)
+            if self.box[i, 3] - self.box[i, 1] > LARGE_FACE_PX:
+                big.append(r)
+        return big, every_one
+
+    @classmethod
+    def load(cls, path) -> "FaceMasks":
+        """An INPUT file: size capped, zip directory and NPY headers read before any allocation, no pickles,
+        exactly the known arrays, boxes inside the frame, frames on the sampling grid, scores in [0, 1]."""
+        p = Path(path)
+
+        def bad(msg):
+            raise ValueError(f"{p.name}: {msg}")
+        z = _checked_npz(p, MASK_FORMAT_KEYS, "face boxes")
+        with z:
+            for k in ("width", "height", "every", "n_frames"):
+                a = z[k]
+                if a.dtype.kind != "i" or a.shape != () or int(a) < 1:
+                    bad(f"{k} must be one whole number >= 1")
+            w, h, every, n = (int(z[k]) for k in ("width", "height", "every", "n_frames"))
+            src = z["source_sha256"]
+            if src.dtype.kind != "U" or src.shape != () or not _FP.fullmatch(str(src)):
+                bad("source_sha256 must be a sha256 hex digest")
+            fr, box, sc = z["frame"], z["box"], z["score"]
+            m = len(fr)
+            if fr.dtype != np.int64 or fr.ndim != 1 or box.dtype != np.float64 or box.shape != (m, 4) \
+                    or sc.dtype != np.float64 or sc.shape != (m,):
+                bad("frame, box and score must be int64 (n,), float64 (n, 4) and float64 (n,)")
+            if m and ((fr < 0).any() or (fr >= n).any() or (fr % every != 0).any()):
+                bad("frames must be sampled frames inside the video")
+            if not (np.isfinite(box).all() and np.isfinite(sc).all()):
+                bad("boxes and scores must be finite")
+            if m and ((box[:, 0] < 0).any() or (box[:, 1] < 0).any() or (box[:, 2] > w).any()
+                      or (box[:, 3] > h).any() or (box[:, 2] <= box[:, 0]).any() or (box[:, 3] <= box[:, 1]).any()):
+                bad("a box lies outside the frame or is empty")
+            if ((sc < 0) | (sc > 1)).any():
+                bad("scores must lie in [0, 1]")
+            h_ = hashlib.sha256()
+            with open(p, "rb") as f:
+                for c in iter(lambda: f.read(1 << 20), b""):
+                    h_.update(c)
+            return cls(fr.copy(), box.copy(), sc.copy(), w, h, every, n, str(src), h_.hexdigest())
+
+
+def _checked_npz(p: Path, keys: set, what: str):
+    """np.load of an untrusted .npz after its size, its zip directory and every member's NPY header have
+    been checked (no pickles, no member declaring more data than it holds)."""
+    try:
+        size = p.stat().st_size
+    except OSError as e:
+        raise ValueError(f"{p.name}: cannot be read ({e.strerror})") from e
+    if size > MAX_FILE_BYTES:
+        raise ValueError(f"{p.name}: more than {MAX_FILE_BYTES} bytes")
+    try:
+        with zipfile.ZipFile(p) as zf:
+            info = zf.infolist()
+            if len(info) != len(keys) or {i.filename for i in info} != {k + ".npy" for k in keys}:
+                raise ValueError(f"{p.name}: not a {what} file (wrong arrays)")
+            if sum(i.file_size for i in info) > MAX_UNCOMPRESSED_BYTES:
+                raise ValueError(f"{p.name}: declares more than {MAX_UNCOMPRESSED_BYTES} bytes uncompressed")
+            for i in info:
+                with zf.open(i) as f:
+                    shape, _, dt = read_header(f, i.filename)
+                    if dt.hasobject or dt.kind not in "iUf":
+                        raise ValueError(f"{p.name}: {i.filename}: dtype {dt} is not allowed")
+                    if math.prod(shape) * dt.itemsize != i.file_size - f.tell():
+                        raise ValueError(f"{p.name}: {i.filename}: its header and its size disagree")
+    except (zipfile.BadZipFile, OSError, EOFError) as e:
+        raise ValueError(f"{p.name}: not a readable npz ({type(e).__name__})") from e
+    except ValueError as e:
+        if str(e).startswith(p.name):
+            raise
+        raise ValueError(f"{p.name}: not a readable npz ({e})") from e
+    try:
+        return np.load(p, allow_pickle=False)
+    except (ValueError, OSError) as e:
+        raise ValueError(f"{p.name}: not a readable npz") from e
 
 
 # ---- the counts of one video ------------------------------------------------------------
@@ -228,6 +358,7 @@ class GloveCounts:
     table_sha256: str
     video_fp: str = ""
     provenance: str = ""    # sha256 of the rule constants and the code that computed these counts ("" = unknown)
+    mask_sha256: str = ""   # sha256 of the face-box file that marked reads under very large mosaics ("" = none)
 
     def check_table(self, table) -> None:
         if self.source != table.source:
@@ -244,7 +375,7 @@ class GloveCounts:
     def save(self, path) -> None:
         np.savez_compressed(path, format=np.array(FORMAT), source=np.array(self.source),
                             video_fp=np.array(self.video_fp), table_sha256=np.array(self.table_sha256),
-                            provenance=np.array(self.provenance),
+                            provenance=np.array(self.provenance), mask_sha256=np.array(self.mask_sha256),
                             meta=np.array([self.n_frames, self.n_table_rows, self.every], dtype=np.int64),
                             rows=self.rows.astype(np.int64), hand=self.hand.astype(np.int64),
                             bins=self.bins.astype(np.int64), n=self.n.astype(np.int64),
@@ -291,7 +422,7 @@ class GloveCounts:
         except (ValueError, OSError) as e:
             raise ValueError(f"{p.name}: not a readable npz") from e
         with z:
-            for k in ("format", "source", "video_fp", "table_sha256", "provenance"):
+            for k in ("format", "source", "video_fp", "table_sha256", "provenance", "mask_sha256"):
                 if z[k].dtype.kind != "U" or z[k].shape != ():
                     bad(f"{k} must be one text value")
             if str(z["format"]) != FORMAT:
@@ -302,6 +433,9 @@ class GloveCounts:
             prov = str(z["provenance"])
             if prov and not _FP.fullmatch(prov):
                 bad("provenance must be empty or a sha256 hex digest")
+            msk = str(z["mask_sha256"])
+            if msk and not _FP.fullmatch(msk):
+                bad("mask_sha256 must be empty or a sha256 hex digest")
             if not _FP.fullmatch(str(z["table_sha256"])):
                 bad("table_sha256 must be a sha256 hex digest")
             meta = z["meta"]
@@ -332,13 +466,16 @@ class GloveCounts:
             if (bins.sum(axis=1) != n).any():
                 bad("counts are impossible (a read's classes do not add up to its pixels)")
             return cls(rows.copy(), hand.copy(), bins.copy(), n.copy(), con.copy(), str(z["source"]),
-                       int(meta[0]), int(meta[1]), int(meta[2]), str(z["table_sha256"]), fp, prov)
+                       int(meta[0]), int(meta[1]), int(meta[2]), str(z["table_sha256"]), fp, prov, msk)
 
 
-def compute_gloves(video, table, info=None, frames=None, provenance: str = "") -> GloveCounts:
+def compute_gloves(video, table, info=None, frames=None, provenance: str = "", masks: "FaceMasks | None" = None,
+                   stats: "dict | None" = None) -> GloveCounts:
     """Decode `video` once and read both gloves of every table row on a sampled frame. `frames` replaces
     the decoder with any iterator of (H, W, 3) uint8 frames (tests)."""
     every = sample_every(table.fps)
+    if masks is not None:
+        masks.check_table(table)
     by_frame: "dict[int, list]" = {}
     for r in range(len(table.frame)):
         by_frame.setdefault(int(table.frame[r]), []).append(r)
@@ -359,7 +496,8 @@ def compute_gloves(video, table, info=None, frames=None, provenance: str = "") -
                 or frame.shape[:2] != (table.height, table.width):
             raise ValueError(f"frame {i} is {frame.dtype} {frame.shape}, the table is {table.height}x{table.width}")
         rows = by_frame[i]
-        reads += frame_reads(frame, table, rows, rows)
+        big, every_one = masks.regions(i) if masks is not None else ((), ())
+        reads += frame_reads(frame, table, rows, rows, big, every_one, stats)
     if seen < last + 1:
         raise ValueError(f"the video ended after {seen} frames, the pose table has rows up to frame {last}: "
                          "it was extracted from a different video")
@@ -370,7 +508,7 @@ def compute_gloves(video, table, info=None, frames=None, provenance: str = "") -
                        np.array([x[3] for x in reads], dtype=np.int64),
                        np.array([int(x[4]) for x in reads], dtype=np.int64),
                        table.source, table.n_frames, len(table.frame), every, table_digest(table, every),
-                       table.video_fp, provenance)
+                       table.video_fp, provenance, masks.file_sha256 if masks is not None else "")
 
 
 # ---- the per-video model ------------------------------------------------------------------

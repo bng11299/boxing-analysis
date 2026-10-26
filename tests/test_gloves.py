@@ -216,6 +216,7 @@ check("check_table accepts its own table", True)
 def variant(name, **over):
     base = {"format": np.array(gloves.FORMAT), "source": np.array(cnt.source), "video_fp": np.array(cnt.video_fp),
             "table_sha256": np.array(cnt.table_sha256), "provenance": np.array(cnt.provenance),
+            "mask_sha256": np.array(cnt.mask_sha256),
             "meta": np.array([cnt.n_frames, cnt.n_table_rows, cnt.every], dtype=np.int64),
             "rows": cnt.rows, "hand": cnt.hand, "bins": cnt.bins, "n": cnt.n, "contested": cnt.contested}
     base.update(over)
@@ -274,6 +275,86 @@ check("provenance survives save -> load", GloveCounts.load(
     (lambda q: (gloves.GloveCounts(**{**cnt.__dict__, "provenance": "cd" * 32}).save(q), q)[1])(tmp / "prov.npz")
 ).provenance == "cd" * 32)
 raises("counts refused: provenance not a digest", lambda: GloveCounts.load(variant("prov_bad.npz", provenance=np.array("x"))), "provenance")
+raises("counts refused: mask_sha256 not a digest", lambda: GloveCounts.load(variant("mask_bad.npz", mask_sha256=np.array("x"))), "mask_sha256")
+raises("counts refused: the format before the mask (gloves-1)", lambda: GloveCounts.load(variant("v1.npz", format=np.array("boxingvi-gloves-1"))), "unknown format")
+
+# ---- face mosaics: reads under a very large square are contested ----------------------------------
+print("face mosaics (Brendan 2026-10-25: a very large square hides the glove)")
+
+
+def write_masks(path, boxes, n=900, every=3, source="3" * 64, w=W, h=H, **over):
+    """boxes: list of (frame, x0, y0, x1, y1, score)."""
+    a = np.array(boxes, dtype=np.float64).reshape(-1, 6)
+    d = {"frame": a[:, 0].astype(np.int64), "box": a[:, 1:5], "score": a[:, 5], "width": np.array(w),
+         "height": np.array(h), "every": np.array(every), "n_frames": np.array(n), "source_sha256": np.array(source)}
+    d.update(over)
+    np.savez_compressed(path, **{k: v for k, v in d.items() if v is not None})
+    return path
+
+
+def ax_of(f, n=900):
+    return 90 + 140 * f / (n - 1)
+
+
+def bx_of(f, n=900):
+    return 230 - 140 * f / (n - 1)
+
+
+early = [f for f in range(0, 31) if f % 3 == 0]
+mbox = []
+for f in early:
+    gx = ax_of(f) + 55                         # A's right glove: a narrow, very tall false face box over it
+    mbox.append((f, gx - 10, 10, gx + 10, 210, 0.3))
+    gb = bx_of(f) + 55                         # B's right glove: a face-sized box (100 px) over it
+    mbox.append((f, gb - 10, 60, gb + 10, 160, 0.6))
+mp_ = write_masks(tmp / "m1.faceboxes.npz", mbox)
+fm = gloves.FaceMasks.load(mp_)
+check("face boxes load, bound to their original and hashed", fm.source_sha256 == "3" * 64 and len(fm.file_sha256) == 64)
+st = {}
+cm = gloves.compute_gloves(None, table, frames=frames(), masks=fm, stats=st)
+fr_m = table.frame[cm.rows]
+who_m = truth[cm.rows]
+in_early = np.isin(fr_m, early)
+a_right = in_early & (who_m == "A") & (cm.hand == 1)
+b_left = in_early & (who_m == "B") & (cm.hand == 0)
+b_right = in_early & (who_m == "B") & (cm.hand == 1)
+check("A's right glove under the very large square: every read contested",
+      a_right.any() and bool(cm.contested[a_right].all()), str(int(a_right.sum())))
+check("B's left glove, 30 px away from that square: not contested", b_left.any() and not cm.contested[b_left].any())
+check("B's right glove under a FACE-SIZED mosaic: not contested (the rule is very large squares only)",
+      b_right.any() and not cm.contested[b_right].any())
+check("... but counted: reads under any face mosaic >= those under B's face-sized box",
+      st.get("under_any_face_mosaic", 0) >= int(b_right.sum()) + int(a_right.sum())
+      and st.get("under_large_square", 0) == int(a_right.sum()), str(st))
+check("outside those frames the masks change nothing", np.array_equal(cm.contested[~in_early], cnt.contested[~np.isin(table.frame[cnt.rows], early)])
+      and len(cm.rows) == len(cnt.rows))
+check("counts record the mask file's sha256", cm.mask_sha256 == fm.file_sha256)
+p2 = tmp / "masked.gloves.npz"
+cm.save(p2)
+check("mask_sha256 survives save -> load", GloveCounts.load(p2).mask_sha256 == fm.file_sha256)
+raises("masks of another size are refused", lambda: gloves.FaceMasks.load(write_masks(tmp / "m2.npz", mbox, w=640, h=480)).check_table(table), "size")
+raises("masks of another length are refused", lambda: gloves.FaceMasks.load(write_masks(tmp / "m3.npz", mbox, n=901)).check_table(table), "frames")
+raises("masks measured on other frames than the glove reader samples are refused",
+       lambda: gloves.FaceMasks.load(write_masks(tmp / "m4.npz", [(0, 1, 1, 5, 5, 0.5)], every=5)).check_table(table), "samples")
+for nm, kw, why in [("a box outside the frame", {"boxes": [(0, 300, 10, 330, 50, 0.5)]}, "outside"),
+                    ("an empty box", {"boxes": [(0, 30, 10, 30, 50, 0.5)]}, "outside"),
+                    ("a frame off the sampling grid", {"boxes": [(4, 1, 1, 5, 5, 0.5)]}, "sampled"),
+                    ("a frame beyond the video", {"boxes": [(903, 1, 1, 5, 5, 0.5)]}, "sampled"),
+                    ("a score of 2", {"boxes": [(0, 1, 1, 5, 5, 2.0)]}, "scores"),
+                    ("a NaN box", {"boxes": [(0, np.nan, 1, 5, 5, 0.5)]}, "finite"),
+                    ("a source that is not a digest", {"boxes": mbox, "source": "abc"}, "sha256"),
+                    ("every 0", {"boxes": mbox, "every": 0}, "whole number"),
+                    ("a missing array", {"boxes": mbox, "score": None}, "wrong arrays")]:
+    bx_ = kw.pop("boxes")
+    q = tmp / f"mbad_{nm.replace(' ', '_')}.npz"
+    if "score" in kw:
+        write_masks(q, bx_, **kw)
+    else:
+        write_masks(q, bx_, **kw)
+    raises(f"face boxes refused: {nm}", lambda q=q: gloves.FaceMasks.load(q), why)
+q = tmp / "mobj.npz"
+np.savez(q, **{k: np.array([None], dtype=object) for k in gloves.MASK_FORMAT_KEYS})
+raises("face boxes refused: object arrays (pickles)", lambda: gloves.FaceMasks.load(q), "not allowed")
 
 # ---- the rule --------------------------------------------------------------------------------
 print("identify: when it should and should not speak")
@@ -628,8 +709,15 @@ for i, (v, src) in enumerate(zip(vids, ("3" * 64, "1" * 64, "2" * 64)), 1):
 man = proot / "m.json"
 
 
+FB_TEST = write_masks(tmp / "test-role.faceboxes.npz", [], source="3" * 64)   # pair 1 = the TEST role's original
+
+
 def run(*argv, **kw):
-    return glove_identity.main([str(a) for a in argv], **{**ctx, **kw})
+    """CLI call; `compute` gets the TEST role's (empty) face boxes unless the call names its own."""
+    argv = [str(a) for a in argv]
+    if argv and argv[0] == "compute" and "--faceboxes" not in argv:
+        argv += ["--faceboxes", str(FB_TEST)]
+    return glove_identity.main(argv, **{**ctx, **kw})
 
 
 pairs = sum((["--pair", v, r] for v, r in zip(vids, reports)), [])
@@ -646,13 +734,14 @@ check("DEV = the non-fail pair with the smaller original sha256 (pair 2), TEST =
 check("roles refused when the manifest exists", run("roles", *pairs, "--fail-case", "3", "--out", man) == 1)
 
 fps_ = {i: video.fingerprint(v) for i, v in enumerate(vids)}
+no_masks = gloves.FaceMasks(np.zeros(0, np.int64), np.zeros((0, 4)), np.zeros(0), W, H, 3, 900, "1" * 64, "cd" * 32)
 tab = {}
 for i, role in ((1, "dev"), (0, "test"), (2, "fail_case")):
     t_, f_, _ = scene(ga=(RED, RED), gb=(BLUE, BLUE) if role != "fail_case" else (RED, RED))
     t_ = PoseTable(**{**t_.__dict__, "video_fp": fps_[i]})
     tp_ = tmp / f"{role}.tracks.npz"
     t_.save(tp_)
-    c_ = gloves.compute_gloves(None, t_, frames=f_(), provenance=glove_identity.provenance())
+    c_ = gloves.compute_gloves(None, t_, frames=f_(), provenance=glove_identity.provenance(), masks=no_masks)
     cp_ = tmp / f"{role}.gloves.npz"
     c_.save(cp_)
     tab[role] = (t_, tp_, cp_)
@@ -664,9 +753,10 @@ with video.VideoWriter(clip2, W, H, Fraction(30), private=True) as vw:
     for fr in small_frames():
         vw.write(fr)
 PoseTable(**{**small.__dict__, "video_fp": video.fingerprint(clip2)}).save(tmp / "unregistered.tracks.npz")
-check("compute refused for an unregistered video, even with its own matching table", run(
+fb60 = write_masks(tmp / "unregistered.faceboxes.npz", [], n=60, source="3" * 64)
+check("compute refused for an unregistered video, even with its own matching table and face boxes", run(
     "compute", "--manifest", man, "--video", clip2, "--tracks", tmp / "unregistered.tracks.npz",
-    "--out", proot / "c.npz") == 1 and not (proot / "c.npz").exists())
+    "--faceboxes", fb60, "--out", proot / "c.npz") == 1 and not (proot / "c.npz").exists())
 check("template refused for a table of an unregistered video", run(
     "template", "--manifest", man, "--tracks", tmp / "unregistered.tracks.npz", "--out", proot / "u.csv") == 1)
 check("compute refused outside the root", run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1],
@@ -682,6 +772,16 @@ finally:
     sys.stderr = real_err
 check("a missing video is refused without a traceback and without printing its path or name",
       rc == 1 and "Firstname" not in err.getvalue() and str(tmp) not in err.getvalue(), err.getvalue())
+try:
+    glove_identity.main(["compute", "--manifest", str(man), "--video", str(clip), "--tracks", str(tab["test"][1]),
+                         "--out", str(proot / "nofb.npz")], **ctx)
+    check("compute without --faceboxes is refused", False, "ran")
+except SystemExit as e:
+    check("compute without --faceboxes is refused (argparse)", e.code == 2 and not (proot / "nofb.npz").exists())
+wrong_src = write_masks(tmp / "other-original.faceboxes.npz", [], source="1" * 64)
+check("compute refused when the face boxes were measured on another original",
+      run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--faceboxes", wrong_src,
+          "--out", proot / "wrongfb.npz") == 1 and not (proot / "wrongfb.npz").exists())
 check("compute through ffmpeg decode", run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1],
                                            "--out", proot / "test.gloves.npz") == 0)
 outside = tmp / "outside-shared.npz"
@@ -733,6 +833,11 @@ gloves.GloveCounts(**{**old.__dict__, "provenance": ""}).save(stale)
 check("counts without this code's provenance are refused (computed by another rule or version)", run(
     "score", "--manifest", man, "--tracks", tab["dev"][1], "--counts", stale, "--labels",
     proot / "dev.labels.csv", "--out", proot / "stale.score.json") == 1)
+unmasked = tmp / "dev.unmasked.gloves.npz"
+gloves.GloveCounts(**{**old.__dict__, "mask_sha256": ""}).save(unmasked)
+check("counts computed without the face-mosaic mask are refused at score", run(
+    "score", "--manifest", man, "--tracks", tab["dev"][1], "--counts", unmasked, "--labels",
+    proot / "dev.labels.csv", "--out", proot / "unmasked.score.json") == 1)
 nm_labels = tmp / "Firstname-Lastname-sparring.labels.csv"
 nm_labels.write_text("", encoding="utf-8")
 err = io.StringIO()

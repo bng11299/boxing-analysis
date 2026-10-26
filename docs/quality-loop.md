@@ -3829,3 +3829,25 @@ suites and mutants above, all run here and reproduced in a fresh clone.
     named as the lender for up to 0.3 s.
   - Every constant is a first-principles guess, untested on any real glove. **No study frame has been read**,
     and the gate is not evaluated until Hector rules (vault ISSUES-LOG O65).
+
+### Iteration 4 -- the very-large-square rule (Brendan, 2026-10-25), after the face blur of the study videos
+- **Why.** The face blur (pure deface) left large false face squares on the study videos (video 1: 5.4% of frames,
+  mid-frame, over bodies and gloves; measured as face-box sizes only, vault ISSUES-LOG O65). Brendan accepted
+  the blur residual, and decided that glove reading treats those squares as unreadable.
+- **Rule.** A glove read whose disc centre lies under the mosaic of a face box taller than `LARGE_FACE_PX` = 160
+  px is contested. The boxes come from the blur's own detector on the ORIGINAL video (`FaceMasks`, every sampled
+  frame), and the mosaic rectangle is the blur's own `faceblur.det_region`. Face-sized mosaics are counted
+  (`under_any_face_mosaic`) but NOT excluded, per the decision. **Disclosed:** 160 px was read off the face-box
+  size distribution of all three study videos, TEST and FAIL-CASE included (real faces 40-100 px, the false
+  large squares above 160). That is a property of the face detector, read before any glove pixel and with no
+  label or glove result, so it is not tuning on TEST; it is still recorded here.
+- **Binding.** The face-box file is an input: size-capped, zip and NPY headers checked before allocation, exact
+  keys and dtypes, boxes inside the frame, frames on the glove sampler's grid, scores in [0, 1], and bound to
+  its ORIGINAL by sha256. `compute` requires it and checks that sha against the manifest role's original. The
+  three study files were bound after the fact by hashing the originals in the same sorted order, each
+  matching its blur report's `source_sha256`. Counts record the mask file's sha256 (counts format
+  `boxingvi-gloves-2`), and `score` refuses counts made without a mask.
+- **Test:** 236 / 236. A very tall box over one glove makes exactly that glove's reads contested; the other boxer's
+  glove 30 px away does not change; a face-sized mosaic over a glove is counted, not excluded; outside the
+  masked frames the counts are unchanged; plus loader negatives and CLI refusals (no `--faceboxes`, another
+  original, unmasked counts). **Mutants: 49 of 50 killed** (the 6 new ones all; the survivor is still the redundant majority). The full re-run found one more guard masked by a new one: the unregistered-video refusal was being made by the face-box frame-count check, so that test now passes matching face boxes and only registration can refuse it.

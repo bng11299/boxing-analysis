@@ -7,7 +7,9 @@ manifest are read. Nothing prints a file name; output is counts and shares.
   roles     --pair BLURRED.mp4 BLURRED.blur.json (x3) --fail-case K --out M.json
             fixes DEV / TEST / FAIL-CASE before any frame is read (K = which pair has same-colour gloves;
             DEV = the other pair with the smaller ORIGINAL sha256, from the blur report)
-  compute   --manifest M.json --video BLURRED.mp4 --tracks T.tracks.npz --out C.gloves.npz
+  compute   --manifest M.json --video BLURRED.mp4 --tracks T.tracks.npz --faceboxes F.faceboxes.npz --out C.npz
+            (F: face boxes measured on the ORIGINAL with the blur's detector; reads under a very large
+            face mosaic are contested)
   template  --manifest M.json --tracks T.tracks.npz --out L.labels.csv      (Brendan fills it in)
   freeze    --manifest M.json            records the rule digest and commit; TEST / FAIL-CASE need it
   score     --manifest M.json --tracks T --counts C --labels L --out S.json   (TEST / FAIL-CASE once each)
@@ -244,15 +246,21 @@ def cmd_compute(a, ctx) -> int:
     m = load_manifest(a.manifest)
     out = out_path(a.out, ctx, (".npz",), a.overwrite)
     table = load_table(a.tracks)
-    role_of(m, table)
+    role = role_of(m, table)
     if fingerprint(a.video) != table.video_fp:
         raise Refused("the video is not the one this pose table was extracted from")
+    stats: dict = {}
     try:
-        counts = gloves.compute_gloves(a.video, table, provenance=provenance())
+        masks = gloves.FaceMasks.load(a.faceboxes)
+        if masks.source_sha256 != m["roles"][role]["source_sha256"]:
+            raise Refused("the face boxes were measured on another original than this video's")
+        counts = gloves.compute_gloves(a.video, table, provenance=provenance(), masks=masks, stats=stats)
     except ValueError as e:
         raise Refused(str(e)) from e
     write_atomic(out, counts.save, ".npz")
-    print(f"glove reads: {len(counts.rows)} ({int(counts.contested.sum())} contested)")
+    print(f"glove reads: {len(counts.rows)} ({int(counts.contested.sum())} contested); under a very large "
+          f"face mosaic (contested): {stats.get('under_large_square', 0)}; under any face mosaic (counted, "
+          f"not excluded): {stats.get('under_any_face_mosaic', 0)}")
     return 0
 
 
@@ -345,6 +353,8 @@ def cmd_score(a, ctx) -> int:
         if counts.provenance != provenance():
             raise Refused("the glove counts were computed by another rule or another version of the code: "
                           "recompute them with this checkout")
+        if not counts.mask_sha256:
+            raise Refused("the glove counts were computed without the face-mosaic mask (`compute --faceboxes`)")
         counts.check_table(table)
         if role != "dev":
             claim(mp, role)
@@ -434,7 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fail-case", type=int, required=True)
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("compute")
-    for k in ("--manifest", "--video", "--tracks", "--out"):
+    for k in ("--manifest", "--video", "--tracks", "--faceboxes", "--out"):
         p.add_argument(k, type=Path, required=True)
     p.add_argument("--overwrite", action="store_true")
     p = sub.add_parser("template")
