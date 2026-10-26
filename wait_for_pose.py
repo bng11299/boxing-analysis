@@ -47,8 +47,11 @@ def wait(npz: Path, failed: Path, timeout: float, poll: float, sleep=time.sleep,
         if failed.exists():
             return "failed"
         if npz.is_file() and not npz.is_symlink() and not pose_watcher.syncing(npz.parent, npz.name):
-            st = pose_watcher._state(npz)
-            if st == last:
+            try:
+                st = pose_watcher._state(npz)
+            except OSError:          # replaced between the two calls: look again next time
+                st = None
+            if st is not None and st == last:
                 return "ready"
             last = st
         else:
@@ -92,7 +95,7 @@ def main(argv=None, sleep=time.sleep, clock=time.monotonic, analyse=None) -> int
         except OSError:
             reason = "(unreadable)"
         print(f"wait_for_pose: the laptop could not make {npz.name}: {reason}\n"
-              f"Fix that, delete {failed} on either machine, and the watcher will try again.", file=sys.stderr)
+              f"(If that is an old failure, its deletion may not have synced here yet.) Fix the cause, delete {failed} on either machine, and the watcher will try again.", file=sys.stderr)
         return 1
     if got == "timeout":
         print(f"wait_for_pose: no {npz} after {a.timeout:g} s. Is the laptop on, logged in, its watcher running "

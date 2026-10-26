@@ -1,7 +1,7 @@
 """Laptop side of the two-machine pose step: watch data/own, run pose on each new clip.
 
   python pose_watcher.py                       # on the GPU laptop, forever (scheduled task at logon)
-  python pose_watcher.py --once --settle 0     # two looks --interval apart, then exit
+  python pose_watcher.py --once --settle 0     # two looks, --interval apart, then exit
   python pose_watcher.py --log ~/boxing-comps-pose-watcher.log
 
 Syncthing brings a clip dropped into data/own on the desktop to this machine. Every
@@ -10,7 +10,8 @@ has neither results/ingest/X.pose.npz nor results/ingest/X.pose.failed:
 
 1. waits until Syncthing has finished with it: no Syncthing temporary file for it, its
    size and modification time the same on two passes (so never on the first look), and
-   not modified for --settle seconds;
+   unchanged for --settle seconds by this watcher's clock (not the file's mtime, which
+   Syncthing copies from the source);
 2. runs run_ingest.py (YOLO11-pose against the PINNED weights hash, the same pin
    analyse_clip.py uses) into a private staging folder OUTSIDE every synced folder;
 3. checks the pose is this video's, whole (analyse_clip.check_pose: name, content
@@ -113,6 +114,11 @@ def outputs(ingest: Path, stem: str) -> "tuple[Path, Path]":
     return ingest / f"{stem}.pose.npz", ingest / f"{stem}.pose.failed"
 
 
+def same_device(a: Path, b: Path, stat=os.stat) -> bool:
+    """os.replace only renames within one volume: staging and ingest must share one."""
+    return stat(a).st_dev == stat(b).st_dev
+
+
 def write_atomic(path: Path, text: str, staging: Path) -> None:
     fd, tmp = tempfile.mkstemp(prefix=".w.", dir=staging)
     try:
@@ -135,7 +141,7 @@ class Watcher:
         self.src, self.ingest, self.staging = src, ingest, staging
         self.weights, self.sha, self.device = weights, weights_sha256, device
         self.settle, self.predict, self.logfile, self.clock = settle, predict, logfile, clock
-        self.seen: "dict[Path, tuple[int, int]]" = {}
+        self.seen: "dict[Path, tuple[tuple[int, int], float]]" = {}   # state, when first seen in it
         self.waiting_logged: "set[Path]" = set()
 
     def log(self, msg: str) -> None:
@@ -143,27 +149,36 @@ class Watcher:
 
     def ready(self, video: Path) -> bool:
         """Finished arriving: no Syncthing temp file, the same size and mtime as the PREVIOUS pass saw (so never
-        on the first look), and untouched for --settle seconds. Syncthing gives a copied file the source's mtime,
-        so the age test alone would pass a clip the moment it lands; the two looks are the real guard."""
+        on the first look), first seen in that state at least --settle seconds ago by THIS watcher's clock. The
+        file's own mtime is not used for age: Syncthing gives a copied file the source's mtime, so an old
+        recording would look settled the moment it landed."""
         if syncing(video.parent, video.name):
             self.seen.pop(video, None)
             return False
         try:
             now_state = _state(video)
         except OSError:
+            self.seen.pop(video, None)
             return False
         before = self.seen.get(video)
-        self.seen[video] = now_state
-        if before != now_state:
+        if before is None or before[0] != now_state:
+            self.seen[video] = (now_state, self.clock())
             return False
-        return self.clock() - now_state[1] / 1e9 >= self.settle
+        return self.clock() - before[1] >= self.settle
 
     def run_one(self, video: Path) -> bool:
-        """Pose for one clip; True when a pose was published. Any failure writes X.pose.failed."""
+        """Pose for one clip; True when a pose was published. A clip that vanishes or changes is left for a later
+        pass; any other failure writes X.pose.failed. Nothing raised here stops the watcher."""
         npz, failed = outputs(self.ingest, video.stem)
-        before = _state(video)
-        work = Path(tempfile.mkdtemp(prefix=f".{video.stem}.", dir=self.staging))
+        work = None
         try:
+            try:
+                before = _state(video)
+            except FileNotFoundError:
+                self.seen.pop(video, None)
+                self.log(f"{video.name}: gone before pose ran")
+                return False
+            work = Path(tempfile.mkdtemp(prefix=f".{video.stem}.", dir=self.staging))
             argv = ["--video", str(video.resolve()), "--weights", str(self.weights.resolve()),
                     f"--weights-sha256={self.sha}", f"--device={self.device}", "--out-dir", str(work),
                     "--no-overlay"]
@@ -174,7 +189,11 @@ class Watcher:
             made = work / f"{video.stem}.pose.npz"
             if rc != 0 or not made.is_file():
                 raise RuntimeError(f"run_ingest exited with {rc!r} and wrote no pose")
-            if _state(video) != before:
+            try:
+                after = _state(video)
+            except FileNotFoundError:
+                after = None
+            if after != before:
                 self.seen.pop(video, None)
                 self.log(f"{video.name}: changed while pose ran; will retry once it settles")
                 return False
@@ -184,16 +203,25 @@ class Watcher:
             return True
         except Exception as e:  # one bad clip must not stop the watcher
             reason = f"{type(e).__name__}: {e}".replace("\n", " ")[:MAX_REASON]
-            write_atomic(failed, reason + "\n", self.staging)
-            self.log(f"{video.name}: pose FAILED ({reason}); delete {failed.name} to retry")
+            try:
+                write_atomic(failed, reason + "\n", self.staging)
+                self.log(f"{video.name}: pose FAILED ({reason}); delete {failed.name} to retry")
+            except Exception as e2:
+                self.log(f"{video.name}: pose FAILED ({reason}), and {failed.name} could not be written "
+                         f"({type(e2).__name__}: {e2}); will try again next pass")
             return False
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
 
     def poll(self) -> int:
         """One pass; returns how many poses were published."""
         done = 0
-        for video in candidates(self.src):
+        current = candidates(self.src)
+        for gone in set(self.seen) - set(current):
+            del self.seen[gone]
+        self.waiting_logged &= set(current)
+        for video in current:
             npz, failed = outputs(self.ingest, video.stem)
             if npz.exists() or failed.exists():
                 self.seen.pop(video, None)
@@ -205,7 +233,10 @@ class Watcher:
                 continue
             self.waiting_logged.discard(video)
             self.log(f"{video.name}: running pose on {self.device}")
-            done += self.run_one(video)
+            try:
+                done += self.run_one(video)
+            except Exception as e:   # run_one catches its own; this is the last line of defence
+                self.log(f"{video.name}: unexpected {type(e).__name__}: {e}; will try again next pass")
         return done
 
 
@@ -246,7 +277,7 @@ def main(argv=None, predict=None, sleep=time.sleep) -> int:
     ap.add_argument("--device", type=analyse_clip._device, default="cuda:0")
     ap.add_argument("--interval", type=float, default=30.0, help="seconds between passes")
     ap.add_argument("--settle", type=float, default=60.0, help="seconds a clip must be untouched")
-    ap.add_argument("--once", action="store_true", help="two looks --interval apart (a clip needs both), then exit")
+    ap.add_argument("--once", action="store_true", help="two looks max(--interval, --settle) apart (a clip needs both), then exit")
     ap.add_argument("--log", type=Path, help="also append every line to this file")
     a = ap.parse_args(argv)
     if not (1 <= a.interval <= 3600) or not (0 <= a.settle <= 3600):
@@ -261,6 +292,9 @@ def main(argv=None, predict=None, sleep=time.sleep) -> int:
         ap.error(f"no pose-model weights at {a.weights}")
     a.ingest_dir.mkdir(parents=True, exist_ok=True)
     a.staging.mkdir(parents=True, exist_ok=True)
+    if not same_device(a.staging, a.ingest_dir):
+        ap.error(f"--staging {a.staging} and --ingest-dir {a.ingest_dir} are on different volumes: the pose could "
+                 "not be moved into place in one rename")
     w = Watcher(a.src, a.ingest_dir, a.staging, a.weights, a.weights_sha256, a.device, a.settle, predict, a.log)
     try:
         with SingleInstance(a.staging / "watcher.lock"):
@@ -272,7 +306,7 @@ def main(argv=None, predict=None, sleep=time.sleep) -> int:
                 looks += 1
                 if a.once and looks == 2:   # a clip needs two looks to be ready
                     return 0
-                sleep(a.interval)
+                sleep(max(a.interval, a.settle) if a.once else a.interval)
     except RuntimeError as e:
         log(f"pose_watcher: {e}", a.log)
         return 1

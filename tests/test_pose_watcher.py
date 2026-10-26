@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -179,20 +180,96 @@ check("once the temp file is gone the clip is processed", rc == 1 and (ingest / 
 
 src, ingest, staging = setup("settle")
 clip = place(src, "IMG_9003.mp4")
-clock = Clock(clip.stat().st_mtime + 10)
+os.utime(clip, (1, 1))   # an old recording, as Syncthing would deliver it (it copies the source's mtime)
+clock = Clock(1e10)
 w = watcher(src, ingest, staging, settle=60, clock=clock)
 rc, _, _ = twice(w)
-check("a clip modified 10 s ago waits out a 60 s settle, even when two looks agree", rc == 0 and not any(ingest.iterdir()))
+check("an old mtime does not count as settled: two agreeing looks 0 s apart wait out a 60 s settle",
+      rc == 0 and not any(ingest.iterdir()))
+clock.t += 30
+rc, _, _ = quiet(w.poll)
+check("... still waiting 30 s after the first look", rc == 0 and not any(ingest.iterdir()))
 with open(clip, "ab") as f:
     f.write(b"\0" * 10)
 clock.t += 120
 rc, _, _ = quiet(w.poll)
-check("a clip whose size changed since the last pass is not ready, however old", rc == 0
+check("a clip whose size changed since the last look is not ready, however long it was watched", rc == 0
       and not any(ingest.iterdir()))
 clip.write_bytes(base_video.read_bytes())
-os.utime(clip, (clock.t - 1000, clock.t - 1000))
+quiet(w.poll)                       # first look at the new state
+clock.t += 59
+rc, _, _ = quiet(w.poll)
+check("... and the settle restarts from the change (59 s: not yet)", rc == 0 and not any(ingest.iterdir()))
+clock.t += 1
+rc, _, _ = quiet(w.poll)
+check("unchanged for 60 s by the watcher's clock: processed", rc == 1 and (ingest / "IMG_9003.pose.npz").is_file())
+
+print("== pose_watcher: a clip that vanishes, an ingest folder that refuses writes ==")
+src, ingest, staging = setup("vanish")
+clip = place(src, "IMG_9007.mp4")
+w = watcher(src, ingest, staging)
+rc, out, _ = quiet(w.run_one, tmp / "vanish" / "data" / "own" / "GONE.mp4")
+check("run_one on a clip that is gone returns, writing no .failed and leaving no staging folder",
+      rc is False and not any(ingest.iterdir()) and list(staging.iterdir()) == [] and "gone before" in out, out)
+real_ready = w.ready
+
+
+def ready_then_delete(video):
+    ok = real_ready(video)
+    if ok:
+        video.unlink()
+    return ok
+
+
+w.ready = ready_then_delete
+rc, out, _ = twice(w)
+check("a clip deleted between the readiness check and pose: the pass survives and publishes nothing",
+      rc == 0 and not any(ingest.iterdir()), out)
+rc, _, _ = quiet(w.poll)
+check("... and the watcher forgets it (no state kept for a clip no longer in data/own)", rc == 0 and w.seen == {}
+      and w.waiting_logged == set())
+
+src, ingest, staging = setup("exdev")
+clip = place(src, "IMG_9008.mp4")
+w = watcher(src, ingest, staging)
+real_replace = pose_watcher.os.replace
+
+
+def cross_device(a, b):
+    raise OSError(18, "Invalid cross-device link")
+
+
+pose_watcher.os.replace = cross_device
+try:
+    rc, out, _ = twice(w)
+    survived = True
+except Exception as e:
+    survived, out = False, repr(e)
+finally:
+    pose_watcher.os.replace = real_replace
+check("every rename into the ingest folder failing: the watcher survives, publishes and marks nothing",
+      survived and rc == 0 and not any(ingest.iterdir()) and "could not be written" in out, out)
+check("... and leaves nothing in staging", list(staging.iterdir()) == [], str(list(staging.iterdir())))
 rc, _, _ = twice(w)
-check("unchanged across two passes and settled: processed", rc == 1 and (ingest / "IMG_9003.pose.npz").is_file())
+check("... so the clip is tried again once renames work", rc == 1 and (ingest / "IMG_9008.pose.npz").is_file())
+
+
+class FakeStat:
+    def __init__(self, dev):
+        self.st_dev = dev
+
+
+check("same_device: one volume", pose_watcher.same_device(tmp, tmp))
+check("same_device: two volumes are told apart",
+      not pose_watcher.same_device("a", "b", stat=lambda p: FakeStat(1 if p == "a" else 2)))
+real_same = pose_watcher.same_device
+pose_watcher.same_device = lambda a, b: False
+try:
+    rc, _, err = quiet(pose_watcher.main, ["--src", str(src), "--ingest-dir", str(ingest), "--staging",
+                                           str(staging), "--once"], predict=make_predictor())
+finally:
+    pose_watcher.same_device = real_same
+check("main refuses staging and ingest on different volumes, before any pass", rc == 2 and "volumes" in err, err)
 
 print("== pose_watcher: failures are recorded, not retried, and retried on request ==")
 src, ingest, staging = setup("fail")
@@ -257,12 +334,13 @@ check("a pose that is not the whole video is refused (failed, not published)",
 
 print("== pose_watcher: what counts as a clip ==")
 src, ingest, staging = setup("names")
-for n in ("IMG_1.mov", "IMG_2.MP4", "-bad.mov", "a b.mov", "notes.txt", "DUP.mov", "DUP.mp4", ".hidden.mov"):
+for n in ("IMG_1.mov", "IMG_2.MP4", "-bad.mov", "a b.mov", "notes.txt", "DUP.mov", "DUP.mp4", ".hidden.mov",
+          "IMG_1.sync-conflict-20261026-101500-ABCDEFG.mov", "~syncthing~IMG_4.mov.tmp", ".syncthing.IMG_5.mov.tmp"):
     (src / n).write_bytes(b"x")
 (src / "sub").mkdir()
 (src / "sub" / "IMG_3.mov").write_bytes(b"x")
 got = sorted(p.name for p in pose_watcher.candidates(src))
-check("only top-level videos with accepted names; duplicate stems skipped", got == ["IMG_1.mov", "IMG_2.MP4"], str(got))
+check("only top-level videos with accepted names; duplicate stems, Syncthing conflict copies and temp files skipped", got == ["IMG_1.mov", "IMG_2.MP4"], str(got))
 try:
     os.symlink(src / "IMG_1.mov", src / "LINK.mov")
     linked = True
@@ -310,21 +388,33 @@ check("an interval under 1 s is a usage error", rc == 2, err)
 rc, _, err = quiet(pose_watcher.main, ["--src", str(src), "--ingest-dir", str(ingest), "--staging", str(staging),
                                        "--once", "--weights", str(tmp / "absent.pt")])
 check("missing weights are refused before any pass", rc == 2 and "weights" in err, err)
+slept = []
 place(src, "IMG_9010.mp4")
 os.utime(src / "IMG_9010.mp4", (1, 1))
 rc, out, _ = quiet(pose_watcher.main, ["--src", str(src), "--ingest-dir", str(ingest), "--staging", str(staging),
                                        "--once", "--settle", "5", "--weights", str(weights), "--weights-sha256", SHA,
-                                       "--device", "cpu", "--interval", "1"], predict=make_predictor(), sleep=lambda s: None)
+                                       "--device", "cpu", "--interval", "1"], predict=make_predictor(),
+                   sleep=lambda s: (slept.append(s), time.sleep(s)))
 check("main --once makes the pose and exits 0", rc == 0 and (ingest / "IMG_9010.pose.npz").is_file(), out)
+check("... waiting max(--interval, --settle) between its two looks, so the settle can pass", slept == [5.0], str(slept))
 
 with pose_watcher.SingleInstance(staging / "watcher.lock"):
     rc, out, _ = quiet(pose_watcher.main, ["--src", str(src), "--ingest-dir", str(ingest), "--staging", str(staging),
                                            "--once", "--weights", str(weights), "--device", "cpu"],
                        predict=make_predictor())
 check("a second watcher exits 1 while one holds the lock", rc == 1 and "already running" in out, out)
+try:
+    with pose_watcher.SingleInstance(staging / "watcher.lock"):
+        pass
+    check("the lock is free again once its holder ends", True)
+except RuntimeError as e:
+    check("the lock is free again once its holder ends", False, str(e))
 with pose_watcher.SingleInstance(staging / "watcher.lock"):
-    pass
-check("the lock is free again once its holder ends", True)
+    p = subprocess.run([sys.executable, str(ROOT / "pose_watcher.py"), "--src", str(src), "--ingest-dir", str(ingest),
+                        "--staging", str(staging), "--once", "--weights", str(weights), "--device", "cpu"],
+                       capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+check("a second watcher in ANOTHER PROCESS exits 1 while the lock is held",
+      p.returncode == 1 and "already running" in p.stdout, p.stdout + p.stderr)
 
 print("== wait_for_pose ==")
 src, ingest, staging = setup("wait")
@@ -388,6 +478,30 @@ clip = place(src2, "IMG_9023.mp4")
 rc, _, err = W(["--ingest-dir", str(ingest2)])
 check("a pose of a different recording with this clip's name is refused (source / fingerprint)",
       rc == 1 and "args" not in seen, err)
+
+real_state = pose_watcher._state
+hits = {"n": 0}
+
+
+def flaky_state(p):
+    hits["n"] += 1
+    if hits["n"] == 1:
+        raise FileNotFoundError(p)
+    return real_state(p)
+
+
+src3, ingest3, staging3 = setup("wait3")
+clip = place(src3, "IMG_9024.mp4")
+twice(watcher(src3, ingest3, staging3))
+out_dir = tmp / "wait3" / "out"
+pose_watcher._state = flaky_state
+try:
+    rc, out, err = W(["--ingest-dir", str(ingest3)])
+finally:
+    pose_watcher._state = real_state
+check("a pose replaced between the existence check and the stat is looked at again, not a crash",
+      rc == 0 and hits["n"] >= 3 and "args" in seen, out + err)
+seen.clear()
 
 proot = tmp / "pp"
 proot.mkdir()
