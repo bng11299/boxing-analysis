@@ -810,9 +810,12 @@ with video.VideoWriter(clip2, W, H, Fraction(30), private=True) as vw:
         vw.write(fr)
 PoseTable(**{**small.__dict__, "video_fp": video.fingerprint(clip2)}).save(tmp / "unregistered.tracks.npz")
 fb60 = write_masks(tmp / "unregistered.faceboxes.npz", [], n=60, source="3" * 64)
-check("compute refused for an unregistered video, even with its own matching table and face boxes", run(
+rp60 = tmp / "unregistered.blur.json"                 # its own report, so only the role check can refuse it
+rp60.write_text(json.dumps(blur_report(gloves.FaceMasks.load(fb60), n=60,
+                                       output_sha256=glove_identity.sha256_file(clip2))))
+check("compute refused for an unregistered video, even with its own matching table, face boxes and blur report", run(
     "compute", "--manifest", man, "--video", clip2, "--tracks", tmp / "unregistered.tracks.npz",
-    "--faceboxes", fb60, "--out", proot / "c.npz") == 1 and not (proot / "c.npz").exists())
+    "--faceboxes", fb60, "--blur-report", rp60, "--out", proot / "c.npz") == 1 and not (proot / "c.npz").exists())
 check("template refused for a table of an unregistered video", run(
     "template", "--manifest", man, "--tracks", tmp / "unregistered.tracks.npz", "--out", proot / "u.csv") == 1)
 check("compute refused outside the root", run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1],
@@ -850,6 +853,12 @@ wrong_src = write_masks(tmp / "other-original.faceboxes.npz", [], source="1" * 6
 check("compute refused when the face boxes were measured on another original",
       run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--faceboxes", wrong_src,
           "--out", proot / "wrongfb.npz") == 1 and not (proot / "wrongfb.npz").exists())
+rp_src = tmp / "other-original.blur.json"             # boxes and report agree with each other and with this video,
+rp_src.write_text(json.dumps(blur_report(gloves.FaceMasks.load(wrong_src),   # but name an original the
+                                         output_sha256=glove_identity.sha256_file(clip))))  # manifest's role is not
+check("compute refused when face boxes and blur report agree but name another original than the manifest's role",
+      run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1], "--faceboxes", wrong_src,
+          "--blur-report", rp_src, "--out", proot / "wrongsrc.npz") == 1 and not (proot / "wrongsrc.npz").exists())
 check("compute through ffmpeg decode", run("compute", "--manifest", man, "--video", clip, "--tracks", tab["test"][1],
                                            "--out", proot / "test.gloves.npz") == 0)
 outside = tmp / "outside-shared.npz"

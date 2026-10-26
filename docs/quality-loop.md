@@ -3891,3 +3891,12 @@ suites and mutants above, all run here and reproduced in a fresh clone.
 - **Tests:** 272 / 272 (17 new: verdict unit cases incl. never-pooled and a baseline that failed on one video;
   roles none / 0 / NONE; gate flag-mode refusals both ways; three cross-format manifest refusals).
   **Mutants: 3 of 3 killed** (bar 4 reported True; pooled `or` instead of `and`; roles not hash-ordered).
+- **Full mutant re-run over iterations 1-5 (57 mutants, after `02f9af9`): 56 of 57 killed**; the survivor is still
+  the redundant 75% majority. The run found two more guards masked by newer ones, both now isolated in tests only
+  (no rule file changed, so the freeze is unaffected):
+  - the unregistered-video refusal was being made by the blur-report output check (the default report describes
+    another video), so that test now passes the video's own report and only registration can refuse it;
+  - the manifest-role check on the face boxes' original was being made by `check_blur_report` (boxes and report
+    named different originals), so a new test gives boxes and report that agree with each other and with the
+    video but name another original than the manifest's role.
+  Tests 273 / 273.
