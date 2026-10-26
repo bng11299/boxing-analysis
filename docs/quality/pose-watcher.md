@@ -56,3 +56,34 @@ derived files written into a synced folder.
 - Real-world fact the gate asserts (not shape): the end-to-end run goes from the watcher's pose through
   `wait_for_pose` to `analyse_clip --skip-ingest` without running the pose model on the desktop (predictor call
   count unchanged), and the summary reports the clip's 0:20 of footage.
+
+### Iteration 2 -- review gate (code-reviewer, read-only, round 2 on `33049c9`): SHIP
+R1-R3 confirmed closed, with variants: a clip deleted after pose ran reads as "changed", not a crash; a
+PermissionError on the first stat now writes `.failed`; `wait_for_pose` resets `last` on a failed stat, so one
+good stat cannot count as two agreeing. One new suggestion, taken in `1732ae1`: when neither the pose nor its
+`.failed` can be written (an ingest folder made read-only after start), the clip was re-run on the GPU every
+pass. It is now left alone after `MAX_UNRECORDED` (3) such failures, until the watcher restarts (test added: 68).
+
+### Security gate (changed files)
+No shell anywhere: `run_ingest.main` gets an argument list; the task's arguments are two quoted absolute paths
+built from the repo and `$env:USERPROFILE`. Paths are resolved before every check (`under`); `--src` under a
+participant root is refused on both machines; staging inside a synced folder is refused, as is staging on another
+volume. Links in `data/own` are skipped, and a linked pose is not read. The weights are loaded only against the
+pinned sha256. Synced poses go through `PoseSequence.load` (bounded headers, never unpickles), then `check_pose`
+(name, content fingerprint, frames, rate, size, model) on both machines and again in `analyse_clip`. `.failed` is
+capped at 500 characters on write and 4096 on read. The task runs at limited privilege with no stored password.
+Residual, accepted: a `.failed` reason can carry absolute paths, which include the Windows username, and it syncs
+between the two machines, both of them Brendan's; the fingerprint hashes the ends of the file, not every byte
+(as before); a laptop that is asleep or logged out runs nothing (the desktop times out after `--timeout`).
+
+### Exit -- all gates green
+- **Test gate:** `test_pose_watcher` 68 passed; `test_machine_scripts.ps1` 45 (38 + 7); everything else unchanged.
+- **Reproduce gate:** a fresh clone at `1732ae1`, with no `data/` or `results/`, ran all 21 Python suites and the
+  machine scripts green: analyse_clip 113, appearance 171, blur 177, boxers 167, classify 297,
+  completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99, headgear 140, ingest 185, labels 50,
+  linking 266, olympic 29, pipeline 314, poseswitch 30, pose_watcher 68, render_punches 66, report 289, tracks 100,
+  machine scripts 45.
+- **Review gate:** code-reviewer, two rounds: FIX FIRST (3 blocking, fixed), then SHIP (1 suggestion, fixed).
+- **Not verified here:** the real laptop. CUDA pose, the scheduled task registering, and Syncthing timings have
+  not been run; `install-pose-watcher.ps1 -DryRun` has run only on the desktop (it correctly refuses a worktree
+  with no venv). First real check: the setup steps in `docs/MACHINE-SYNC.md` section 5, then one clip.
