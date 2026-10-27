@@ -7,7 +7,7 @@
 For each row (t = 0, 5, 10 ... s) the window first holds the frame at t inside a RED frame, then plays
 t - 1 s to t + 1 s and holds the red frame again, on a loop. Answer for the red frame:
 
-  L  boxer A is on the left       R  boxer A is on the right       ?  can't tell
+  L  boxer A is on the left of the picture    R  on the right of the picture    ?  can't tell
   <- or Backspace  previous moment     ->  next moment (no change)     Space  replay
   E  first empty moment                Q or Esc  quit (everything is already saved)
 
@@ -75,6 +75,7 @@ class App:
         self.after_id = self.poll_id = self.arm_id = None
         self.shown_at = None
         self.armed = True               # False from an answer until that key is released
+        self.answer_code = self._press_code = None
         self.message = ""
         self.closed = False             # True only after a successful final save
         root.title(f"Label moments: {title}")
@@ -88,7 +89,8 @@ class App:
         self.status = tk.Label(root, font=("Segoe UI", 12), fg="#dddddd", bg="black", anchor="w", justify="left")
         self.status.pack(fill="x", padx=8)
         tk.Label(root, font=("Segoe UI", 11), fg="#9a9a9a", bg="black", anchor="w", justify="left",
-                 text="L = A on the LEFT     R = A on the RIGHT     ? = can't tell\n"
+                 text="L = A on the LEFT of the picture     R = A on the RIGHT of the picture     "
+                      "? = can't tell\n"
                       "<- / Backspace = previous     -> = next     Space = replay     "
                       "E = first empty     Q / Esc = quit (saved)").pack(fill="x", padx=8, pady=(0, 8))
         root.bind("<KeyPress>", self.on_key)
@@ -142,8 +144,9 @@ class App:
         if t in self.pending:
             try:
                 self.cache[t] = self.pending.pop(t).result()
-            except lm.Refused as e:
-                self.caption.config(text=f"cannot show this moment ({e}). Press ? (can't tell) or move on.",
+            except Exception as e:     # noqa: BLE001 -- Refused, or ffmpeg failing to start: never stall
+                why = str(e) if isinstance(e, lm.Refused) else "the video could not be decoded"
+                self.caption.config(text=f"cannot show this moment ({why}). Press ? (can't tell) or move on.",
                                     fg="white")
                 self.shown_at = self.clock()           # only ? and moves are accepted: see handle()
                 return
@@ -156,7 +159,8 @@ class App:
         c = self.clip
         self.frame.config(bg=RED)
         self.image.config(image=self._photo(c.centre))
-        self.caption.config(text=f"RED FRAME = t {c.t} s.  Where is A: L (left) or R (right)?", fg=RED)
+        self.caption.config(text=f"RED FRAME = t {c.t} s.  Is A on the picture's L (left) or R (right)?",
+                            fg=RED)
         if self.shown_at is None:
             self.shown_at = self.clock()
         self.after_id = self.root.after(HOLD_MS, lambda: self._play(0))
@@ -184,9 +188,14 @@ class App:
     def on_key(self, event):
         if self.arm_id is not None:            # a release and a press back to back: auto-repeat
             self._cancel("arm_id")
+        self._press_code = getattr(event, "keycode", None)
         return self.handle(lm.action_for(event.keysym))
 
     def on_release(self, event):
+        """Only the release of the key that gave the last answer re-arms (letting go of Shift while still
+        holding / does not)."""
+        if self.answer_code is not None and getattr(event, "keycode", None) != self.answer_code:
+            return
         self._cancel("arm_id")
         self.arm_id = self.root.after(REPEAT_GAP_MS, self._arm)
 
@@ -212,6 +221,7 @@ class App:
                 self._update_status()
                 return "save-failed"
             self.armed = False
+            self.answer_code = self._press_code
             if self.s.done():
                 self.message = f"All {self.s.n} moments answered and saved. Q to finish, or <- to review."
         elif action == "quit":

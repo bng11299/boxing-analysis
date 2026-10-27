@@ -539,9 +539,13 @@ def pump(app, until, timeout=20.0):
     return False
 
 
+CODES = {"l": 76, "r": 82, "question": 191, "slash": 191, "Shift_L": 16, "x": 88}
+
+
 class Ev:
     def __init__(self, keysym):
         self.keysym = keysym
+        self.keycode = CODES[keysym]
 
 
 if root is not None:
@@ -556,7 +560,7 @@ if root is not None:
     check("too-early answers are ignored (moment not on screen long enough)", app.handle("L") == "too-soon"
           and s.lf.values[0] == "")
     clk.t += 1.0
-    check("an answer after the moment was shown is saved", app.handle("L") == "L" and "0,L" in p.read_text())
+    check("an answer after the moment was shown is saved", app.on_key(Ev("l")) == "L" and "0,L" in p.read_text())
     check("the window moves to the next moment", s.i == 1 and pump(app, lambda: app.clip is not None)
           and app.clip.t == 5)
     shown = read_index(app.clip.frames[app.clip.centre], app.clip.width, app.clip.height)
@@ -570,6 +574,27 @@ if root is not None:
     app.on_release(Ev("l"))
     pump(app, lambda: app.armed)
     check("a real release, then a press, answers", app.on_key(Ev("r")) == "R" and s.lf.values[1] == "R")
+    pump(app, lambda: app.clip is not None)
+    app.on_release(Ev("r"))
+    pump(app, lambda: app.armed)
+    app.handle("back")
+    pump(app, lambda: app.clip is not None)
+    clk.t += 5.0
+    check("? (Shift + /) answers", app.on_key(Ev("question")) == "?" and s.lf.values[1] == "?")
+    pump(app, lambda: app.clip is not None)
+    clk.t += 5.0
+    app.on_release(Ev("Shift_L"))                 # Shift let go, / still held down
+    pump(app, lambda: app.arm_id is None, timeout=0.3)
+    check("releasing Shift while / is still held does not re-arm", not app.armed
+          and app.on_key(Ev("slash")) == "held" and s.lf.values[2] == "")
+    app.on_release(Ev("slash"))
+    pump(app, lambda: app.armed)
+    check("releasing / itself re-arms", app.armed)
+    app.handle("back")
+    pump(app, lambda: app.clip is not None)
+    clk.t += 5.0
+    check("re-answering a moment works after a proper release", app.on_key(Ev("r")) == "R"
+          and s.lf.values[1] == "R")
     pump(app, lambda: app.clip is not None)
     app.on_release(Ev("r"))
     pump(app, lambda: app.armed)
@@ -595,6 +620,17 @@ if root is not None:
               and app.frame.cget("bg") == cli.GREY)
         check("... and L or R cannot be given for it", app.handle("L") == "not-shown" and s.lf.values[2] == "")
         check("... only ? (can't tell)", app.handle("?") == "?" and s.lf.values[2] == "?")
+        app.on_release(Ev("question"))
+        pump(app, lambda: app.armed)
+
+        def no_ffmpeg(g, m, t, **k):
+            raise FileNotFoundError("ffmpeg vanished")
+        lm.decode_clip = no_ffmpeg
+        app.cache.clear()
+        app.pending.clear()
+        app.handle("replay")
+        check("any decode error (not only a refusal) shows the cannot-show state instead of hanging",
+              pump(app, lambda: "cannot show" in app.caption.cget("text")) and app.clip is None)
     finally:
         lm.decode_clip = real_decode
     app.on_release(Ev("question"))
