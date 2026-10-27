@@ -31,3 +31,17 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   videos whose baseline failed; the gate says every metric pools over the compared videos. Fixed: a baseline
   failure is in no arm; a video that fails only when filtered stays in the filter's cost and fails G3c.
   Regression tests added (161 checks).
+- **Astra review 1** (Codex, read-only, effort medium, on `ddf6399`): **FIX FIRST**, 5 blocking + 2 should-fix.
+  Astra could not start Python in its sandbox ("Access is denied"), so its findings are source-derived.
+
+  | # | Finding | Severity | Resolution |
+  |---|---|---|---|
+  | 1 | Baseline-failed videos still counted in G2/G3a and the dev margin choice | BLOCKING | already fixed in `6abd33f` (self-review); tests |
+  | 2 | Stillness file: duplicate keys load (last wins), `samples` != 24 and `max_px < motion_px` accepted | BLOCKING | duplicate-key hook, `samples == 24`, `0 <= motion <= max`, top-level keys exact; tests |
+  | 3 | Videos left out for camera motion before fingerprints are checked: a stale entry silently drops a video | BLOCKING | fingerprints of stillness (all videos) checked first; floors for the kept ones; test |
+  | 4 | `[A, B, B, ...]` reads 0 px, contradicting the gate's "moves in the first ~12% -> left out" | BLOCKING | behaviour is the stated short-segment limit; gate wording corrected in a dated amendment; tests pin both cases |
+  | 5 | Every filtered arm failing -> `KeyError` in `verdict`, no report | BLOCKING | unmeasured bars FAIL; tests |
+  | 6 | Zero exposure or zero baseline unexplained -> `ZeroDivisionError` | SHOULD-FIX | rates via `_share` (None), no ratio -> G1 fails; test |
+  | 7 | JSON integer 10**400 -> `OverflowError`, not `ValueError` | SHOULD-FIX | caught in `_number`; floor and stillness tests |
+
+  175 checks pass after the fixes.

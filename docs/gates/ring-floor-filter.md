@@ -128,3 +128,17 @@ further iteration.
 ## Order of evidence
 1. This file's commit. 2. The commit that sets `FROZEN_MARGIN_PX` (with the dev grid in the quality log).
 3. The single held-out run. All three hashes go in the PR.
+
+## Amendment 2026-10-27, after Astra review 1 (before any floor, margin or held-out number)
+Three clarifications; no bar, threshold, metric or split changes.
+1. **Stillness limit, restated.** The section above says a camera that moves in the first ~12% of a video "is
+   read as moving for the rest of it". That is true only from the third sample on. Because the rule reads the
+   90th percentile of 24 samples, a camera position held for up to two samples (~8% of the video) passes
+   unseen WHEREVER it falls, the first sample included (Astra: `[A, B, B, ...]` reads 0 px). The limit is
+   therefore: up to ~8% of a video may be filmed from a position the floor does not fit.
+2. **Inputs are checked before anything is left out.** Every stillness entry must carry the video's own
+   fingerprint before the stillness rule may leave a video out; a stale entry stops the run. Videos the rule
+   leaves out are not shown in the click tool and need no floor.
+3. **A bar that cannot be measured fails.** No compared video, a baseline with zero unexplained bursts (no
+   ratio), or a filtered arm that fails everywhere gives FAIL for the bars it touches, never a pass by default
+   and never a crash.

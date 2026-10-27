@@ -74,7 +74,10 @@ class Floor:
 def _number(v, what: str) -> float:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         raise ValueError(f"{what} is not a number")
-    f = float(v)
+    try:
+        f = float(v)
+    except OverflowError:                  # a JSON integer like 10**400 (Astra, review 1)
+        raise ValueError(f"{what} is not finite") from None
     if not math.isfinite(f):
         raise ValueError(f"{what} is not finite")
     return f

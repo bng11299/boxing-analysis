@@ -157,6 +157,13 @@ CASES = [
 ]
 for name, over, pat in CASES:
     raises(f"a floor with {name}", lambda o=over: ring.load_floors(write_doc("case.json", floors_doc({"GH1": entry(**o)}))), pat)
+big_int = "1" + "0" * 400
+raises("ASTRA 1.7: an integer too large for a float (10**400) is a ValueError, not an OverflowError",
+       lambda: ring.load_floors(write_doc("bigint.json", raw=json.dumps(floors_doc({"GH1": entry()})).replace("12.5", big_int).encode())),
+       "not finite")
+raises("ASTRA 1.7: ... also as a coordinate",
+       lambda: ring.load_floors(write_doc("bigint2.json", raw=json.dumps(floors_doc({"GH1": entry(points=[[1, 1], [80, 20], [80, 80]])}))
+                                          .replace("[1, 1]", f"[{big_int}, 1]").encode())), "not finite")
 raises("check_floor refuses the same things the reader does (the click tool saves through it)",
        lambda: ring.check_floor("GH1", [[20, 20], [80, 80], [80, 20], [20, 80]], 100, 100, FP), "crosses itself")
 
@@ -250,6 +257,13 @@ mh = ring.camera_motion(halves)
 check("REGRESSION (GH208416): a camera in two positions for half the video each is caught, not averaged to 0 px",
       mh["motion_px"] == 30, str(mh))
 raises("fewer frames than the starting reference needs is refused", lambda: ring.camera_motion(still[:2]), "at least 3")
+moved = np.roll(rgb, 25, axis=1)
+early2 = [rgb, rgb] + [moved] * 22
+check("a camera that moves after the second sample (the first ~8% elsewhere) is caught: 22 of 24 frames off the start",
+      24 <= ring.camera_motion(early2)["motion_px"] <= 26 > olympic_ring.STILL_MAX_PX, str(ring.camera_motion(early2)))
+early1 = [rgb] + [moved] * 23
+check("ASTRA 1.4, the stated limit: a position held for ONE sample of 24 (~4%) passes unseen, wherever it is",
+      ring.camera_motion(early1)["motion_px"] == 0, str(ring.camera_motion(early1)))
 blob = []
 for k in range(9):
     f = rgb.copy()
@@ -307,6 +321,20 @@ for name, doc in [("the wrong format", {"format": "x", "videos": {}}),
                   ("a motion given as text", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE | {"motion_px": "1"}}}),
                   ("a bad video id", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {"../x": SE}})]:
     raises(f"a stillness file with {name}", lambda d=doc: olympic_ring.load_stillness(write_doc("s.json", d)))
+for name, raw in [("ASTRA 1.2: motion_px twice (the second, 0, would win)",
+                   ('{"format": "%s", "videos": {"GH1": {"video_fp": "%s", "width": 100, "height": 100, "motion_px": 100, '
+                    '"max_px": 100, "samples": 24, "motion_px": 0}}}' % (olympic_ring.STILLNESS_FORMAT, FP)).encode()),
+                  ("a video id twice", ('{"format": "%s", "videos": {"GH1": %s, "GH1": %s}}'
+                                        % (olympic_ring.STILLNESS_FORMAT, json.dumps(SE), json.dumps(SE))).encode()),
+                  ("ASTRA 1.7: motion_px of 10**400", json.dumps({"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE}})
+                   .replace("1.5", big_int).encode())]:
+    raises(f"a stillness file with {name}", lambda r=raw: olympic_ring.load_stillness(write_doc("sd.json", raw=r)))
+for name, over in [("ASTRA 1.2: 1 sample (the rule measures 24)", {"samples": 1}), ("samples given as true", {"samples": True}),
+                   ("ASTRA 1.2: motion above its own maximum", {"motion_px": 30, "max_px": 0})]:
+    raises(f"a stillness file with {name}",
+           lambda o=over: olympic_ring.load_stillness(write_doc("so.json", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE | o}})))
+raises("a stillness file with an extra top-level key",
+       lambda: olympic_ring.load_stillness(write_doc("sx.json", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {}, "x": 1})))
 raises("a stillness file with NaN",
        lambda: olympic_ring.load_stillness(write_doc("sn.json", raw=json.dumps({"format": olympic_ring.STILLNESS_FORMAT,
                                                                                  "videos": {"GH1": SE}}).replace("1.5", "NaN").encode())))
@@ -591,6 +619,19 @@ sn = olympic_ring.summarise_margin([real, newly], 0.0)
 check("a video that fails only when filtered is G3c's failure AND stays in the filter's cost (G3a)",
       sn["newly_failed"] == ["GH138416"] and sn["credited_dropped"] == 3 and sn["videos_compared"] == 1
       and olympic_ring.verdict(sn)["gate"]["G3c_no_new_failures"] is False)
+only_new = olympic_ring.summarise_margin([newly], 0.0)
+vn = olympic_ring.verdict(only_new)
+check("ASTRA 1.5: every filtered arm failing is a FAIL verdict (G1, G3b unmeasured -> fail; G3c fails), not a crash",
+      vn["pass"] is False and vn["gate"]["G3c_no_new_failures"] is False and vn["gate"]["G1_linked_unexplained"] is False
+      and vn["gate"]["G3b_credited_share"] is False and vn["secondary"] == {}, str(vn))
+zero = copy.deepcopy(real)
+for arm_ in (zero["base"], zero["margins"][0.0]["arm"]):
+    arm_["linked"]["unexplained"] = 0
+    for n_ in "AB":
+        arm_["linked"]["boxers"][n_]["unexplained"] = 0
+sz = olympic_ring.summarise_margin([zero], 0.0)
+check("ASTRA 1.6: a baseline with 0 unexplained bursts gives no ratio and a failing G1, not a ZeroDivisionError",
+      sz["ratio"] is None and olympic_ring.verdict(sz)["gate"]["G1_linked_unexplained"] is False, str(sz.get("ratio")))
 check("the local report carries per-video counts, with the linked (unexplained, minutes) of both arms when both ran",
       set(sm["per_video"]) == {"GH078416", "GH128416"} and "linked_ue_filtered" in sm["per_video"]["GH078416"]
       and "linked_ue_baseline" not in sm["per_video"]["GH128416"])
@@ -632,6 +673,15 @@ ring.dump_floors({"GH078416": ring.check_floor("GH078416", FLOOR_PTS, Wv, Hv, fs
                   "GH069681": fs["GH069681"]}, swapped)
 rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--floors", str(swapped), "--prep-dir", str(prep), "--rule", str(rule_f)])
 check("a floor clicked on another recording (fingerprint) is refused", rc == 1 and "different recordings" in err, err)
+stale_prep = tmp / "prep_stale"
+stale_prep.mkdir()
+st_doc = json.loads((prep / "stillness.json").read_text(encoding="utf-8"))
+st_doc["videos"]["GH069681"]["video_fp"] = "b" * 64        # measured on another recording, and "moving"
+(stale_prep / "stillness.json").write_text(json.dumps(st_doc), encoding="utf-8")
+rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--floors", str(floors_p), "--prep-dir", str(stale_prep),
+                     "--rule", str(rule_f)])
+check("ASTRA 1.3: a stale stillness entry (another recording) stops the run BEFORE it can quietly leave a video out",
+      rc == 1 and "GH069681" in err and "different recording" in err, err)
 rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--floors", str(tmp / "bin.json"), "--prep-dir", str(prep), "--rule", str(rule_f)])
 check("a malformed floor file stops the run with a reason, not a traceback", rc == 1 and "UTF-8 JSON" in err, err)
 

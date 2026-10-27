@@ -89,10 +89,14 @@ def load_stillness(path) -> dict:
     if len(raw) > ring.MAX_FILE_BYTES:
         raise ValueError(f"{p.name}: too large")
     try:
-        doc = json.loads(raw.decode("utf-8"), parse_constant=ring._refuse_constant)
-    except (UnicodeDecodeError, ValueError, RecursionError) as e:
+        doc = json.loads(raw.decode("utf-8"), object_pairs_hook=ring._no_duplicate_keys,
+                         parse_constant=ring._refuse_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
         raise ValueError(f"{p.name}: not readable JSON ({type(e).__name__})") from None
-    if not isinstance(doc, dict) or doc.get("format") != STILLNESS_FORMAT or not isinstance(doc.get("videos"), dict):
+    except ValueError as e:                # a duplicated key, NaN, Infinity
+        raise ValueError(f"{p.name}: {e}") from None
+    if not isinstance(doc, dict) or set(doc) != {"format", "videos"} or doc["format"] != STILLNESS_FORMAT \
+            or not isinstance(doc["videos"], dict) or len(doc["videos"]) > ring.MAX_VIDEOS:
         raise ValueError(f"{p.name}: not a {STILLNESS_FORMAT!r} file")
     out = {}
     for vid, e in doc["videos"].items():
@@ -102,10 +106,11 @@ def load_stillness(path) -> dict:
             raise ValueError(f"{p.name}: {vid}: bad video_fp")
         ring._whole(e["width"], f"{vid}: width", 1, ring.MAX_SIDE)
         ring._whole(e["height"], f"{vid}: height", 1, ring.MAX_SIDE)
-        ring._whole(e["samples"], f"{vid}: samples", 1, 1000)
-        for k in ("motion_px", "max_px"):
-            if ring._number(e[k], f"{vid}: {k}") < 0:
-                raise ValueError(f"{p.name}: {vid}: {k} is negative")
+        if e["samples"] != ring.STILL_SAMPLES or isinstance(e["samples"], bool):
+            raise ValueError(f"{p.name}: {vid}: measured on {e['samples']!r} samples, the rule needs {ring.STILL_SAMPLES}")
+        motion, mx = ring._number(e["motion_px"], f"{vid}: motion_px"), ring._number(e["max_px"], f"{vid}: max_px")
+        if not 0 <= motion <= mx:
+            raise ValueError(f"{p.name}: {vid}: needs 0 <= motion_px <= max_px")
         out[vid] = e
     return out
 
@@ -267,7 +272,10 @@ def cmd_click(a) -> int:
     _inside_repo_ok(a.floors)
     still = load_stillness(a.prep_dir / "stillness.json")
     floors = ring.load_floors(a.floors) if a.floors.is_file() else {}
-    todo = [v for v in click_order(still) if a.redo or v not in floors]
+    moving = sorted(v for v in still if still[v]["motion_px"] > STILL_MAX_PX)
+    if moving:
+        print(f"not shown (the camera moves; left out of the experiment): {moving}")
+    todo = [v for v in click_order(still) if v not in moving and (a.redo or v not in floors)]
     if a.only:
         todo = [v for v in todo if v in set(a.only)]
     if not todo:
@@ -408,8 +416,8 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
         lt = olympic_completeness.totals([arm[i]["linked"] for i in ok])
         ct = olympic_completeness.totals_credited([arm[i]["credited_path"] for i in ok])
         ue = [_linked_ue(arm[i]["linked"]) for i in ok]
-        rate = sum(u for u, _ in ue) / sum(e for _, e in ue)
-        if not math.isclose(rate, lt["unexplained_per_exposure_min"], rel_tol=1e-9):
+        rate, theirs = _share(sum(u for u, _ in ue), sum(e for _, e in ue)), lt["unexplained_per_exposure_min"]
+        if (rate is None) != (theirs is None) or (rate is not None and not math.isclose(rate, theirs, rel_tol=1e-9)):
             raise AssertionError("the bootstrap's rate is not the completeness rate")   # same definition, or no gate
         links = [arm[i]["link"] for i in ok]
         cp = sum(l["credited_punches"] for l in links)
@@ -425,29 +433,40 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
             "median_both_identified": float(np.median([l["both_identified"] for l in links])),
         }
     b, f = out["baseline"], out["filtered"]
-    out["ratio"] = f["linked_unexplained_per_exposure_min"] / b["linked_unexplained_per_exposure_min"]
+    rb, rf = b["linked_unexplained_per_exposure_min"], f["linked_unexplained_per_exposure_min"]
+    # No baseline rate, or a baseline of 0 unexplained: there is nothing to cut, so no ratio (G1 cannot pass).
+    out["ratio"] = rf / rb if rb and rf is not None else None
     out["ratio_ci95"] = list(bootstrap_ratio([_linked_ue(base[i]["linked"]) for i in ok],
                                              [_linked_ue(filt[i]["linked"]) for i in ok]))
     return out
 
 
+def _ge(x, y, slack=0.0) -> bool:
+    """x >= y - slack, False when either side was not measured (None)."""
+    return x is not None and y is not None and x >= y - slack
+
+
 def verdict(s: dict) -> dict:
-    """Pass/fail of every pre-registered bar from one margin's summary. PASS needs G1, G2 and G3a-c."""
-    b, f = s["baseline"], s["filtered"]
+    """Pass/fail of every pre-registered bar from one margin's summary. PASS needs G1, G2 and G3a-c. A bar
+    that could not be measured (no compared video, a zero baseline) fails; it never passes by default."""
+    b, f = s.get("baseline"), s.get("filtered")
+    measured = b is not None and f is not None
     g = {
-        "G1_linked_unexplained": s["ratio"] <= G1_MAX_RATIO and s["ratio_ci95"][1] < G1_MAX_UPPER,
+        "G1_linked_unexplained": measured and s["ratio"] is not None and s["ratio"] <= G1_MAX_RATIO
+                                 and s["ratio_ci95"][1] < G1_MAX_UPPER,
         "G2_nonboxer_removed": (s["noncredited_removed_share"] or 0.0) >= G2_MIN_REMOVED,
         "G3a_boxers_kept": (s["credited_dropped_share"] or 0.0) <= G3A_MAX_DROPPED
                            and s["credited_dropped_share_worst_video"] <= G3A_MAX_DROPPED_VIDEO,
-        "G3b_credited_share": f["credited_share"] >= b["credited_share"] - G3B_MAX_FALL,
-        "G3c_no_new_failures": not s["newly_failed"],
+        "G3b_credited_share": measured and _ge(f["credited_share"], b["credited_share"], G3B_MAX_FALL),
+        "G3c_no_new_failures": not s.get("newly_failed", []),
     }
-    sec = {
-        "S1_link_coverage": f["link_coverage"] >= b["link_coverage"] - S1_MAX_FALL,
-        "S2_absorption_lower": f["ab_noncredited_share"] < b["ab_noncredited_share"],
-        "S3_credited_path_not_worse": f["credited_path_unexplained_per_exposure_min"]
-                                      <= b["credited_path_unexplained_per_exposure_min"],
-        "S4_both_identified": f["median_both_identified"] >= b["median_both_identified"] - S4_MAX_FALL,
+    sec = {} if not measured else {
+        "S1_link_coverage": _ge(f["link_coverage"], b["link_coverage"], S1_MAX_FALL),
+        "S2_absorption_lower": (f["ab_noncredited_share"] is not None and b["ab_noncredited_share"] is not None
+                                and f["ab_noncredited_share"] < b["ab_noncredited_share"]),
+        "S3_credited_path_not_worse": _ge(b["credited_path_unexplained_per_exposure_min"],
+                                          f["credited_path_unexplained_per_exposure_min"]),
+        "S4_both_identified": _ge(f["median_both_identified"], b["median_both_identified"], S4_MAX_FALL),
     }
     return {"gate": g, "secondary": sec, "pass": all(g.values())}
 
@@ -492,14 +511,23 @@ def cmd_evaluate(a) -> int:
         margins = (FROZEN_MARGIN_PX,)
         if len(tasks) != 29 - len(DEV_VIDEOS):
             raise ValueError(f"held-out needs all {29 - len(DEV_VIDEOS)} held-out tables, found {len(tasks)}")
-    missing = [t.video.stem for t in tasks if t.video.stem not in floors or t.video.stem not in still]
-    if missing:
-        raise ValueError(f"no floor or stillness entry for {missing}: click (and prepare) them first")
-    moving = sorted(t.video.stem for t in tasks if still[t.video.stem]["motion_px"] > STILL_MAX_PX)
+    # Every input is bound to the video it describes BEFORE anything is left out: a stale stillness entry from
+    # another recording must stop the run, not quietly drop a video (Astra, review 1).
+    no_still = [t.video.stem for t in tasks if t.video.stem not in still]
+    if no_still:
+        raise ValueError(f"no stillness entry for {no_still}: run prepare first")
+    fps = {t.video.stem: fingerprint(t.video) for t in tasks}
+    stale = [v for v, fp in fps.items() if still[v]["video_fp"] != fp]
+    if stale:
+        raise ValueError(f"{stale}: the stillness entry was measured on a different recording: run prepare again")
+    moving = sorted(v for v in fps if still[v]["motion_px"] > STILL_MAX_PX)
     tasks = [t for t in tasks if t.video.stem not in moving]
-    for t in tasks:
-        if still[t.video.stem]["video_fp"] != floors[t.video.stem].video_fp:
-            raise ValueError(f"{t.video.stem}: floor and stillness come from different recordings")
+    no_floor = [t.video.stem for t in tasks if t.video.stem not in floors]
+    if no_floor:
+        raise ValueError(f"no floor for {no_floor}: click them first")
+    wrong = [t.video.stem for t in tasks if floors[t.video.stem].video_fp != fps[t.video.stem]]
+    if wrong:
+        raise ValueError(f"{wrong}: the floor was clicked on different recordings than these videos")
     rows = []
     for t in tasks:
         r = evaluate_video(t, a.tracks, floors[t.video.stem], margins, rule)
@@ -536,10 +564,13 @@ def cmd_evaluate(a) -> int:
         s = summaries[0]
         report["verdict"] = verdict(s)
         print(json.dumps(report["verdict"], indent=1))
-        print(f"linked unexplained per exposure-minute {s['baseline']['linked_unexplained_per_exposure_min']:.2f} -> "
-              f"{s['filtered']['linked_unexplained_per_exposure_min']:.2f} (ratio {s['ratio']:.3f}, 95% "
-              f"{s['ratio_ci95'][0]:.3f}-{s['ratio_ci95'][1]:.3f}); "
-              f"{'PASS' if report['verdict']['pass'] else 'FAIL'}; left out (camera moves): {moving}")
+        if "baseline" in s:
+            print(f"linked unexplained per exposure-minute {_fmt(s['baseline']['linked_unexplained_per_exposure_min'])} -> "
+                  f"{_fmt(s['filtered']['linked_unexplained_per_exposure_min'])} (ratio {_fmt(s['ratio'])}, 95% "
+                  f"{_fmt(s['ratio_ci95'][0])}-{_fmt(s['ratio_ci95'][1])})")
+        print(f"{'PASS' if report['verdict']['pass'] else 'FAIL'}; videos compared {s.get('videos_compared', 0)}; "
+              f"left out (camera moves): {moving}; baseline failed: {s.get('baseline_failed', [])}; "
+              f"failed only when filtered: {s.get('newly_failed', [])}")
         code = 0 if report["verdict"]["pass"] else 2
     out = a.out or Path(f"results/olympic_ring_eval.{a.split}.json")
     _inside_repo_ok(out)
