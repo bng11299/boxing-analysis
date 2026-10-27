@@ -566,6 +566,35 @@ check("REAL FACT: olympic_completeness.py on the written filtered tables equals 
 check("the planted boxers keep every credited punch (the floor holds them)",
       math.isclose(f0["credited_share"], b0["credited_share"]) and b0["credited_share"] > 0.9, str((b0["credited_share"], f0["credited_share"])))
 
+print("pooling: every metric is over the same videos (a baseline failure is in no arm)")
+import copy  # noqa: E402
+
+from find_punches import load_rule  # noqa: E402
+
+task78 = next(t for t in olympic.find_tasks(ds) if t.video.stem == "GH078416")
+real = olympic_ring.evaluate_video(task78, trk, ring.load_floors(floors_p)["GH078416"], (0.0,), load_rule(rule_f))
+broken = copy.deepcopy(real)
+broken["video"] = "GH128416"
+broken["base"] = {"events": 10, "credited": 10, "rows": 1, "noncredited_rows": 1, "credited_path_error": "planted"}
+broken["margins"][0.0].update(credited=10, credited_dropped=10, noncredited_rows=999, noncredited_rows_dropped=0)
+sm = olympic_ring.summarise_margin([real, broken], 0.0)
+solo = olympic_ring.summarise_margin([real], 0.0)
+check("a video whose baseline fails is listed and left out of G2 and G3a too, not only of G1",
+      sm["baseline_failed"] == ["GH128416"] and sm["credited_dropped_share"] == solo["credited_dropped_share"] == 0.0
+      and sm["credited_dropped_share_worst_video"] == 0.0 and sm["noncredited_removed_share"] == solo["noncredited_removed_share"]
+      and sm["videos_compared"] == 1 and sm["ratio"] == solo["ratio"], str({k: sm[k] for k in ("baseline_failed", "credited_dropped_share")}))
+newly = copy.deepcopy(real)
+newly["video"] = "GH138416"
+newly["margins"][0.0]["arm"]["linked_error"] = "planted"
+newly["margins"][0.0].update(credited_dropped=3)
+sn = olympic_ring.summarise_margin([real, newly], 0.0)
+check("a video that fails only when filtered is G3c's failure AND stays in the filter's cost (G3a)",
+      sn["newly_failed"] == ["GH138416"] and sn["credited_dropped"] == 3 and sn["videos_compared"] == 1
+      and olympic_ring.verdict(sn)["gate"]["G3c_no_new_failures"] is False)
+check("the local report carries per-video counts, with the linked (unexplained, minutes) of both arms when both ran",
+      set(sm["per_video"]) == {"GH078416", "GH128416"} and "linked_ue_filtered" in sm["per_video"]["GH078416"]
+      and "linked_ue_baseline" not in sm["per_video"]["GH128416"])
+
 print("end to end: refusals")
 
 

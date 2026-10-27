@@ -373,21 +373,33 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
     """Pooled numbers of one margin over the given per-video results. Videos whose BASELINE fails are left
     out of both arms and listed; a video that fails only when filtered is counted (gate G3c)."""
     out = {"margin_px": m, "videos": len(rows)}
-    cheap = [r["margins"][m] for r in rows]
+    full = rows[0]["base"] is not None
+    failed = lambda arm: "linked_error" in arm or "credited_path_error" in arm  # noqa: E731
+    if full:
+        base = [r["base"] for r in rows]
+        filt = [r["margins"][m]["arm"] for r in rows]
+        out["baseline_failed"] = [r["video"] for r, b in zip(rows, base) if failed(b)]
+        out["newly_failed"] = [r["video"] for r, b, f in zip(rows, base, filt) if not failed(b) and failed(f)]
+    # Every metric pools over the same videos: a video whose BASELINE fails is in no arm. A video that fails
+    # only when filtered stays in the filter's cost (G2, G3a) and is G3c's failure, but cannot give a G1 rate.
+    kept = [r for r in rows if r["video"] not in out.get("baseline_failed", ())]
+    cheap = [r["margins"][m] for r in kept]
     out["credited"] = sum(c["credited"] for c in cheap)
     out["credited_dropped"] = sum(c["credited_dropped"] for c in cheap)
     out["credited_dropped_share"] = _share(out["credited_dropped"], out["credited"])
-    out["credited_dropped_share_worst_video"] = max((_share(c["credited_dropped"], c["credited"]) or 0.0) for c in cheap)
+    out["credited_dropped_share_worst_video"] = max(((_share(c["credited_dropped"], c["credited"]) or 0.0) for c in cheap),
+                                                    default=0.0)
     out["noncredited_rows"] = sum(c["noncredited_rows"] for c in cheap)
     out["noncredited_removed_share"] = _share(sum(c["noncredited_rows_dropped"] for c in cheap), out["noncredited_rows"])
-    if rows[0]["base"] is None:
+    out["per_video"] = {r["video"]: {k: r["margins"][m][k] for k in ("ids_dropped", "rows_dropped", "noncredited_rows",
+                                                                    "noncredited_rows_dropped", "credited", "credited_dropped")}
+                        for r in rows}
+    if not full:
         return out
-    base = [r["base"] for r in rows]
-    filt = [r["margins"][m]["arm"] for r in rows]
-    out["baseline_failed"] = [r["video"] for r, b in zip(rows, base) if "linked_error" in b or "credited_path_error" in b]
-    out["newly_failed"] = [r["video"] for r, b, f in zip(rows, base, filt)
-                           if not ("linked_error" in b or "credited_path_error" in b)
-                           and ("linked_error" in f or "credited_path_error" in f)]
+    for r, b, f in zip(rows, base, filt):
+        if not failed(b) and not failed(f):
+            out["per_video"][r["video"]] |= {"linked_ue_baseline": list(_linked_ue(b["linked"])),
+                                             "linked_ue_filtered": list(_linked_ue(f["linked"]))}
     ok = [i for i, r in enumerate(rows) if r["video"] not in out["baseline_failed"] and r["video"] not in out["newly_failed"]]
     out["videos_compared"] = len(ok)
     if not ok:
@@ -414,8 +426,8 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
         }
     b, f = out["baseline"], out["filtered"]
     out["ratio"] = f["linked_unexplained_per_exposure_min"] / b["linked_unexplained_per_exposure_min"]
-    out["ratio_ci95"] = bootstrap_ratio([_linked_ue(base[i]["linked"]) for i in ok],
-                                        [_linked_ue(filt[i]["linked"]) for i in ok])
+    out["ratio_ci95"] = list(bootstrap_ratio([_linked_ue(base[i]["linked"]) for i in ok],
+                                             [_linked_ue(filt[i]["linked"]) for i in ok]))
     return out
 
 
