@@ -164,6 +164,47 @@ raises("ASTRA 1.7: an integer too large for a float (10**400) is a ValueError, n
 raises("ASTRA 1.7: ... also as a coordinate",
        lambda: ring.load_floors(write_doc("bigint2.json", raw=json.dumps(floors_doc({"GH1": entry(points=[[1, 1], [80, 20], [80, 80]])}))
                                           .replace("[1, 1]", f"[{big_int}, 1]").encode())), "not finite")
+print("floor file: every field x 8 wrong-type values (LESSONS 2026-10-25: hand-picked refusals miss what == forgives)")
+WRONG = [("a list", [1]), ("an object", {"a": 1}), ("null", None), ("text", "x"), ("10**400", 10 ** 400), ("-1", -1),
+         ("true", True), ("1.5", 1.5)]
+
+
+def set_path(doc, path, value):
+    node = doc
+    for k in path[:-1]:
+        node = node[k]
+    node[path[-1]] = value
+    return doc
+
+
+def sweep(name, base_doc, paths, load, legal):
+    """Every (field, value) must raise ValueError, except the combinations listed in `legal`, which must load."""
+    bad = []
+    for path in paths:
+        for label, value in WRONG:
+            doc = set_path(json.loads(json.dumps(base_doc)), path, value)
+            p = tmp / "sweep.json"
+            p.write_text(json.dumps(doc), encoding="utf-8")
+            key = (".".join(map(str, path)), label)
+            try:
+                load(p)
+                if key not in legal:
+                    bad.append(f"{key} ACCEPTED")
+            except ValueError:
+                if key in legal:
+                    bad.append(f"{key} refused but legal")
+            except Exception as e:
+                bad.append(f"{key} raised {type(e).__name__}")
+    check(f"{name}: {len(paths)} fields x {len(WRONG)} values, ValueError for every illegal one, never another exception",
+          not bad, "; ".join(bad))
+
+
+FPATHS = [("format",), ("videos",), ("videos", "GH1"), ("videos", "GH1", "points"), ("videos", "GH1", "points", 0),
+          ("videos", "GH1", "points", 0, 0), ("videos", "GH1", "points", 0, 1), ("videos", "GH1", "width"),
+          ("videos", "GH1", "height"), ("videos", "GH1", "video_fp"), ("videos", "GH1", "click_s")]
+sweep("floor file", floors_doc({"GH1": entry()}), FPATHS, ring.load_floors,
+      legal={("videos.GH1.click_s", "null"), ("videos.GH1.click_s", "1.5"),
+             ("videos.GH1.points.0.0", "1.5"), ("videos.GH1.points.0.1", "1.5")})
 raises("check_floor refuses the same things the reader does (the click tool saves through it)",
        lambda: ring.check_floor("GH1", [[20, 20], [80, 80], [80, 20], [20, 80]], 100, 100, FP), "crosses itself")
 
@@ -333,6 +374,9 @@ for name, over in [("ASTRA 1.2: 1 sample (the rule measures 24)", {"samples": 1}
                    ("ASTRA 1.2: motion above its own maximum", {"motion_px": 30, "max_px": 0})]:
     raises(f"a stillness file with {name}",
            lambda o=over: olympic_ring.load_stillness(write_doc("so.json", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE | o}})))
+SPATHS = [("format",), ("videos",), ("videos", "GH1")] + [("videos", "GH1", k) for k in sorted(olympic_ring.STILL_KEYS)]
+sweep("stillness file", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE}}, SPATHS, olympic_ring.load_stillness,
+      legal={("videos.GH1.motion_px", "1.5"), ("videos.GH1.max_px", "1.5")})
 raises("a stillness file with an extra top-level key",
        lambda: olympic_ring.load_stillness(write_doc("sx.json", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {}, "x": 1})))
 raises("a stillness file with NaN",
