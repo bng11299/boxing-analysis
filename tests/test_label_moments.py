@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -79,12 +80,16 @@ def read_index(rgb: bytes, w: int, h: int) -> int:
     return sum(1 << b for b in range(BANDS) if a[h // 2, int((b + 0.5) * bw)].mean() > 128)
 
 
-def make_video(path: Path, seconds: float, offset: int = 0, audio: bool = False) -> None:
-    n = int(round(seconds * FPS))
+def make_video(path: Path, seconds: float, offset: int = 0, audio: bool = False, rate: str = str(FPS),
+               vf: str = "") -> None:
+    num, _, den = rate.partition("/")
+    n = int(round(seconds * int(num) / int(den or 1)))
     cmd = [shutil.which("ffmpeg"), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
-           "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-"]
+           "-s", f"{W}x{H}", "-r", rate, "-i", "-"]
     if audio:
         cmd += ["-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono", "-shortest", "-c:a", "aac"]
+    if vf:
+        cmd += ["-vf", vf, "-fps_mode", "passthrough"]
     cmd += ["-c:v", "libx264", "-g", "60", "-bf", "2", "-crf", "12", "-pix_fmt", "yuv420p", str(path)]
     data = b"".join(frame_for(i + offset).tobytes() for i in range(n))
     subprocess.run(cmd, input=data, check=True, capture_output=True)
@@ -186,11 +191,36 @@ make_video(aud, 3.0, audio=True)
 raises("a video with an audio track (blurred copies carry none) is refused",
        lambda: lm.probe(aud), contains="audio track")
 meta = lm.probe(vid)
-check("probe reads size, rate and duration", (meta.width, meta.height, round(meta.fps)) == (W, H, FPS)
-      and abs(meta.duration - 12.0) < 0.05, str(meta))
+check("probe reads size, rate and the decoded frame count", (meta.width, meta.height, round(meta.fps),
+      meta.n_frames) == (W, H, FPS, 360) and abs(meta.duration - 12.0) < 1e-9, str(meta))
 bad = blurred / "not-a-video.mp4"
 bad.write_bytes(b"\x00" * 1000)
 raises("a file that is not a video is refused", lambda: lm.probe(bad), contains="ffprobe")
+vfr = blurred / "syn-vfr.mp4"
+make_video(vfr, 6.0, vf=r"setpts=N/30/TB+gte(N\,90)*0.5/TB")     # a 0.5 s hole after frame 90
+raises("a video with irregular frame timing is refused (frame round(t x fps) would not be time t)",
+       lambda: lm.probe(vfr), contains="irregular")
+
+guard = lm.VideoGuard(vid, blurred)
+check("the guard accepts the checked video", guard.check() == vid.resolve())
+victim = blurred / "syn-swap.mp4"
+shutil.copy(vid, victim)
+g2 = lm.VideoGuard(victim, blurred)
+if os.name == "nt":
+    try:
+        os.replace(aud, victim)
+        swapped = True
+    except PermissionError:
+        swapped = False
+    check("while the tool holds the video, Windows refuses to replace it", not swapped)
+g2.close()                                     # let go, so the swap can happen
+shutil.copy(vid, aud)                          # keep a spare to swap in
+os.replace(blurred / "syn-audio.mp4", victim)
+g2._f = open(victim, "rb")                     # a guard whose recorded identity is the old file
+raises("a video swapped after its check is refused before the next decode", g2.check,
+       contains="moved or changed")
+g2.close()
+raises("a closed guard decodes nothing", g2.check, contains="closed")
 
 # ---- 2. the labels path and format ----------------------------------------------------------------
 print("\n-- 2. which labels file may be written, and its format")
@@ -224,6 +254,9 @@ for why, text, needle in [
     ("a wrong column header", base.replace("t_s,a_side", "t,side"), "column header"),
     ("rows off the 5 s grid", base.replace("5,\n", "6,\n"), "grid"),
     ("rows out of order", base.replace("0,\n5,\n", "5,\n0,\n"), "grid"),
+    ("a time with a leading zero (00) that would be rewritten", base.replace("\n0,\n", "\n00,\n"), "row 1"),
+    ("a time with a leading zero (05)", base.replace("\n5,\n", "\n05,\n"), "row 2"),
+    ("a time in non-ASCII digits", base.replace("\n5,\n", "\n٥,\n"), "row 2"),
     ("a value other than L/R/?", base.replace("5,\n", "5,X\n"), "row 2"),
     ("a lower-case value (the template never holds one)", base.replace("5,\n", "5,l\n"), "row 2"),
     ("a third field", base.replace("5,\n", "5,L,extra\n"), "row 2"),
@@ -231,6 +264,9 @@ for why, text, needle in [
     ("minutes that are not a number", base.replace("# minutes: ", "# minutes: soon"), "not a number"),
     ("minutes out of range", base.replace("# minutes: ", "# minutes: 9999"), "minutes"),
     ("mixed line endings", base.replace("5,\n", "5,\r\n"), "line endings"),
+    ("a Unicode line separator (splitlines would see another file)", base.replace("5,\n", "5, "),
+     "line break"),
+    ("a form feed", base.replace("# every_s: 5", "# every_s: 5\x0c"), "line break"),
 ]:
     p = fresh(text, "bad.labels.csv")
     raises(f"refused: {why}", lambda p=p: lm.LabelFile.load(p), contains=needle)
@@ -240,10 +276,11 @@ raises("refused: not UTF-8", lambda: lm.LabelFile.load(p), contains="UTF-8")
 p.write_bytes(b"#" * (lm.MAX_LABEL_BYTES + 1))
 raises("refused: over the size cap", lambda: lm.LabelFile.load(p), contains="bytes")
 
-# ---- 3. the pair: fingerprint and row times -------------------------------------------------------
-print("\n-- 3. the CSV must belong to the video, and stay inside it")
+# ---- 3. the pair: fingerprint and the exact grid --------------------------------------------------
+print("\n-- 3. the CSV must belong to the video, and hold exactly its grid")
 lm.check_pair(lm.LabelFile.load(csv), vid, meta)
 check("the CSV made for this video passes", True)
+check("the grid matches glovescore.label_times for 360 frames at 30 fps", lm.label_grid(meta) == TIMES)
 other = blurred / "syn-v2.mp4"
 make_video(other, 12.0, offset=7)
 raises("a CSV made for another video is refused",
@@ -251,47 +288,82 @@ raises("a CSV made for another video is refused",
 long_csv = fresh(template_text(fp, [0, 5, 10, 15]), "long.labels.csv")
 raises("a row past the end of the video is refused (t = 15 s, video 12 s)",
        lambda: lm.check_pair(lm.LabelFile.load(long_csv), vid, meta), contains="past the end")
+short_csv = fresh(template_text(fp, [0]), "short.labels.csv")
+raises("a truncated CSV (rows missing at the end; the gate would refuse it) is refused",
+       lambda: lm.check_pair(lm.LabelFile.load(short_csv), vid, meta), contains="missing at the end")
 ten = blurred / "syn-10s.mp4"
 make_video(ten, 10.0)
 edge = fresh(template_text(fingerprint(ten), [0, 5, 10]), "edge.labels.csv")
-raises("a row exactly at the end (t = 10 s of a 10.0 s video: no such frame) is refused",
+raises("a row exactly at the end (t = 10 s of a 300-frame video: no such frame) is refused",
        lambda: lm.check_pair(lm.LabelFile.load(edge), ten, lm.probe(ten)), contains="row 3")
 raises("open_inputs refuses an original before reading anything",
        lambda: cli.open_inputs(csv, orig, ROOTS), contains="unblurred original")
 
 # ---- 4. the clip shows the right frame ------------------------------------------------------------
-print("\n-- 4. the red frame is exactly frame t x fps")
+print("\n-- 4. the red frame is exactly frame round(t x fps)")
 for t in TIMES:
-    c = lm.decode_clip(vid, meta, t)
+    c = lm.decode_clip(guard, meta, t)
     got = read_index(c.frames[c.centre], c.width, c.height)
     first = read_index(c.frames[0], c.width, c.height)
     want_n = min(359, t * FPS + FPS) - max(0, t * FPS - FPS) + 1
     check(f"t = {t} s: the red frame is stored frame {t * FPS}", got == t * FPS, f"got {got}")
     check(f"t = {t} s: the clip starts at frame {max(0, t * FPS - FPS)} and has {want_n} frames",
-          first == max(0, t * FPS - FPS) and len(c.frames) == want_n, f"first {first}, n {len(c.frames)}")
+          first == max(0, t * FPS - FPS) == c.start_f and len(c.frames) == want_n,
+          f"first {first}, n {len(c.frames)}")
     seq = [read_index(f, c.width, c.height) for f in c.frames]
     check(f"t = {t} s: no frame dropped or repeated", seq == list(range(seq[0], seq[0] + len(seq))))
-big = lm.VideoMeta(1920, 1080, 30.0, 300.0)
+ntsc = blurred / "syn-ntsc.mp4"
+make_video(ntsc, 12.0, rate="30000/1001")
+gn = lm.VideoGuard(ntsc, blurred)
+mn = lm.probe(ntsc)
+for t in (5, 10):
+    c = lm.decode_clip(gn, mn, t)
+    want = int(round(t * 30000 / 1001))
+    got = read_index(c.frames[c.centre], c.width, c.height)
+    check(f"29.97 fps, t = {t} s: the red frame is stored frame {want}", got == want, f"got {got}")
+gn.close()
+real_run = subprocess.run
+
+
+def short_run(cmd, **k):
+    done = real_run(cmd, **k)
+    if "-frames:v" in cmd:
+        size = len(done.stdout) // int(cmd[cmd.index("-frames:v") + 1])
+        done.stdout = done.stdout[:size * 10]           # ffmpeg stopped after 10 frames
+    return done
+
+
+subprocess.run = short_run
+try:
+    raises("a short decode is refused, not shown with another frame in red",
+           lambda: lm.decode_clip(guard, meta, 5), contains="could not decode")
+finally:
+    subprocess.run = real_run
+big = lm.VideoMeta(1920, 1080, 30.0, 9000, 300.0)
 check("1080p is shown at 960x540", lm.display_size(big) == (960, 540))
 check("a small video is not enlarged", lm.display_size(meta) == (W, H))
 
 # ---- 5. the A description -------------------------------------------------------------------------
-print("\n-- 5. # A: colours and plain words only, never a name")
-for ok in ["the boxer in red gloves", "Boxer in BLUE gloves", "black gloves, white trim",
-           "the taller boxer, red gloves", "red/white gloves", "boxer with dark blue headgear"]:
-    check(f"accepted: {ok!r}", lm.check_description(ok) == ok.strip())
-for bad_text, needle in [
-    ("Brendan", "word 1"), ("the boxer Alex in red gloves", "word 3"), ("red gloves (John)", "word 3"),
-    ("Coach's boxer in red", "letters"), ("boxer 2 in red", "letters"), ("", "describe"), ("   ", "describe"),
-    ("red " * 30, "80"), ("the boxer on the left", "colour"), ("the boxer in gloves", "colour"),
-    ("ｒｅｄ gloves", "letters"), ("red gloves​", "letters"), ("rose", "word 1"),
-    ("the boxer in red gloves; drop table", "letters"),
-]:
-    raises(f"refused: {bad_text[:30]!a}", lambda b=bad_text: lm.check_description(b), contains=needle)
+print("\n-- 5. # A: built from glove colours only, so no name can get in")
+for typed, want in [("red", "the boxer in red gloves"), ("  RED ", "the boxer in red gloves"),
+                    ("red and white", "the boxer in red and white gloves"),
+                    ("red, white", "the boxer in red and white gloves"),
+                    ("red/white", "the boxer in red and white gloves")]:
+    check(f"typed {typed!r} -> {want!r}", lm.description_from_colours(typed) == want)
+for typed, needle in [("Brendan", "colour 1"), ("Gray Brown", "colour 1"), ("red Alex", "colour 2"),
+                      ("", "one or two"), ("red white blue", "one or two"), ("red red", "differ"),
+                      ("rose", "colour 1"), ("ｒｅｄ", "colour 1"), ("the boxer in red gloves", "one or two")]:
+    raises(f"refused: {typed!a}", lambda t=typed: lm.description_from_colours(t), contains=needle)
 try:
-    lm.check_description("the boxer Alex")
+    lm.description_from_colours("Alex")
 except lm.Refused as e:
     check("a refusal never repeats the word", "alex" not in str(e).lower(), str(e))
+for text in ("the boxer in red gloves", "the boxer in navy and white gloves"):
+    check(f"an A already in the file passes: {text!r}", lm.check_description(text) == text)
+for text in ("Gray Brown", "the boxer Brown", "the boxer in Red gloves", "the boxer in rose gloves",
+             "the boxer in red and red gloves", "the boxer in red gloves ", "boxer A", ""):
+    raises(f"an A in the file is not trusted unless generated: {text!a}",
+           lambda t=text: lm.check_description(t), contains="form")
 
 # ---- 6. editing keeps every other byte ------------------------------------------------------------
 print("\n-- 6. only A, minutes and the a_side values change")
@@ -311,7 +383,7 @@ check("exactly 5 lines changed: A, minutes and the three rows",
 check("they read as the gate expects", [new[i] for i in changed] ==
       ["# A: the boxer in red gloves", "# minutes: 3.46", "0,L", "5,?", "10,R"], str([new[i] for i in changed]))
 raises("set_value refuses anything but L/R/?", lambda: lf.set_value(0, "X"), ValueError, "L, R")
-raises("set_description refuses a name", lambda: lf.set_description("Alex"), lm.Refused, "word 1")
+raises("set_description refuses free text", lambda: lf.set_description("Alex"), lm.Refused, "form")
 check("no temp file left beside the labels", not list(gid.glob(".label_moments-*")))
 
 # ---- 7. the session: save every row, time itself, resume after an interruption --------------------
@@ -321,7 +393,7 @@ clk = Clock()
 s = lm.Session(lm.LabelFile.load(p), clock=clk)
 check("a new session starts at row 1 and asks for A", s.i == 0 and s.needs_description())
 clk.t += 30
-s.describe("the boxer in red gloves")
+s.describe("red")
 clk.t += 30
 s.label("L")
 check("an answer is on disk at once", "0,L" in p.read_text() and s.i == 1)
@@ -343,7 +415,7 @@ check("the file is complete", s2.done() and lm.verify(lm.LabelFile.load(p))["com
 p = fresh()
 clk = Clock()
 s = lm.Session(lm.LabelFile.load(p), clock=clk)
-s.describe("the boxer in red gloves")
+s.describe("red")
 clk.t += 3600                                  # walked away for an hour mid-session
 s.label("L")
 check(f"a gap over {lm.IDLE_CAP_S:.0f} s counts as {lm.IDLE_CAP_S:.0f} s", "# minutes: 2.00" in p.read_text())
@@ -363,7 +435,7 @@ check("E jumps to the first empty row", s.i == 1)
 
 p = fresh()
 s = lm.Session(lm.LabelFile.load(p), clock=Clock())
-s.describe("the boxer in red gloves")
+s.describe("red")
 before = p.read_bytes()
 real_replace = os.replace
 
@@ -380,6 +452,18 @@ finally:
 check("after a failed save the file on disk is unchanged", p.read_bytes() == before)
 check("after a failed save the row stays current", s.i == 0)
 check("after a failed save no temp file is left", not list(gid.glob(".label_moments-*")))
+real_mkstemp = tempfile.mkstemp
+
+
+def failing_mkstemp(*a, **k):
+    raise PermissionError("no space / no permission")
+
+
+tempfile.mkstemp = failing_mkstemp
+try:
+    raises("a temp file that cannot be created is a SaveFailed too", lambda: s.label("L"), lm.SaveFailed, "not")
+finally:
+    tempfile.mkstemp = real_mkstemp
 s.label("L")
 check("the next save writes the answer", "0,L" in p.read_text())
 
@@ -402,7 +486,8 @@ try:
     rc_check = cli.main([str(p), str(vid), "--check"], roots=ROOTS)
     rc_verify = cli.main([str(p), "--verify"], roots=ROOTS)
     rc_orig = cli.main([str(p), str(orig), "--check"], roots=ROOTS)
-    answers = iter(["Alex", "the boxer in red gloves"])
+    rc_short = cli.main([str(short_csv), str(vid), "--check"], roots=ROOTS)
+    answers = iter(["Alex", "red"])
     s = lm.Session(lm.LabelFile.load(p), clock=Clock())
     said = []
     cli.ask_description(s, read=lambda _: next(answers), write=said.append)
@@ -411,17 +496,23 @@ finally:
 check("--check passes on a good pair", rc_check == 0)
 check("--verify says not complete on an empty template (exit 1)", rc_verify == 1)
 check("the CLI refuses an original with exit 2", rc_orig == 2)
-check("the A prompt refuses a name, then accepts a description",
+check("the CLI refuses a truncated CSV with exit 2", rc_short == 2)
+check("the A prompt refuses a name, then accepts a colour",
       any("not accepted" in x for x in said) and "# A: the boxer in red gloves" in p.read_text())
 check("the A prompt never echoes the refused word", not any("alex" in x.lower() for x in said))
 check("nothing ending .npz or .log was opened", not [f for f in opened if f.endswith((".npz", ".log"))],
       str([Path(f).name for f in opened if f.endswith((".npz", ".log"))]))
 check("the labels file and the video were opened (the spy works)",
       any(f.endswith(".labels.csv") for f in opened) and any(f.endswith(".mp4") for f in opened))
-answers = iter([""])
-s = lm.Session(lm.LabelFile.load(fresh()), clock=Clock())
-check("an empty answer to the A prompt quits", cli.ask_description(s, read=lambda _: next(answers),
-                                                                  write=lambda _: None) is False)
+for given in ([""], EOFError, KeyboardInterrupt):
+    s = lm.Session(lm.LabelFile.load(fresh()), clock=Clock())
+
+    def read(_, g=given):
+        if isinstance(g, list):
+            return g[0]
+        raise g()
+    check(f"the A prompt quits on {given if isinstance(given, list) else given.__name__}",
+          cli.ask_description(s, read=read, write=lambda _: None) is False)
 check("quitting at the prompt changes nothing", (gid / "syn-v1.labels.csv").read_bytes() == ORIGINAL)
 check("the key map has L, R, ? and the moves", [lm.action_for(k) for k in
       ("l", "R", "question", "slash", "Left", "BackSpace", "Right", "space", "q", "Escape", "x")] ==
@@ -436,44 +527,93 @@ try:
 except Exception as e:     # noqa: BLE001
     skip("the window tests", f"no display: {type(e).__name__}")
     root = None
+
+
+def pump(app, until, timeout=20.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        app.root.update()
+        if until():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+class Ev:
+    def __init__(self, keysym):
+        self.keysym = keysym
+
+
 if root is not None:
     p = fresh()
     clk = Clock()
     s = lm.Session(lm.LabelFile.load(p), clock=clk)
-    s.describe("the boxer in red gloves")
-    app = cli.App(root, s, vid, meta, "syn-v1", clock=clk)
-    root.update()
-    check("the first moment opens on the red frame", app.frame.cget("bg") == cli.RED and app.clip.t == 0)
-    check("too-early answers are ignored (key held down / not yet seen)", app.handle("L") == "too-soon"
+    s.describe("red")
+    app = cli.App(root, s, guard, meta, "syn-v1", clock=clk)
+    check("answers are ignored while the first moment loads", app.handle("L") == "too-soon")
+    check("the first moment loads without blocking the window", pump(app, lambda: app.clip is not None))
+    check("it opens on the red frame", app.frame.cget("bg") == cli.RED and app.clip.t == 0)
+    check("too-early answers are ignored (moment not on screen long enough)", app.handle("L") == "too-soon"
           and s.lf.values[0] == "")
     clk.t += 1.0
     check("an answer after the moment was shown is saved", app.handle("L") == "L" and "0,L" in p.read_text())
-    check("the window moved to the next moment and shows it", s.i == 1 and app.clip.t == 5)
-    check("the next answer again waits for the moment to be seen", app.handle("R") == "too-soon")
+    check("the window moves to the next moment", s.i == 1 and pump(app, lambda: app.clip is not None)
+          and app.clip.t == 5)
     shown = read_index(app.clip.frames[app.clip.centre], app.clip.width, app.clip.height)
     check("the red frame shown for t = 5 s is frame 150", shown == 150, str(shown))
-    for _ in range(5):
-        root.update()
+    clk.t += 5.0
+    check("a held key (no release since the last answer) answers nothing", app.on_key(Ev("l")) == "held"
+          and s.lf.values[1] == "")
+    app.on_release(Ev("l"))
+    check("auto-repeat (a release then a press at once) still answers nothing",
+          app.on_key(Ev("l")) == "held" and s.lf.values[1] == "")
+    app.on_release(Ev("l"))
+    pump(app, lambda: app.armed)
+    check("a real release, then a press, answers", app.on_key(Ev("r")) == "R" and s.lf.values[1] == "R")
+    pump(app, lambda: app.clip is not None)
+    app.on_release(Ev("r"))
+    pump(app, lambda: app.armed)
     app.handle("back")
-    check("<- goes back to the previous moment", s.i == 0 and app.clip.t == 0)
-    check("unknown keys do nothing", app.handle(None) is None and s.i == 0)
+    check("<- goes back to the previous moment", s.i == 1 and pump(app, lambda: app.clip is not None)
+          and app.clip.t == 5)
+    check("unknown keys do nothing", app.on_key(Ev("x")) is None and s.i == 1)
 
-    class Ev:
-        keysym = "r"
+    real_decode = lm.decode_clip
+
+    def broken_decode(g, m, t, **k):
+        if t == 10:
+            raise lm.Refused("ffmpeg could not decode the clip at t = 10 s")
+        return real_decode(g, m, t, **k)
+    lm.decode_clip = broken_decode
+    try:
+        app.cache.clear()
+        app.pending.clear()
+        app.handle("next")
+        pump(app, lambda: app.shown_at is not None)
+        clk.t += 5.0
+        check("a moment that failed to decode shows no picture", app.clip is None and app.image.cget("image") == ""
+              and app.frame.cget("bg") == cli.GREY)
+        check("... and L or R cannot be given for it", app.handle("L") == "not-shown" and s.lf.values[2] == "")
+        check("... only ? (can't tell)", app.handle("?") == "?" and s.lf.values[2] == "?")
+    finally:
+        lm.decode_clip = real_decode
+    app.on_release(Ev("question"))
+    pump(app, lambda: app.armed and app.clip is not None)
+    app.handle("first_empty")
+    check("a jump drops decodes nobody will show", set(app.pending) <= {s.lf.times[s.i]} |
+          ({s.lf.times[s.i + 1]} if s.i + 1 < s.n else set()))
     clk.t += 1.0
-    check("a real key event is routed through the key map", app.on_key(Ev()) == "R" and s.lf.values[0] == "R")
-    clk.t += 1.0
-    real_replace = os.replace
     os.replace = failing_replace
     try:
-        check("a failed save is shown in the window and nothing moves",
-              app.handle("?") == "save-failed" and s.i == 1 and "NOT SAVED" in app.status.cget("text"))
+        check("a failed save on quit keeps the window open", app.handle("quit") == "save-failed"
+              and not app.closed and "NOT SAVED" in app.status.cget("text"))
     finally:
         os.replace = real_replace
     clk.t += 5.0
-    app.handle("quit")
-    check("quit saves the time spent", "# minutes:" in p.read_text() and lm.LabelFile.load(p).prior_minutes() > 0)
+    check("quit after the file is free saves and closes", app.handle("quit") == "quit" and app.closed)
+    check("quit saved the time spent", lm.LabelFile.load(p).prior_minutes() > 0)
 
+guard.close()
 print(f"\n=== {PASS} passed, {FAIL} failed, {SKIP} skipped ===")
 shutil.rmtree(tmp, ignore_errors=True)
 sys.exit(1 if FAIL else 0)

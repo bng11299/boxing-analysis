@@ -11,9 +11,12 @@ labels stay independent of what the method guessed.
 
 Trust boundary: both files are checked before anything is shown. The video must lie under
 `~/comps-participant-data/blurred/` after resolving links, must not be an unblurred original (`PXL_*`), must
-carry no audio track (blurred copies carry none), and must be the video the CSV names. The CSV must lie
-under `~/comps-participant-data/`, follow the template's format exactly, and have no row past the video's end.
-Messages never repeat an input value or a path.
+carry no audio track (blurred copies carry none), must have regular frame timing (the gate scores frame
+round(t x fps)), and must be the video the CSV names. It is held open from the check to the end of the
+session, and its identity is re-checked before every decode, so it cannot be swapped once checked. The CSV
+must lie under `~/comps-participant-data/`, follow the template's format exactly, and hold exactly the
+gate's time grid for this video. `# A:` is generated from glove colours chosen off a fixed list, so no
+name can be typed into it. Messages never repeat an input value or a path.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .video import MAX_PIXELS, fingerprint
+from .video import probe as _video_probe
 
 PARTICIPANT_ROOT = Path.home() / "comps-participant-data"
 BLURRED_ROOT = PARTICIPANT_ROOT / "blurred"
@@ -38,9 +42,9 @@ BLURRED_ROOT = PARTICIPANT_ROOT / "blurred"
 LABEL_FORMAT = "glove-identity-labels-1"      # glovescore.LABEL_FORMAT
 EVERY_S = 5                                   # glovescore.LABEL_EVERY_S
 MAX_LABEL_BYTES = 1024 * 1024                 # glovescore.MAX_LABEL_BYTES
-MAX_A_CHARS = 80                              # glovescore.MAX_A_CHARS
 MAX_MINUTES = 600.0                           # glovescore.MAX_MINUTES
-MAX_ROWS = 6 * 3600 // EVERY_S + 1            # glovescore.MAX_DURATION_S on the 5 s grid
+MAX_DURATION_S = 6 * 3600.0                   # glovescore.MAX_DURATION_S
+MAX_ROWS = int(MAX_DURATION_S) // EVERY_S + 1
 VALUES = ("L", "R", "?")
 HEADER_KEYS = ("format", "video_fp", "every_s", "A", "minutes")
 
@@ -48,22 +52,20 @@ IDLE_CAP_S = 120.0       # a gap longer than this between two key presses counts
 CLIP_HALF_S = 1.0        # the clip runs from t - 1 s to t + 1 s
 MAX_DISPLAY_W = 960
 FFMPEG_TIMEOUT_S = 120
+PROBE_TIMEOUT_S = 60
 
 _HEADER = re.compile(r"(#\s*([A-Za-z_]+)\s*:)(.*)")
-_ROW = re.compile(r"(\d{1,6}),([LR?]?)")
+_ROW = re.compile(r"(0|[1-9][0-9]{0,5}),([LR?]?)")         # canonical times only: no 00, no 05
 _FP = re.compile(r"[0-9a-f]{64}")
+# str.splitlines (what parse_labels uses) also breaks on these; refusing them keeps both readers in step
+_OTHER_LINE_BREAKS = "\x0b\x0c\x1c\x1d\x1e\x85  "
 
-# `# A:` says who boxer A is. Deny by default: every word must be on these lists, and at least one must be
-# a colour, so A is tied to how he looks, never to a name or to a position that changes.
-COLOUR_WORDS = frozenset("""
-    red blue black white green yellow orange pink purple grey gray brown gold golden silver navy maroon
-    teal cyan beige tan light dark bright pale neon""".split())
-PLAIN_WORDS = frozenset("""
-    a an the boxer boxers fighter person gloves glove in with wearing wears left right on of and or who is
-    has at side mostly both hand hands colour color coloured colored trim trimmed stripe stripes striped
-    shirt top tank vest shorts trunks headgear head guard taller shorter tall short bigger smaller larger
-    no without one other""".split())
-_A_CHARS = re.compile(r"[A-Za-z ,.()/-]+")
+# `# A:` says who boxer A is, as "the boxer in <colour> gloves" or "the boxer in <c1> and <c2> gloves",
+# built from this list. A free-text field cannot keep names out (Brown, Gray, White are surnames too);
+# a fixed slot that only takes a glove colour can.
+GLOVE_COLOURS = ("red", "blue", "black", "white", "green", "yellow", "orange", "pink", "purple", "grey",
+                 "brown", "gold", "silver", "navy")
+_A_TEXT = re.compile(r"the boxer in ([a-z]+)(?: and ([a-z]+))? gloves")
 
 
 class Refused(ValueError):
@@ -124,24 +126,58 @@ def check_labels_path(labels, participant_root=PARTICIPANT_ROOT) -> Path:
     return r
 
 
+class VideoGuard:
+    """The checked video, held open until the session ends. On Windows an open file can be neither replaced
+    nor renamed, nor its folder renamed; everywhere, `check()` re-confirms before each decode that the path
+    still resolves to the same file (device, file id, size, modification time) under the blurred root."""
+
+    def __init__(self, video, blurred_root=BLURRED_ROOT):
+        self.root = blurred_root
+        self.path = check_video_path(video, blurred_root)
+        self._f = open(self.path, "rb")
+        st = os.fstat(self._f.fileno())
+        self._id = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+    def check(self) -> Path:
+        if self._f is None:
+            raise Refused("the video was closed")
+        try:
+            again = check_video_path(self.path, self.root)
+            st = os.stat(again)
+        except (Refused, OSError):
+            raise Refused("the video moved or changed after it was checked") from None
+        if again != self.path or (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != self._id:
+            raise Refused("the video moved or changed after it was checked")
+        return self.path
+
+    def close(self) -> None:
+        if self._f is not None:
+            self._f.close()
+            self._f = None
+
+
 # ---- the A description ----------------------------------------------------------------------------
-def check_description(text: str) -> str:
-    """Return the description stripped, or refuse it. Names are refused by construction: only listed
-    words pass. The message says which check failed and which word position, never the word."""
-    s = (text or "").strip()
-    if not s:
-        raise Refused("describe boxer A, e.g. 'the boxer in red gloves'")
-    if len(s) > MAX_A_CHARS:
-        raise Refused(f"keep it to {MAX_A_CHARS} characters")
-    if not _A_CHARS.fullmatch(s):
-        raise Refused("use letters, spaces and , . ( ) / - only (no digits, no apostrophes)")
-    words = [w for w in re.split(r"[ ,.()/-]+", s.lower()) if w]
+def description_from_colours(text: str) -> str:
+    """'red' -> 'the boxer in red gloves'; 'red and white' / 'red, white' / 'red/white' -> two colours.
+    Only colours from GLOVE_COLOURS; anything else is refused, and the message never repeats it."""
+    words = [w for w in re.split(r"[\s,/]+", (text or "").strip().lower()) if w and w != "and"]
+    if not 1 <= len(words) <= 2:
+        raise Refused("type one or two glove colours from the list")
     for n, w in enumerate(words, start=1):
-        if w not in COLOUR_WORDS and w not in PLAIN_WORDS:
-            raise Refused(f"word {n} is not on the allowed list (colours and plain words only, never a name)")
-    if not any(w in COLOUR_WORDS for w in words):
-        raise Refused("name at least one colour (e.g. 'red gloves'), so A is tied to how he looks")
-    return s
+        if w not in GLOVE_COLOURS:
+            raise Refused(f"colour {n} is not on the list")
+    if len(words) == 2 and words[0] == words[1]:
+        raise Refused("two colours must differ")
+    return "the boxer in " + " and ".join(words) + " gloves"
+
+
+def check_description(text: str) -> str:
+    """A `# A:` already in the file passes only if it is exactly what description_from_colours writes."""
+    m = _A_TEXT.fullmatch(text or "")
+    cols = [c for c in (m.groups() if m else ()) if c]
+    if not cols or any(c not in GLOVE_COLOURS for c in cols) or (len(cols) == 2 and cols[0] == cols[1]):
+        raise Refused("'# A:' is not of the form 'the boxer in <colour> gloves'")
+    return text
 
 
 # ---- the labels file ------------------------------------------------------------------------------
@@ -171,6 +207,8 @@ class LabelFile:
             text = raw[3 if bom else 0:].decode("utf-8")
         except UnicodeDecodeError:
             raise Refused("the labels file is not UTF-8 text") from None
+        if any(c in text for c in _OTHER_LINE_BREAKS):
+            raise Refused("the labels file holds an unusual line break: not as the template wrote it")
         newline = "\r\n" if "\r\n" in text else "\n"
         if "\r" in text.replace("\r\n", "") or (newline == "\r\n" and "\n" in text.replace("\r\n", "")):
             raise Refused("the labels file mixes line endings: not as the template wrote it")
@@ -262,18 +300,20 @@ class LabelFile:
         """Atomic: a temp file beside the target, then a rename. A crash leaves the old file whole, and a
         hard link planted at the target is replaced, not written through."""
         data = self.to_bytes()
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".label_moments-", suffix=".tmp")
+        tmp = None
         try:
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".label_moments-", suffix=".tmp")
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
         except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
             raise SaveFailed("could not save the labels file (is it open in Excel or another program?)") \
                 from None
 
@@ -301,10 +341,11 @@ def verify(lf: LabelFile) -> dict:
 # ---- the video ------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class VideoMeta:
-    width: int
+    width: int           # displayed size (after any rotation flag; ffmpeg applies it on decode)
     height: int
     fps: float
-    duration: float
+    n_frames: int        # frames the decoder outputs, measured from the packets
+    duration: float      # n_frames / fps
 
 
 def _tool(name: str) -> str:
@@ -315,46 +356,59 @@ def _tool(name: str) -> str:
 
 
 def probe(video: Path) -> VideoMeta:
-    cmd = [_tool("ffprobe"), "-v", "error", "-show_entries",
-           "stream=codec_type,width,height,avg_frame_rate,duration:format=duration", "-of", "json", str(video)]
+    """Streams first (no audio, exactly one video stream), then the repo's own probe and frame-timing scan
+    (`video.probe`): the gate scores frame round(t x fps), so the video must have regular frame timing."""
+    cmd = [_tool("ffprobe"), "-v", "error", "-protocol_whitelist", "file", "-show_entries",
+           "stream=codec_type", "-of", "json", str(video)]
     try:
-        done = subprocess.run(cmd, capture_output=True, timeout=60)
+        done = subprocess.run(cmd, capture_output=True, timeout=PROBE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        raise Refused("ffprobe took over 60 s to read the video") from None
+        raise Refused(f"ffprobe took over {PROBE_TIMEOUT_S} s to read the video") from None
     if done.returncode != 0:
         raise Refused("ffprobe could not read the video")
     try:
-        doc = json.loads(done.stdout)
-        streams = doc.get("streams", [])
-        if any(s.get("codec_type") == "audio" for s in streams):
-            raise Refused("the video has an audio track; blurred copies carry none, so this is not one")
-        vs = [s for s in streams if s.get("codec_type") == "video"]
-        if len(vs) != 1:
-            raise Refused("the video must have exactly one video stream")
-        s = vs[0]
-        w, h = int(s["width"]), int(s["height"])
-        num, _, den = str(s["avg_frame_rate"]).partition("/")
-        fps = int(num) / int(den or 1)
-        dur = float(s.get("duration") or doc.get("format", {}).get("duration"))
-    except Refused:
-        raise
-    except (KeyError, ValueError, TypeError, ZeroDivisionError, AttributeError):
-        raise Refused("the video has no readable size, frame rate or duration") from None
-    if not (0 < w and 0 < h and w * h <= MAX_PIXELS):
+        kinds = [s.get("codec_type") for s in json.loads(done.stdout).get("streams", [])]
+    except (ValueError, AttributeError, TypeError):
+        raise Refused("ffprobe could not read the video") from None
+    if "audio" in kinds:
+        raise Refused("the video has an audio track; blurred copies carry none, so this is not one")
+    if kinds.count("video") != 1:
+        raise Refused("the video must have exactly one video stream")
+    try:
+        info = _video_probe(video)
+    except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired):
+        raise Refused("the video has no readable size or frame rate") from None
+    if info.vfr or info.timing is None:
+        raise Refused("the video's frame timing is irregular: frame round(t x fps) would not be time t")
+    fps, n = info.fps, int(info.timing.n_frames)
+    if not (0 < info.width and 0 < info.height and info.width * info.height <= MAX_PIXELS):
         raise Refused("the video's frame size is out of range")
-    if not (math.isfinite(fps) and 1 <= fps <= 240 and math.isfinite(dur) and dur > 0):
-        raise Refused("the video's frame rate or duration is out of range")
-    return VideoMeta(w, h, fps, dur)
+    if not (math.isfinite(fps) and 1 <= fps <= 240 and n > 0 and n / fps <= MAX_DURATION_S):
+        raise Refused("the video's frame rate or length is out of range")
+    return VideoMeta(info.width, info.height, fps, n, n / fps)
+
+
+def label_grid(meta: VideoMeta) -> "list[int]":
+    """glovescore.label_times: seconds 0, 5, 10, ... whose frame round(t x fps) lies inside the video."""
+    out, t = [], 0
+    while int(round(t * meta.fps)) < meta.n_frames:
+        out.append(t)
+        t += EVERY_S
+    return out
 
 
 def check_pair(lf: LabelFile, video: Path, meta: VideoMeta) -> None:
-    """The CSV must be the one made for this blurred video, and no row may lie past its end."""
+    """The CSV must be the one made for this blurred video, and hold exactly the gate's grid for it: no row
+    past the end, none missing at the end."""
     if fingerprint(video) != lf.head("video_fp"):
         raise Refused("this labels file was made for a different video (fingerprints differ)")
-    last_frame = int(round(meta.duration * meta.fps)) - 1
-    for k, t in enumerate(lf.times):
-        if int(round(t * meta.fps)) > last_frame:
-            raise Refused(f"row {k + 1} (t = {t} s) is past the end of the video ({meta.duration:.1f} s)")
+    grid = label_grid(meta)
+    if len(lf.times) > len(grid):
+        k = len(grid)
+        raise Refused(f"row {k + 1} (t = {lf.times[k]} s) is past the end of the video ({meta.duration:.1f} s)")
+    if len(lf.times) < len(grid):
+        raise Refused(f"rows are missing at the end: this video needs {len(grid)} rows, the file has "
+                      f"{len(lf.times)}")
 
 
 @dataclass(frozen=True)
@@ -363,8 +417,9 @@ class Clip:
     width: int
     height: int
     fps: float
+    start_f: int         # stored frame number of frames[0]
     frames: tuple        # raw RGB24 bytes, one per frame
-    centre: int          # index of the frame at time t
+    centre: int          # index of the frame at time t (stored frame round(t x fps))
 
 
 def display_size(meta: VideoMeta, max_w: int = MAX_DISPLAY_W) -> "tuple[int, int]":
@@ -374,18 +429,20 @@ def display_size(meta: VideoMeta, max_w: int = MAX_DISPLAY_W) -> "tuple[int, int
     return w, h
 
 
-def decode_clip(video: Path, meta: VideoMeta, t: int, half: float = CLIP_HALF_S) -> Clip:
-    """Frames from t - half to t + half (clamped to the video), scaled for display. -ss before -i seeks to
-    the exact frame (ffmpeg decodes from the keyframe and drops what comes before); passthrough timing
-    keeps one output frame per stored frame, so frame k of the clip is stored frame start_frame + k."""
+def decode_clip(guard: VideoGuard, meta: VideoMeta, t: int, half: float = CLIP_HALF_S) -> Clip:
+    """Stored frames round((t - half) x fps) .. round((t + half) x fps), clamped to the video, scaled for
+    display. -ss before -i seeks exactly (ffmpeg decodes from the keyframe and drops earlier frames); it is
+    aimed half a frame early so a rounded timestamp never skips the first wanted frame, and -frames:v stops
+    at the last. Passthrough timing keeps one output frame per stored frame. A short decode is refused rather
+    than shifting the red frame onto another moment."""
+    video = guard.check()
     start_f = max(0, int(round((t - half) * meta.fps)))
     t_f = int(round(t * meta.fps))
-    last_f = int(round(meta.duration * meta.fps)) - 1
-    end_f = min(last_f, int(round((t + half) * meta.fps)))
+    end_f = min(meta.n_frames - 1, int(round((t + half) * meta.fps)))
     n_want = end_f - start_f + 1
     w, h = display_size(meta)
-    cmd = [_tool("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error",
-           "-ss", f"{start_f / meta.fps:.6f}", "-i", str(video),
+    cmd = [_tool("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", "-protocol_whitelist", "file",
+           "-ss", f"{max(0.0, (start_f - 0.5) / meta.fps):.6f}", "-i", str(video),
            "-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v", str(n_want), "-fps_mode", "passthrough",
            "-vf", f"scale={w}:{h}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
     try:
@@ -394,10 +451,10 @@ def decode_clip(video: Path, meta: VideoMeta, t: int, half: float = CLIP_HALF_S)
         raise Refused(f"ffmpeg took over {FFMPEG_TIMEOUT_S} s to decode the clip at t = {t} s") from None
     size = w * h * 3
     n = len(done.stdout) // size
-    if done.returncode != 0 or n == 0:
+    if done.returncode != 0 or n <= t_f - start_f:
         raise Refused(f"ffmpeg could not decode the clip at t = {t} s")
     frames = tuple(done.stdout[i * size:(i + 1) * size] for i in range(n))
-    return Clip(t, w, h, meta.fps, frames, min(n - 1, t_f - start_f))
+    return Clip(t, w, h, meta.fps, start_f, frames, t_f - start_f)
 
 
 # ---- one labelling session ------------------------------------------------------------------------
@@ -434,8 +491,8 @@ class Session:
         except Refused:
             return True
 
-    def describe(self, text: str) -> None:
-        self.lf.set_description(text)       # refuses a name before anything is written
+    def describe(self, colours: str) -> None:
+        self.lf.set_description(description_from_colours(colours))   # refuses before anything is written
         self.save()
 
     def save(self) -> None:
