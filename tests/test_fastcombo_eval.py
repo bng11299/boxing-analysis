@@ -1,0 +1,250 @@
+"""Tests for the fast-combination tuning and held-out scripts and their scoring module.
+
+What must hold: the grids in code are the gate's; the scorer counts as the end-to-end
+evaluation does; the selection follows the gate's order and tie-breaks; the paired
+bootstrap pairs; and both scripts REFUSE (no tuning before the O55 split, no held-out
+video tuned on, no second held-out run, no rule file that tuning did not write).
+
+Run:  python tests/test_fastcombo_eval.py
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
+
+import eval_fast_combinations as ev  # noqa: E402
+import tune_fast_combinations as tune  # noqa: E402
+from boxingvi import data as bdata  # noqa: E402
+from boxingvi import fastcombo as fc  # noqa: E402
+from boxingvi.data import CLASSES, N_JOINTS, Span, Track  # noqa: E402
+
+PASS = FAIL = 0
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  PASS  {name}")
+    else:
+        FAIL += 1
+        print(f"  FAIL  {name}  {detail}")
+
+
+def raises(name: str, fn, exc=ValueError) -> None:
+    try:
+        fn()
+    except exc:
+        check(name, True)
+    except BaseException as e:   # SystemExit included
+        check(name, False, f"raised {type(e).__name__}: {e}")
+    else:
+        check(name, False, "did not raise")
+
+
+J, C_, LH, LU, RH, RU = (CLASSES.index(c) for c in
+                         ("jab", "cross", "lead_hook", "lead_uppercut", "rear_hook", "rear_uppercut"))
+
+print("the grids in code are the ones the committed gate fixes")
+gate = (ROOT / "docs" / "gates" / "fast-combinations.md").read_text(encoding="utf-8")
+
+
+def row(label: str) -> "list[float]":
+    line = next(ln for ln in gate.splitlines() if ln.startswith(f"| {label}"))
+    return [float(x) for x in re.findall(r"\d+\.\d+", line.split("|")[2])]
+
+
+check("thresholds: 2.0 to 6.0 in 0.1 steps, 41 values", list(fc.THRESHOLDS) == [round(2 + 0.1 * i, 1) for i in range(41)]
+      and row("Threshold")[:2] == [2.0, 6.0] and "41 values" in gate)
+check("arm 1 windows match the gate's table", list(fc.WINDOWS_S) == row("Arm 1"), str(row("Arm 1")))
+check("arm 2 gaps match the gate's table", list(fc.CROSS_GAPS_S) == row("Arm 2"), str(row("Arm 2")))
+check("the V6 rule's threshold lies inside the grid", fc.THRESHOLDS[0] < 3.62 < fc.THRESHOLDS[-1])
+check("the margin, groups and fixed settings are the gate's",
+      fc.MARGIN == 0.05 and "0.05 below" in gate and fc.MIN_GAP_S == 0.4 and fc.TOL_S == 0.1 and fc.BLOCK_S == 30.0
+      and fc.N_BOOT == 2000 and fc.SEED == 0 and set(fc.GROUPS) == {"jab", "cross", "hooks", "uppercuts"})
+check("the grid has 41 control + 5 x 41 arm 1 + 6 x 41 arm 2 points", len(list(fc.grid())) == 41 * 12)
+check("V2 and V3 swap pose files (O61), every other video its own", fc.POSE_FILE == {"V2": "V3", "V3": "V2"})
+
+
+def video(spans, unusable=(), n=900, fps=30.0) -> fc.Video:
+    tr = Track(np.arange(n, dtype=np.int64), np.zeros((n, N_JOINTS, 2)), fps)
+    return fc.Video("Vx", fps, n, tr, np.zeros((n, 2)), list(spans), list(unusable))
+
+
+print("counts: scored as the end-to-end evaluation scores")
+v = video([Span(100, 110, J), Span(200, 210, C_), Span(850, 860, LH)], unusable=[(400, 410)])    # blocks of 900 frames
+c = fc.counts(v, [105, 207, 300, 405, 412, 600])
+t = c.sum(axis=0)
+check("one block at 30 fps over 900 frames", c.shape == (1, fc.N_COLS))
+check("hits: the jab and the cross; labels 3", t[fc.HIT_S] == 2 and t[fc.HIT_D] == 2 and t[fc.LAB] == 3, str(t))
+check("a detection on an unusable labelled row (405, and 412 within the 3-frame tolerance) is not scored",
+      t[fc.DET] == 4, str(t[fc.DET]))
+check("per type: jab 1/1, cross 1/1, lead hook 0/1",
+      (t[fc.HIT_T + J], t[fc.LAB_T + J], t[fc.HIT_T + C_], t[fc.HIT_T + LH], t[fc.LAB_T + LH]) == (1, 1, 1, 0, 1))
+check("precision 2/4, recall 2/3, F1 their harmonic mean",
+      fc.precision(t) == 0.5 and abs(fc.recall(t) - 2 / 3) < 1e-12 and abs(fc.f1(t) - 2 * 0.5 * (2 / 3) / (0.5 + 2 / 3)) < 1e-12)
+v2 = video([Span(100, 110, J), Span(1000, 1010, C_)], n=2000)
+c2 = fc.counts(v2, [105, 1950])
+check("blocks: a span counts in its start's block, a detection in its own", c2.shape == (3, fc.N_COLS)
+      and c2[0, fc.LAB] == 1 and c2[1, fc.LAB] == 1 and c2[2, fc.DET] == 1 and c2[0, fc.HIT_S] == 1)
+raises("a detection outside the video is refused", lambda: fc.counts(v, [900]))
+raises("a negative detection frame is refused", lambda: fc.counts(v, [-1]))
+check("no detections: precision undefined, F1 undefined, recall 0", (lambda z: fc.precision(z) is None and fc.f1(z) is None
+      and fc.recall(z) == 0.0)(fc.counts(v, []).sum(axis=0)))
+check("detections but no hit: F1 is 0, not undefined", fc.f1(fc.counts(v, [600]).sum(axis=0)) == 0.0)
+
+
+def totals(**rec) -> np.ndarray:
+    """A count row with the given (found, labelled) per type; precision columns 1/1."""
+    t = np.zeros(fc.N_COLS, np.int64)
+    t[fc.DET] = t[fc.HIT_D] = 1
+    for name, (f, n) in rec.items():
+        i = CLASSES.index(name)
+        t[fc.HIT_T + i], t[fc.LAB_T + i] = f, n
+        t[fc.HIT_S] += f
+        t[fc.LAB] += n
+    return t
+
+
+print("admissible: jab up, no guarded group down by more than 0.05")
+base = totals(jab=(3, 10), cross=(6, 10), lead_hook=(5, 10), rear_hook=(5, 10), lead_uppercut=(4, 10), rear_uppercut=(4, 10))
+ok_ = totals(jab=(5, 10), cross=(6, 10), lead_hook=(5, 10), rear_hook=(5, 10), lead_uppercut=(4, 10), rear_uppercut=(4, 10))
+check("jab up, the rest equal: admissible", fc.admissible(ok_, base) == (True, []))
+check("jab equal: not admissible (it must RISE)", not fc.admissible(base, base)[0])
+edge = totals(jab=(5, 10), cross=(11, 20), lead_hook=(5, 10), rear_hook=(5, 10), lead_uppercut=(4, 10), rear_uppercut=(4, 10))
+check("cross down by exactly 0.05 (0.60 -> 0.55): admissible", fc.admissible(edge, base)[0], str(fc.admissible(edge, base)))
+low = totals(jab=(5, 10), cross=(6, 10), lead_hook=(4, 10), rear_hook=(4, 10), lead_uppercut=(4, 10), rear_uppercut=(4, 10))
+check("hooks down by 0.10: not admissible, and the reason names hooks",
+      (lambda r: not r[0] and any("hooks" in w for w in r[1]))(fc.admissible(low, base)))
+nohook = totals(jab=(5, 10), cross=(6, 10), lead_uppercut=(4, 10), rear_uppercut=(4, 10))
+check("a guarded group with no labels is not admissible (cannot be checked)", not fc.admissible(nohook, nohook)[0])
+
+print("choose: highest F1 among admissible, ties to the higher threshold then the smaller parameter")
+P = lambda thr, prm, f, ok=True: {"threshold": thr, "param": prm, "f1": f, "admissible": ok}  # noqa: E731
+check("the highest admissible F1 wins over a higher inadmissible one",
+      fc.choose([P(3.0, 0.1, 0.5), P(3.1, 0.1, 0.6, False), P(3.2, 0.1, 0.55)]) == P(3.2, 0.1, 0.55))
+check("an F1 tie goes to the higher threshold", fc.choose([P(3.0, 0.1, 0.5), P(4.0, 0.1, 0.5)])["threshold"] == 4.0)
+check("then to the smaller parameter", fc.choose([P(4.0, 0.2, 0.5), P(4.0, 0.1, 0.5)])["param"] == 0.1)
+check("no admissible point: the highest F1 overall, still flagged inadmissible",
+      fc.choose([P(3.0, 0.1, 0.4, False), P(3.1, 0.1, 0.45, False)]) == P(3.1, 0.1, 0.45, False))
+check("an undefined F1 ranks last", fc.choose([P(3.0, 0.1, None), P(3.1, 0.1, 0.01)])["f1"] == 0.01)
+check("nothing to choose from: None", fc.choose([]) is None)
+check("choose_arm: the higher training F1", fc.choose_arm({"per_hand_extension": P(3, .1, .61),
+                                                          "cross_hand_gap": P(3, .1, .60)}) == "per_hand_extension")
+check("choose_arm: an exact tie goes to arm 2", fc.choose_arm({"per_hand_extension": P(3, .1, .6),
+                                                              "cross_hand_gap": P(3, .1, .6)}) == "cross_hand_gap")
+
+print("paired bootstrap")
+rng = np.random.default_rng(1)
+bb = {"V5": np.zeros((18, fc.N_COLS), np.int64), "V9": np.zeros((32, fc.N_COLS), np.int64)}
+for k_ in bb:
+    bb[k_][:, fc.LAB] = bb[k_][:, fc.DET] = 10
+    bb[k_][:, fc.HIT_S] = bb[k_][:, fc.HIT_D] = rng.integers(3, 7, len(bb[k_]))
+same = fc.paired_ci(bb, bb, fc.f1)
+check("a finder against itself: difference 0, interval [0, 0], not excluding zero",
+      same["point"] == 0 and same["ci_low"] == 0 and same["ci_high"] == 0 and not same["excludes_zero"])
+better = {k_: x.copy() for k_, x in bb.items()}
+for x in better.values():
+    x[:, fc.HIT_S] += 1
+    x[:, fc.HIT_D] += 1
+up = fc.paired_ci(better, bb, fc.f1)
+check("one more hit in every block: the interval excludes zero, above it (PAIRED: unpaired would not be this tight)",
+      up["ci_low"] > 0 and up["excludes_zero"] and up["ci_high"] - up["ci_low"] < 0.02, str(up))
+check("the same seed gives the same interval", fc.paired_ci(better, bb, fc.f1) == up)
+check("blocks are reported per video", up["blocks"] == {"V5": 18, "V9": 32})
+raises("different videos are refused", lambda: fc.paired_ci({"V5": bb["V5"]}, bb, fc.f1))
+raises("different block counts are refused", lambda: fc.paired_ci({"V5": bb["V5"][:3], "V9": bb["V9"]}, bb, fc.f1))
+
+print("verdict: all three conditions, each reported")
+ci_up = {"point": 0.05, "ci_low": 0.01}
+check("F1 up with an interval above zero, jab up, nothing down: PASS", fc.verdict(ok_, base, ci_up)["pass"])
+check("an interval touching zero: FAIL", not fc.verdict(ok_, base, {"point": 0.05, "ci_low": 0.0})["pass"])
+check("jab not up: FAIL", not fc.verdict(base, base, ci_up)["pass"])
+v_low = fc.verdict(low, base, ci_up)
+check("hooks down 0.10: FAIL, and the guard says which", not v_low["pass"] and not v_low["guarded_groups"]["hooks"]["ok"]
+      and v_low["guarded_groups"]["cross"]["ok"])
+check("cross down exactly 0.05: still passes the guard", fc.verdict(edge, base, ci_up)["no_group_down_more_than_margin"])
+
+print("tune script: refusals")
+had = hasattr(bdata, "PERSON_OF_VIDEO")
+saved = getattr(bdata, "PERSON_OF_VIDEO", None)
+if had:
+    delattr(bdata, "PERSON_OF_VIDEO")
+raises("without the O55 split (no data.PERSON_OF_VIDEO) tuning refuses", tune.split_ready, SystemExit)
+raises("... and so does the held-out run", lambda: ev.main(["--data", "x", "--poses", "x", "--classifier", "x",
+                                                             "--stance", "orthodox"]), SystemExit)
+bdata.PERSON_OF_VIDEO = saved if had else {}
+tmp = Path(tempfile.mkdtemp())
+held_saved = bdata.HELD_OUT_VIDEOS
+bdata.HELD_OUT_VIDEOS = ("V2", "V3", "V5", "V9")
+check("training videos are every source not held out, in order",
+      tune.training_videos() == ["V1", "V4", "V6", "V7", "V8", "V10"], str(tune.training_videos()))
+(tmp / "held.json").write_text("{}", encoding="utf-8")
+raises("tuning again after the held-out result exists is refused",
+       lambda: tune.main(["--data", "x", "--poses", str(tmp), "--heldout", str(tmp / "held.json")]), SystemExit)
+orig_git = tune._git
+tune._git = lambda *a: " M docs/gates/fast-combinations.md" if a[0] == "status" else "abc"
+raises("an uncommitted change to the gate is refused", tune.gate_commit, SystemExit)
+tune._git = lambda *a: ""
+raises("a gate that was never committed is refused", tune.gate_commit, SystemExit)
+tune._git = orig_git
+check("on this checkout the gate is committed and its commit is found", len(tune.gate_commit()) == 40)
+v6rule = tmp / "v6.json"
+v6rule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4}}), encoding="utf-8")
+raises("no pose for a tuning video: refused, naming it",
+       lambda: tune.main(["--data", "x", "--poses", str(tmp), "--baseline", str(v6rule),
+                          "--heldout", str(tmp / "none.json")]), SystemExit)
+armrule = tmp / "arm.json"
+armrule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4,
+                                          "finder": {"mode": "cross_hand_gap", "cross_gap_s": 0.15}}}), encoding="utf-8")
+raises("an arm as the baseline is refused", lambda: tune.baseline_rule(armrule), SystemExit)
+other = tmp / "other.json"
+other.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.25}}), encoding="utf-8")
+raises("a pooled rule with another gap as the baseline is refused", lambda: tune.baseline_rule(other), SystemExit)
+
+print("held-out script: refusals")
+raises("no tune file: refused", lambda: ev.read_tune(tmp / "missing.json", armrule), SystemExit)
+tf = tmp / "tune.json"
+tf.write_text(json.dumps({"chosen_arm": "learned"}), encoding="utf-8")
+raises("a tune file naming no known arm: refused", lambda: ev.read_tune(tf, armrule), SystemExit)
+good = {"chosen_arm": "cross_hand_gap", "rule_file_sha256": tune.sha256(armrule),
+        "chosen_rule": {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4,
+                        "finder": {"mode": "cross_hand_gap", "cross_gap_s": 0.15}}}
+tf.write_text(json.dumps(good), encoding="utf-8")
+check("control: a consistent tune file and rule file are accepted", ev.read_tune(tf, armrule)[1]["finder"]["cross_gap_s"] == 0.15)
+tf.write_text(json.dumps({**good, "rule_file_sha256": "0" * 64}), encoding="utf-8")
+raises("a rule file tuning did not write (sha256): refused", lambda: ev.read_tune(tf, armrule), SystemExit)
+tf.write_text(json.dumps({**good, "chosen_arm": "per_hand_extension"}), encoding="utf-8")
+raises("a rule file holding the OTHER arm: refused", lambda: ev.read_tune(tf, armrule), SystemExit)
+tf.write_text(json.dumps({**good, "chosen_rule": {**good["chosen_rule"], "threshold": 3.0}}), encoding="utf-8")
+raises("a rule file whose threshold is not the chosen one: refused", lambda: ev.read_tune(tf, armrule), SystemExit)
+(tmp / "out.json").write_text("{}", encoding="utf-8")
+raises("a second held-out run (the result exists): refused",
+       lambda: ev.main(["--data", "x", "--poses", "x", "--classifier", "x", "--stance", "orthodox",
+                        "--out", str(tmp / "out.json")]), SystemExit)
+check("the reference is RESULTS rows 5a-5c", ev.REFERENCE == {"detections_scored": 686, "labelled": 742, "hits": 434,
+                                                             "jab": (84, 264), "named_right": 352})
+
+print("named right: found AND given the label's type")
+vn = video([Span(100, 110, J), Span(200, 210, C_), Span(300, 310, LH)])
+nc = ev.named_counts(vn, [{"frame": 105, "type": J}, {"frame": 205, "type": J}, {"frame": 500, "type": C_}])
+check("jab found and named jab counts; cross found but named jab does not; a miss does not",
+      nc.sum(axis=0).tolist() == [1, 3], str(nc.sum(axis=0)))
+pc = ev.paired_named_ci({"Vx": nc}, {"Vx": nc})
+check("named-right difference of a run against itself is 0", pc["point"] == 0 and pc["ci_low"] == 0 == pc["ci_high"])
+
+bdata.HELD_OUT_VIDEOS = held_saved
+if not had:
+    delattr(bdata, "PERSON_OF_VIDEO")
+print(f"\n=== {PASS} passed, {FAIL} failed ===")
+sys.exit(1 if FAIL else 0)
