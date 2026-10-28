@@ -146,10 +146,22 @@ def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = SMOO
     """
     if variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}; expected one of {VARIANTS}")
+    out = np.zeros((len(track.frame_ids), 2))
+    for h, a, b, seg in _smoothed_runs(track, smooth_s, min_conf, bridge_s):
+        if variant == "relative":
+            out[a:b, h] = np.linalg.norm(np.gradient(seg, axis=0) * track.fps, axis=-1)
+        else:
+            out[a:b, h] = np.clip(np.gradient(np.linalg.norm(seg, axis=-1), axis=0) * track.fps, 0, None)
+    return out
+
+
+def _smoothed_runs(track: Track, smooth_s: float, min_conf: float, bridge_s: float):
+    """(hand, first row, end row, smoothed wrist-minus-shoulder in body lengths) for every run
+    of consecutive trustworthy frames of each hand, holes up to `bridge_s` filled by a straight
+    line first. The ONE place the positions behind wrist_signal and extension_mask are made."""
     scale = body_scale(track, min_conf)
     w = smooth_window(track.fps, smooth_s)  # odd, so the window is centred
     max_gap = int(round(bridge_s * track.fps))
-    out = np.zeros((len(track.frame_ids), 2))
     for h, (sh, wr) in enumerate(HANDS):
         rel = (track.xy[:, wr] - track.xy[:, sh]) / scale
         for lo, hi, ok, filled in _hand_runs(track, h, min_conf, max_gap):
@@ -159,12 +171,31 @@ def wrist_signal(track: Track, variant: str = "relative", smooth_s: float = SMOO
                 for c in range(2):
                     r[filled, c] = np.interp(idx[filled], idx[~filled & ok], r[~filled & ok, c])
             for a, b in _runs(ok):
-                seg = _smooth(r[a:b], w)
-                if variant == "relative":
-                    out[lo + a:lo + b, h] = np.linalg.norm(np.gradient(seg, axis=0) * track.fps, axis=-1)
-                else:
-                    out[lo + a:lo + b, h] = np.clip(np.gradient(np.linalg.norm(seg, axis=-1), axis=0)
-                                                    * track.fps, 0, None)
+                yield h, lo + a, lo + b, _smooth(r[a:b], w)
+
+
+def extension_mask(track: Track, window_s: float, smooth_s: float = SMOOTH_S,
+                   min_conf: float = MIN_CONF, bridge_s: float = BRIDGE_S) -> np.ndarray:
+    """(F, 2) bool: is each hand's wrist moving AWAY from its shoulder at each frame.
+
+    A punch extends the arm; the other hand's retraction during it shortens. With d the
+    shoulder-to-wrist distance (the same smoothed, hole-filled positions as wrist_signal)
+    and k = max(1, round(window_s x fps / 2)), frame i is True iff frames i-k and i+k lie
+    in the same run of trustworthy frames as i and d[i+k] - d[i-k] > 0. Over a window,
+    not one frame difference, so pose jitter at the turn of a punch does not decide it.
+
+    Fails closed: a frame whose window leaves its run (a missing joint, a pose gap, the
+    run's edge), or where d is not finite, is False. Missing data never passes."""
+    if isinstance(window_s, bool) or not (np.isfinite(window_s) and window_s > 0):
+        raise ValueError(f"window_s must be a positive number of seconds, got {window_s!r}")
+    k = max(1, int(round(window_s * track.fps / 2)))
+    out = np.zeros((len(track.frame_ids), 2), dtype=bool)
+    for h, a, b, seg in _smoothed_runs(track, smooth_s, min_conf, bridge_s):
+        if b - a <= 2 * k:
+            continue
+        d = np.linalg.norm(seg, axis=-1)
+        rise = d[2 * k:] - d[:-2 * k]
+        out[a + k:b - k, h] = np.isfinite(rise) & (rise > 0)
     return out
 
 
@@ -216,7 +247,7 @@ def signal_frames(track: Track, min_conf: float = MIN_CONF, bridge_s: float = BR
 
 def detect(track: Track, signal: np.ndarray, threshold: float,
            min_gap_s: float, *, eligible: "np.ndarray | None" = None,
-           per_hand: bool = False) -> "tuple[np.ndarray, np.ndarray]":
+           per_hand: bool = False, cross_gap_s: "float | None" = None) -> "tuple[np.ndarray, np.ndarray]":
     """Peaks of wrist speed above `threshold`. Returns (video frame ids, hand: 0
     left / 1 right), in (frame, hand) order.
 
@@ -236,6 +267,12 @@ def detect(track: Track, signal: np.ndarray, threshold: float,
     mode a candidate's hand is the faster one there; per hand, it is that hand. None
     is the original computation, untouched. Both options are keyword-only: they used
     to share the fifth positional slot on two branches.
+
+    `cross_gap_s` (pooled only; default None = `min_gap_s`): the minimum gap between two
+    peaks of DIFFERENT hands, `min_gap_s` still applying between peaks of the same hand
+    (arm 2 of docs/gates/fast-combinations.md). Suppression is find_peaks's: taller peaks
+    first, a shorter one dropped if it is within the gap that applies to the pair. Equal to
+    `min_gap_s`, the result is the pooled rule's exactly.
     """
     if signal.shape != (len(track.frame_ids), 2):
         raise ValueError(f"signal shape {signal.shape} does not match the track")
@@ -243,6 +280,11 @@ def detect(track: Track, signal: np.ndarray, threshold: float,
         raise ValueError("threshold must be finite and min_gap_s non-negative")
     if eligible is not None and (eligible.shape != signal.shape or eligible.dtype != bool):
         raise ValueError("eligible must be a bool array shaped like the signal")
+    if cross_gap_s is not None:
+        if per_hand:
+            raise ValueError("cross_gap_s is a pooled-rule option; per hand, hands never suppress each other")
+        if isinstance(cross_gap_s, bool) or not (np.isfinite(cross_gap_s) and 0 <= cross_gap_s <= min_gap_s):
+            raise ValueError(f"cross_gap_s must lie in [0, min_gap_s], got {cross_gap_s!r}")
     dist = max(1, int(round(min_gap_s * track.fps)))
     frames, hands = [], []
     for lo, hi in track.segments():
@@ -257,7 +299,11 @@ def detect(track: Track, signal: np.ndarray, threshold: float,
             ok = None
             if eligible is not None:
                 ok = eligible[lo:hi][np.arange(hi - lo), signal[lo:hi].argmax(axis=1)]
-            peaks = _peaks(best, threshold, dist, ok)
+            if cross_gap_s is None:
+                peaks = _peaks(best, threshold, dist, ok)
+            else:
+                cross = max(1, int(round(cross_gap_s * track.fps)))
+                peaks = _peaks_two_gaps(best, signal[lo:hi].argmax(axis=1), threshold, dist, cross, ok)
             frames.append(track.frame_ids[lo + peaks])
             hands.append(signal[lo + peaks].argmax(axis=1))
     f, h = np.concatenate(frames), np.concatenate(hands)
@@ -278,6 +324,81 @@ def _peaks(x: np.ndarray, threshold: float, dist: int, ok: "np.ndarray | None") 
     spikes = np.zeros(len(x))
     spikes[cand] = x[cand]
     return find_peaks(spikes, height=threshold, distance=dist)[0]
+
+
+def _peaks_two_gaps(x: np.ndarray, hand: np.ndarray, threshold: float, same: int, cross: int,
+                    ok: "np.ndarray | None") -> np.ndarray:
+    """`_peaks` with a minimum gap that depends on the pair: `same` frames between candidates
+    of one hand, `cross` between candidates of different hands. The candidates and the order
+    of suppression are find_peaks's own (its distance step, scipy _select_by_peak_distance:
+    taller first, by np.argsort of the heights; a pair exactly the gap apart both survive),
+    so with same == cross this returns what `_peaks` returns."""
+    from scipy.signal import find_peaks
+
+    cand, _ = find_peaks(x, height=threshold)
+    if ok is not None:
+        cand = cand[ok[cand]]
+    keep = np.ones(len(cand), dtype=bool)
+    reach = max(same, cross)
+    for j in np.argsort(x[cand])[::-1]:
+        if not keep[j]:
+            continue
+        for step in (-1, 1):
+            k = j + step
+            while 0 <= k < len(cand) and abs(int(cand[k]) - int(cand[j])) < reach:
+                if abs(int(cand[k]) - int(cand[j])) < (same if hand[cand[k]] == hand[cand[j]] else cross):
+                    keep[k] = False
+                k += step
+    return cand[keep]
+
+
+# ------------------------------------------------- a rule's finder, by name ---
+
+# How a rule file's `chosen.finder` block selects the arm (docs/gates/fast-combinations.md).
+# A rule with no such block is the pooled rule, exactly as before.
+FINDER_MODES = ("per_hand_extension", "cross_hand_gap")
+
+
+def parse_finder(block, min_gap_s: float) -> dict:
+    """A rule file's `finder` block, validated: it is read from disk, so every field is
+    checked for type and range and anything unexpected is refused."""
+    if not isinstance(block, dict) or not isinstance(block.get("mode"), str):
+        raise ValueError("finder: expected an object with a 'mode'")
+    mode = block["mode"]
+    if mode not in FINDER_MODES:
+        raise ValueError(f"finder: unknown mode {mode!r}; expected one of {FINDER_MODES}")
+    key = "extension_window_s" if mode == "per_hand_extension" else "cross_gap_s"
+    if set(block) != {"mode", key}:
+        raise ValueError(f"finder: mode {mode} takes exactly 'mode' and '{key}', got {sorted(block)}")
+    v = block[key]
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v):
+        raise ValueError(f"finder: {key} must be a finite number, got {v!r}")
+    hi = 1.0 if mode == "per_hand_extension" else min_gap_s
+    if not 0 < v <= hi:
+        raise ValueError(f"finder: {key} must lie in (0, {hi}], got {v}")
+    return {"mode": mode, key: float(v)}
+
+
+def detect_rule(track: Track, signal: np.ndarray, rule: dict) -> "tuple[np.ndarray, np.ndarray]":
+    """Detections by a loaded rule (find_punches.load_rule): the pooled rule, or the arm its
+    `finder` block names. The one place a rule is turned into a call to `detect`."""
+    f = rule.get("finder")
+    thr, gap = rule["threshold"], rule["min_gap_s"]
+    if f is None:
+        return detect(track, signal, thr, gap)
+    if f["mode"] == "per_hand_extension":
+        return detect(track, signal, thr, gap, per_hand=True,
+                      eligible=extension_mask(track, f["extension_window_s"]))
+    if f["mode"] == "cross_hand_gap":
+        return detect(track, signal, thr, gap, cross_gap_s=f["cross_gap_s"])
+    raise ValueError(f"unknown finder mode {f['mode']!r}")
+
+
+def rule_per_hand(rule: dict) -> bool:
+    """Whether a rule's detections are per-hand peaks (each a peak of its own hand only) or
+    pooled ones (each also a peak of the faster hand's speed): what classify_punches checks."""
+    f = rule.get("finder")
+    return f is not None and f["mode"] == "per_hand_extension"
 
 
 # A label that is a single frame marks one instant somewhere inside a punch (a click in
