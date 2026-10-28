@@ -17,6 +17,7 @@ punch by a frame without anything looking wrong.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -167,3 +168,178 @@ def parse_export(export, n_frames: int, checks=FRAME_CHECKS,
     counts = {c: sum(1 for sp in spans if sp.label == i) for i, c in enumerate(CLASSES)}
     counts[UNCLEAR] = sum(1 for sp in spans if sp.label == UNCLEAR_LABEL)
     return LabelSet(spans, offset, lead, tid, counts)
+
+
+BOXERS = ("A", "B", "?")
+
+
+@dataclass
+class SparringLabelSet(LabelSet):
+    boxers: list[str] = field(default_factory=list)
+
+    def to_json(self, source: str, fps: float, n_frames: int) -> dict:
+        record = super().to_json(source, fps, n_frames)
+        record["mode"] = "sparring"
+        for span, boxer in zip(record["spans"], self.boxers, strict=True):
+            span["type"] = span.pop("label")
+            span["boxer"] = boxer
+        return record
+
+
+def load_sparring_export(path):
+    """Parse and hash the SAME bounded bytes; errors never echo export contents."""
+    with Path(path).open("rb") as stream:
+        raw = stream.read(MAX_EXPORT_BYTES + 1)
+    if len(raw) > MAX_EXPORT_BYTES:
+        raise ValueError("export is over the 50 MB size cap")
+
+    def finite(text):
+        value = float(text)
+        if not math.isfinite(value):
+            raise ValueError("export contains a non-finite number")
+        return value
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("export contains duplicate JSON keys")
+            result[key] = value
+        return result
+
+    try:
+        export = json.loads(raw.decode("utf-8"), parse_constant=_no_constant,
+                            parse_float=finite, object_pairs_hook=unique)
+    except (RecursionError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("export is invalid JSON or nested too deeply") from None
+    return export, hashlib.sha256(raw).hexdigest()
+
+
+def parse_sparring_export(export, n_frames: int) -> SparringLabelSet:
+    """Join Choices to TimelineLabels by region id, then apply solo rules per boxer.
+
+    '?' is its own conservative overlap bucket: two unidentifiable throwers with
+    overlapping same-hand punches require review. A and B never conflict.
+    Only one contiguous range per region is allowed (one region = one punch).
+    """
+    if type(n_frames) is not int or n_frames < 1:
+        raise ValueError("the video has no frames or an invalid frame count")
+    if not isinstance(export, list) or len(export) != 1 or not isinstance(export[0], dict):
+        raise ValueError("expected an export of exactly one task")
+    task = export[0]
+    if "annotations" not in task:
+        raise ValueError('export as "JSON", not "JSON-MIN"')
+    if task.get("drafts"):
+        raise ValueError("unsubmitted drafts: press Submit and export again")
+    annotations = task["annotations"]
+    if not isinstance(annotations, list) or any(not isinstance(a, dict) for a in annotations):
+        raise ValueError("annotations must be a list of annotation objects")
+    if any(type(a.get("was_cancelled", False)) is not bool for a in annotations):
+        raise ValueError("invalid annotation cancellation flag")
+    completed = [a for a in annotations if not a.get("was_cancelled", False)]
+    if len(completed) != 1:
+        raise ValueError("expected exactly one completed annotation; press Submit")
+    ann = completed[0]
+    results = ann.get("result")
+    if not isinstance(results, list):
+        raise ValueError("annotation result must be a list")
+    timelines, choices = {}, {}
+    for result in results:
+        if not isinstance(result, dict):
+            raise ValueError("malformed result object")
+        kind = result.get("type")
+        if kind not in ("timelinelabels", "choices"):
+            raise ValueError("unexpected result type for sparring-punch-labels.xml")
+        expected_name = FROM_NAME if kind == "timelinelabels" else "boxer"
+        if (result.get("from_name"), result.get("to_name")) != (expected_name, TO_NAME):
+            raise ValueError("unexpected control names for sparring-punch-labels.xml")
+        rid = result.get("id")
+        if not isinstance(rid, str) or not rid.strip():
+            raise ValueError("every region result needs a nonempty string id")
+        value = result.get("value")
+        if not isinstance(value, dict):
+            raise ValueError("malformed region value")
+        destination = timelines if kind == "timelinelabels" else choices
+        if rid in destination:
+            reason = "duplicate timeline region id" if kind == "timelinelabels" else "two boxer results for one region"
+            raise ValueError(reason)
+        destination[rid] = value
+    if choices.keys() - timelines.keys():
+        raise ValueError("orphan boxer choice has no timeline region")
+
+    checks, by_boxer = [], {boxer: [] for boxer in BOXERS}
+    for rid, value in timelines.items():
+        labels = value.get("timelinelabels")
+        if not isinstance(labels, list) or len(labels) != 1:
+            raise ValueError("a region needs exactly one label")
+        label = labels[0]
+        if not isinstance(label, str) or label not in (*CLASSES, UNCLEAR, FRAME_CHECK):
+            raise ValueError("unknown label in timeline region")
+        ranges = value.get("ranges")
+        if not isinstance(ranges, list) or len(ranges) != 1 or not isinstance(ranges[0], dict):
+            raise ValueError("each region needs exactly one range")
+        for key in ("start", "end"):
+            frame = ranges[0].get(key)
+            if (type(frame) not in (int, float) or
+                    (isinstance(frame, float) and not math.isfinite(frame)) or frame != int(frame)):
+                raise ValueError("range endpoints must be finite whole frame numbers")
+        # Reject misplaced attributes rather than silently ignoring a second source.
+        if "boxer" in value or "choices" in value:
+            raise ValueError("boxer must be a separate per-region Choices result")
+        normalized = {"type": "timelinelabels", "from_name": FROM_NAME, "to_name": TO_NAME,
+                      "value": {"timelinelabels": [label], "ranges": ranges}}
+        if label == FRAME_CHECK:
+            if rid in choices:
+                raise ValueError("frame-check region must not carry a boxer")
+            if any(not 1 <= ranges[0][key] <= n_frames for key in ("start", "end")):
+                raise ValueError("frame-check is outside the video")
+            checks.append(normalized)
+            continue
+        if rid not in choices:
+            raise ValueError("missing boxer for punch region")
+        selection = choices[rid].get("choices")
+        if not isinstance(selection, list) or not selection:
+            raise ValueError("missing boxer value for punch region")
+        if len(selection) != 1:
+            raise ValueError("two or more boxer values; exactly one boxer is required")
+        boxer = selection[0]
+        if not isinstance(boxer, str) or boxer not in BOXERS:
+            raise ValueError("unknown boxer value; expected A, B or ?")
+        # LS 1.23.2 serializes the same ranges on both results. Compare types too:
+        # Python's equality would otherwise accept true in place of frame 1.
+        if json.dumps(choices[rid].get("ranges"), sort_keys=True) != json.dumps(ranges, sort_keys=True):
+            raise ValueError("boxer ranges do not match the timeline region")
+        by_boxer[boxer].append(normalized)
+
+    # Across boxers, A and B may punch at the same time, so their regions may overlap.
+    # A "?" region on top of a named one is far more likely the same punch marked
+    # twice (once unsure, once decided): a phantom punch that lowers recall. Refuse.
+    def _span(region):
+        r = region["value"]["ranges"][0]
+        return (int(r["start"]), int(r["end"]))
+    for unsure in by_boxer["?"]:
+        for named in by_boxer["A"] + by_boxer["B"]:
+            if _iou(_span(unsure), _span(named)) >= DUPLICATE_IOU:
+                s, e = _span(unsure)
+                raise ValueError(f"a '?' region at Label Studio frames {s}-{e} duplicates a punch "
+                                 "already given boxer A or B; delete one, or name the boxer")
+
+    lead = ann.get("lead_time")
+    if type(lead) not in (int, float) or not 0 <= lead <= 1e12:
+        lead = None
+    punches = []
+    metadata = None
+    for boxer, regions in by_boxer.items():
+        projected = [{"id": task.get("id"), "annotations": [
+            {"result": checks + regions, "lead_time": lead}]}]
+        parsed = parse_export(projected, n_frames)
+        if metadata is not None and parsed.offset != metadata.offset:
+            raise ValueError("frame offset differs between boxers")  # same checks: cannot happen
+        metadata = parsed
+        punches.extend((span, boxer) for span in parsed.spans)
+    punches.sort(key=lambda item: (item[0].start, item[0].end, item[1]))
+    spans = [span for span, _ in punches]
+    counts = {c: sum(span.label == i for span in spans) for i, c in enumerate(CLASSES)}
+    counts[UNCLEAR] = sum(span.label == UNCLEAR_LABEL for span in spans)
+    return SparringLabelSet(spans, metadata.offset, metadata.lead_time_s,
+                            metadata.task_id, counts, [boxer for _, boxer in punches])
