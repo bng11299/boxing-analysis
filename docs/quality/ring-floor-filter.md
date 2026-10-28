@@ -95,7 +95,9 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   note: when every filtered arm fails, G3b was never computed (reported unmeasured) although attribution counts
   exist. Fixed: G3b's credited shares are computed before any early return, over every video whose baseline ran;
   tests for both cases (credits kept -> G3b measured and passing; credits lost -> 0% and failing). 204 checks.
-- A complete review of the final commit is still owed; it is not counted as passed.- Fresh clone at `e787657`: all 21 Python suites green (3,324 checks; `test_ring` 204). The machine scripts were not
+- A complete review of the final commit is still owed; it is not counted as passed.
+- Fresh clone at `e787657`: all 21 Python suites green (3,124 checks; `test_ring` 204; first recorded as 3,324, an
+  addition error corrected 2026-10-27 from the per-suite counts). The machine scripts were not
   touched by this branch and were not re-run.
 
 ## Security gate (secure-software-assurance defaults), at `e787657`
@@ -161,4 +163,5 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
 
 - **Effect on the reported stop: none.** The real dev run used the full grid (finding 1 needs `--margin`); no real
   video's motion is near 20 px (nearest 15.9 and 26.3; finding 2); every real entry is within its diagonal
-  (finding 3). Tests: 219.
+  (finding 3). Tests: 219.- **Fresh clone at `8c2e02e`** (the final code): all 21 Python suites green, 3,139 checks (`test_ring` 219; every
+  other suite unchanged from `e787657`). The machine scripts were not touched by this branch and were not re-run.
