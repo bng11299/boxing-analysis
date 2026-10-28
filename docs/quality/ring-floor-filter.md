@@ -147,3 +147,18 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
 - **Also on dev:** where the filter removes most bystanders (0 to +30 px) the linked burst rate does not fall
   (34.969-42.595 against 36.837), and at +60 linking coverage falls (69.1% -> 62.4%) while the A/B share on
   uncredited ids rises (24.3% -> 26.5%). Design numbers only; not evidence.
+
+## Iteration 7: Astra review 6, the first complete review of the final code (2026-10-27)
+- Run on `e73d6e6` (the earlier attempt hit the Codex limit; retried after 21:26). Python would not start in its
+  sandbox ("Access is denied"), so its findings are source-derived. **No path found by which the held-out run
+  starts while `FROZEN_MARGIN_PX` is unset.** Outcome FIX FIRST, three findings, all fixed with tests:
+
+  | # | Finding | Fix |
+  |---|---|---|
+  | 1 | A dev run with one `--margin` reported it as `selected_margin_px`, even outside the grid (`--margin 100000` drops nobody) | only the registered grid selects; a single margin reports `selected_margin_px: null` and `selection: "single margin: not a selection"`; a non-finite `--margin` is refused; tests |
+  | 2 | `prepare` rounded `motion_px` to 2 decimals before the 20 px rule read it: 20.0003 px was stored as 20.00 and the video kept | stored at full precision; test with 20.0003252006 through `prepare` |
+  | 3 | The stillness reader accepted a `max_px` larger than the frame's diagonal, which no measurement can give, so a malformed entry could leave a video out | refused above the diagonal (the unmeasurable fallback, exactly the diagonal, still loads); tests |
+
+- **Effect on the reported stop: none.** The real dev run used the full grid (finding 1 needs `--margin`); no real
+  video's motion is near 20 px (nearest 15.9 and 26.3; finding 2); every real entry is within its diagonal
+  (finding 3). Tests: 219.

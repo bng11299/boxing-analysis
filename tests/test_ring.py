@@ -467,6 +467,14 @@ raises("ASTRA 2.5: a stillness entry for a 16384x16384 frame (no video this proj
 raises("ASTRA 2.5: samples written as 24.0 (prepare writes a whole number)",
        lambda: olympic_ring.load_stillness(write_doc("s24.json", raw=json.dumps({"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE}})
                                                      .replace('"samples": 24', '"samples": 24.0').encode())), "whole number")
+raises("ASTRA 6.3: a max_px larger than the frame's diagonal (no measurement can give it; it would silently leave "
+       "the video out)",
+       lambda: olympic_ring.load_stillness(write_doc("sdiag.json", {"format": olympic_ring.STILLNESS_FORMAT,
+                                                                    "videos": {"GH1": SE | {"motion_px": 1000, "max_px": 1000}}})),
+       "diagonal")
+check("... while the diagonal itself (the unmeasurable fallback) still loads",
+      olympic_ring.load_stillness(write_doc("sdiag2.json", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {
+          "GH1": SE | {"motion_px": math.hypot(100, 100), "max_px": math.hypot(100, 100)}}}))["GH1"]["max_px"] == math.hypot(100, 100))
 raises("a stillness file with an extra top-level key",
        lambda: olympic_ring.load_stillness(write_doc("sx.json", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {}, "x": 1})))
 raises("a stillness file with NaN",
@@ -635,6 +643,18 @@ check("prepare: exit 0, a background PNG per video, and a stillness entry bound 
       and st["GH078416"]["video_fp"] == fingerprint(ds / "task_kam2_gh078416" / "data" / "GH078416.mp4"), out_prep.getvalue())
 check("REAL FACT: the still camera measures under the 20 px bar; the one that pans 60 px for half the video, over it",
       st["GH078416"]["motion_px"] <= 20 < st["GH069681"]["motion_px"], str({k: v["motion_px"] for k, v in st.items()}))
+_real_motion = olympic_ring.ring.camera_motion
+olympic_ring.ring.camera_motion = lambda frames: {"motion_px": 20.0003252006, "max_px": 25.0, "samples": 24}
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        olympic_ring.main(["prepare", "--data", str(ds), "--out-dir", str(tmp / "prep_round"), "--only", "GH078416"])
+finally:
+    olympic_ring.ring.camera_motion = _real_motion
+st_r = olympic_ring.load_stillness(tmp / "prep_round" / "stillness.json")
+check("ASTRA 6.2: prepare stores motion at full precision, so 20.0003 px stays over the 20 px bar (rounded, it read 20.00 "
+      "and the video was kept)",
+      st_r["GH078416"]["motion_px"] == 20.0003252006 and st_r["GH078416"]["motion_px"] > olympic_ring.STILL_MAX_PX,
+      str(st_r["GH078416"]))
 raises("prepare refuses to write derived images into docs/",
        lambda: olympic_ring.cmd_prepare(type("A", (), {"out_dir": ROOT / "docs" / "ring", "data": ds, "only": None})()),
        "never elsewhere")
@@ -735,6 +755,15 @@ check("the written filtered table lacks exactly the spectators, keeps the finger
 check("REAL FACT: olympic_completeness.py on the written filtered tables equals the evaluator's filtered arm",
       round(f0["linked_unexplained_per_exposure_min"], 3) == cli_f["unexplained_per_exposure_min"],
       f"{f0['linked_unexplained_per_exposure_min']} vs {cli_f['unexplained_per_exposure_min']}")
+d0 = json.loads((tmp / "res" / "d0.json").read_text(encoding="utf-8"))
+check("ASTRA 6.1: a dev run at ONE margin selects nothing and says so (only the registered grid is a selection)",
+      d0["selected_margin_px"] is None and d0["selection"] == "single margin: not a selection"
+      and dev["selection"] == "registered grid", str((d0.get("selection"), d0.get("selected_margin_px"))))
+for bad in ("inf", "nan", "-inf"):
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as eb:
+        rc_b = olympic_ring.main(ev_args + ["--split", "dev", f"--margin={bad}"])   # "=": argparse reads a bare -inf as a flag
+    err_b = eb.getvalue()
+    check(f"ASTRA 6.1: --margin {bad} is refused before anything runs", rc_b != 0 and "finite" in err_b, err_b)
 check("the planted boxers keep every credited punch (the floor holds them)",
       math.isclose(f0["credited_share"], b0["credited_share"]) and b0["credited_share"] > 0.9, str((b0["credited_share"], f0["credited_share"])))
 

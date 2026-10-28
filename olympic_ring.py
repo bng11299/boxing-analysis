@@ -128,6 +128,10 @@ def load_stillness(path) -> dict:
         motion, mx = ring._number(e["motion_px"], f"{vid}: motion_px"), ring._number(e["max_px"], f"{vid}: max_px")
         if not 0 <= motion <= mx:
             raise ValueError(f"{p.name}: {vid}: needs 0 <= motion_px <= max_px")
+        # No shift can exceed the frame's diagonal (the unmeasurable fallback IS the diagonal): a larger value
+        # was not measured by `prepare`, and would silently leave the video out (Astra, review 6)
+        if mx > math.hypot(w, h):
+            raise ValueError(f"{p.name}: {vid}: max_px {mx} is larger than the {w}x{h} frame's diagonal")
         out[vid] = e
     return out
 
@@ -165,7 +169,8 @@ def cmd_prepare(a) -> int:
         m = ring.camera_motion(frames)
         write_png(a.out_dir / f"{vid}.background.png", bg)
         videos[vid] = {"video_fp": fingerprint(t.video), "width": info.width, "height": info.height,
-                       "motion_px": round(m["motion_px"], 2), "max_px": round(m["max_px"], 2), "samples": m["samples"]}
+                       # full precision: the 20 px rule reads this number, and 20.0003 rounded is 20.00 (Astra, review 6)
+                       "motion_px": float(m["motion_px"]), "max_px": float(m["max_px"]), "samples": m["samples"]}
         print(f"{vid}: camera motion {m['motion_px']:.1f} px (p{ring.STILL_QUANTILE}), max {m['max_px']:.1f} px "
               f"-> {'still' if m['motion_px'] <= STILL_MAX_PX else 'MOVES: left out of both arms'}")
     doc = {"format": STILLNESS_FORMAT, "videos": {v: videos[v] for v in sorted(videos)}}
@@ -563,6 +568,8 @@ def cmd_evaluate(a) -> int:
             raise ValueError("--write-filtered writes one margin: pass --margin on --split dev")
         if a.write_filtered.resolve() == a.tracks.resolve():
             raise ValueError("--write-filtered would overwrite the baseline tables")
+    if a.margin is not None and not math.isfinite(float(a.margin)):
+        raise ValueError(f"--margin must be a finite number of pixels, got {a.margin}")
     floors = ring.load_floors(a.floors)
     still = load_stillness(a.prep_dir / "stillness.json")
     rule = find_punches.load_rule(a.rule)
@@ -633,7 +640,11 @@ def cmd_evaluate(a) -> int:
     report = {"split": a.split, "rule": rule, "left_out_camera_moves": moving, "still_max_px": STILL_MAX_PX,
               "videos": [r["video"] for r in rows], "margins": summaries}
     if a.split == "dev":
-        report["selected_margin_px"] = select_margin(summaries)
+        # Only the registered grid is a selection; one --margin is a look at that margin, and must not read as
+        # the chosen one (Astra, review 6: `--margin 100000` drops nobody and would have been "selected")
+        grid = a.margin is None
+        report["selection"] = "registered grid" if grid else "single margin: not a selection"
+        report["selected_margin_px"] = select_margin(summaries) if grid else None
         for s in summaries:
             line = (f"margin {s['margin_px']:+.0f} px: credited punches lost {_fmt(s['credited_dropped_share'], True)} "
                     f"(worst video {_fmt(s['credited_dropped_share_worst_video'], True)}), non-boxer person-frames "
@@ -642,7 +653,8 @@ def cmd_evaluate(a) -> int:
                 line += (f", linked unexplained/exp-min {_fmt(s['baseline']['linked_unexplained_per_exposure_min'])} -> "
                          f"{_fmt(s['filtered']['linked_unexplained_per_exposure_min'])}")
             print(line)
-        print(f"selected margin (dev rule): {report['selected_margin_px']}")
+        print(f"selected margin (dev rule): {report['selected_margin_px']}" if grid else
+              "one margin only: no margin is selected (run without --margin for the registered grid)")
         code = 0
     else:
         s = summaries[0]
