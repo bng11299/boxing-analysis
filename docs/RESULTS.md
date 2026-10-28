@@ -74,6 +74,21 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 ingest 183, labels 50, linking 266, olympic 29, pipeline 314, poseswitch 30, render_punches 66,
 report 289, tracks 79, machine scripts 38.
 
+## Linker identity, measured by hand (option A, 2026-10-28)
+
+Gate `docs/gates/linker-join-check.md` (committed `ec52160` before any code or check; bar ADR-0018). Brendan
+answered same / different / can't tell for 100 seeded, gap-stratified joins of the #11 linker (default parameters,
+as the per-boxer report uses it) on the 23 held-out Olympic videos; the window showed only the two fragments.
+Supersedes "identity error not measurable" (rows 9a-9d, note 9) and the option C record for the linker. Same-session
+hand labels, one annotator; not reproducible from a clone (the answers are Olympic-derived and stay local).
+
+| # | Claim | Value now | Cmd | Output | Recorded | Source | Status |
+|---|---|---|---|---|---|---|---|
+| 11a | Linker joins that connect two DIFFERENT people (D / decided, Wilson 95%), held-out, n = 100 | **0.653 [0.555, 0.740]** (64 D, 34 S, 2 U; 98 decided); p\* 0.0088 -> **measured, unreliable** | C18 | `results/linker_join_check/result.json` | new, 2026-10-28 | `feat/linker-join-check` | **new** |
+| 11b | Same, by gap: short (<= median) / long | 0.510 [0.375, 0.644] (25 of 49) / 0.796 [0.664, 0.885] (39 of 49) | C18 | same | new | `feat/linker-join-check` | **new: descriptive** |
+| 11c | Implied share of credited punches on the wrong person (two-person model, independent joins; an estimate) | 0.457 [0.454, 0.459] (saturates at 0.5) | C18 | same | new | `feat/linker-join-check` | **new: estimate** |
+| 11d | Wrong joins per chain-minute (video-cluster bootstrap, 10,000 draws) | 5.78 [4.82, 6.77]; frame 1,030 joins | C18 | same | new | `feat/linker-join-check` | **new: descriptive** |
+
 ## Notes
 
 1. **Finder F1 interval.** The lower bound is 0.4722. A brief listed 0.473, which was the value
@@ -190,6 +205,10 @@ python olympic_boxers.py --data data/olympic --tracks T --rule results/repro/pun
 python olympic_ring.py prepare --data data/olympic
 python olympic_ring.py click --floors data/olympic_ring/floors.json
 python olympic_ring.py evaluate --split dev --data data/olympic --tracks T --floors data/olympic_ring/floors.json --rule results/repro/punch_finder_v6.json --out results/olympic_ring/dev_grid.json
+# C18 hand-checked linker joins (rows 11a-11d): draw once, Brendan answers in the window, score once (answers stay local)
+python linker_join_check.py sample --data data/olympic --tracks T
+python linker_join_check.py check --data data/olympic --tracks T
+python linker_join_check.py score
 # C15 face blur, own footage only (row 8; not run here, note 6); CLIP = IMG_4406, IMG_4395
 python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
 ```

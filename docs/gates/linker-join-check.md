@@ -109,3 +109,25 @@ tuned on the answers.
 ## Data rules
 Olympic Boxing is research-use only and never redistributed. Frames are decoded in memory for the window; the
 sample, the answers and any rendered clip stay under `results/` (gitignored). No Olympic frame on a slide or poster.
+
+## Result, 2026-10-28: MEASURED, UNRELIABLE (sample `775d7fa8292a`, scored once)
+Sample: 1,030 joins in the 23 held-out videos (`sample` linked all 23, nothing missing); 100 drawn; p\* = 0.0088
+from this frame's chains. Brendan answered all 100 in 11.97 minutes; the reviewer viewed no clip and suggested no answer.
+
+| | S | D | U | join error (D / decided) | Wilson 95% |
+|---|---|---|---|---|---|
+| **all 100 (gate)** | 34 | 64 | 2 | **0.653** | **[0.555, 0.740]** |
+| short gaps (<= median) | 24 | 25 | 1 | 0.510 | [0.375, 0.644] |
+| long gaps (> median) | 10 | 39 | 1 | 0.796 | [0.664, 0.885] |
+| kam2 | 16 | 25 | 0 | 0.610 | [0.457, 0.743] |
+| kam4 | 18 | 39 | 2 | 0.684 | [0.555, 0.790] |
+
+U = 2% (limit 30%); 98 decided (>= 70). Lower bound 0.555 > p\* 0.0088: **measured, unreliable**. Implied
+misattribution 0.457 [0.454, 0.459] (the two-person model saturates at 0.5: a chain's later fragments are a coin
+flip between people). Wrong joins per chain-minute 5.78, video-cluster bootstrap [4.82, 6.77] (0 of 10,000 draws
+dropped).
+
+**Checked after scoring, not changing it:** the window's seek lands on the frame the tracks call frame n. On 8
+boundary frames of the 4 earliest sampled joins (3 videos), the seek-decoded frame equals the sequentially decoded
+frame n exactly (mean |difference| 0.00; frames n +- 1 differ by 0.5 to 9). Numbers only; no frame was saved or viewed.
+So the boxes were drawn on the frames they belong to; the rate is not a decoding offset.
