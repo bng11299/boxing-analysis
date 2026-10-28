@@ -427,7 +427,12 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
                                              "linked_ue_filtered": list(_linked_ue(f["linked"]))}
     ok = [i for i, r in enumerate(rows) if r["video"] not in out["baseline_failed"] and r["video"] not in out["newly_failed"]]
     out["videos_compared"] = len(ok)
+    # G3b's credited shares exist whenever a baseline ran: attribution precedes linking, so a video that fails only
+    # when filtered still has them. Computed BEFORE the early return, so G3b is measured even if no video could be
+    # compared on G1 (Astra, reviews 4 and 5).
     g3 = [i for i, r in enumerate(rows) if r["video"] not in out["baseline_failed"]]
+    out["credited_share"] = {name: _share(sum(arm[i]["credited"] for i in g3), sum(arm[i]["events"] for i in g3))
+                             for name, arm in (("baseline", base), ("filtered", filt))}
     if not ok:
         return out
     for name, arm in (("baseline", base), ("filtered", filt)):
@@ -443,9 +448,7 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
             "linked_unexplained_per_exposure_min": lt["unexplained_per_exposure_min"],
             "linked_unexplained": lt["unexplained"], "linked_exposure_boxer_min": lt["exposure_boxer_min"],
             "credited_path_unexplained_per_exposure_min": ct["unexplained_per_exposure_min"],
-            # attribution runs before linking, so a video that fails only when filtered still has its credited
-            # share: G3b pools over every video whose baseline ran, as G2 and G3a do (Astra, review 4)
-            "credited_share": _share(sum(arm[i]["credited"] for i in g3), sum(arm[i]["events"] for i in g3)),
+            "credited_share": out["credited_share"][name],     # over every video whose baseline ran (G3b)
             "rows": sum(arm[i]["rows"] for i in ok),
             "link_coverage": _share(sum(l["credited_in_a"] + l["credited_in_b"] for l in links), cp),
             "ab_noncredited_share": _share(sum(l["ab_noncredited_person_frames"] for l in links),
@@ -480,7 +483,8 @@ def verdict(s: dict) -> dict:
         "G2_nonboxer_removed": s["noncredited_removed_share"] is not None and s["noncredited_removed_share"] >= G2_MIN_REMOVED,
         "G3a_boxers_kept": s["credited_dropped_share"] is not None and s["credited_dropped_share"] <= G3A_MAX_DROPPED
                            and s["credited_dropped_share_worst_video"] <= G3A_MAX_DROPPED_VIDEO,
-        "G3b_credited_share": measured and _ge(f["credited_share"], b["credited_share"], G3B_MAX_FALL),
+        "G3b_credited_share": _ge(s.get("credited_share", {}).get("filtered"), s.get("credited_share", {}).get("baseline"),
+                                  G3B_MAX_FALL),
         # unmeasured (no video compared, e.g. every baseline failed) fails; a new failure fails
         "G3c_no_new_failures": s.get("videos_compared", 0) > 0 and not s.get("newly_failed", []),
     }

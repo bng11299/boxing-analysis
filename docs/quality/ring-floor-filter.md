@@ -90,3 +90,9 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   | 5 | The no-symlink fallback test passed with or without the fix | replaced by a simulated link through `Path.resolve`, which the old check fails |
 
   201 checks pass after the fixes.
+## Iteration 5
+- **Astra review 5** (on `ac7ecdc`): **did not complete.** Codex hit its usage limit (retry after 21:26) after one
+  note: when every filtered arm fails, G3b was never computed (reported unmeasured) although attribution counts
+  exist. Fixed: G3b's credited shares are computed before any early return, over every video whose baseline ran;
+  tests for both cases (credits kept -> G3b measured and passing; credits lost -> 0% and failing). 204 checks.
+- A complete review of the final commit is still owed; it is not counted as passed.

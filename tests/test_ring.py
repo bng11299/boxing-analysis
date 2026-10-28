@@ -490,7 +490,7 @@ check("a filtered arm with no exposure gives an infinite (failing) bound, not a 
 print("olympic_ring.py: the verdict needs every gate bar; secondary bars never change it")
 ARM = {"linked_unexplained_per_exposure_min": 40.0, "credited_path_unexplained_per_exposure_min": 45.0,
        "credited_share": 0.53, "link_coverage": 0.65, "ab_noncredited_share": 0.3, "median_both_identified": 0.57}
-PASS_S = {"videos": 23, "videos_compared": 23, "ratio": 0.8, "ratio_ci95": (0.7, 0.95), "noncredited_removed_share": 0.3, "credited_dropped_share": 0.005,
+PASS_S = {"videos": 23, "videos_compared": 23, "credited_share": {"baseline": 0.53, "filtered": 0.53}, "ratio": 0.8, "ratio_ci95": (0.7, 0.95), "noncredited_removed_share": 0.3, "credited_dropped_share": 0.005,
           "credited_dropped_share_worst_video": 0.02, "newly_failed": [], "baseline": dict(ARM),
           "filtered": ARM | {"linked_unexplained_per_exposure_min": 32.0, "ab_noncredited_share": 0.2}}
 check("all bars met: PASS", olympic_ring.verdict(PASS_S)["pass"] is True)
@@ -499,7 +499,8 @@ FAILS = [("G1: ratio 0.91", {"ratio": 0.91}), ("G1: upper bound 1.00 (not below)
          ("G2: no measurement", {"noncredited_removed_share": None}),
          ("G3a: loses 1.01% of credited punches", {"credited_dropped_share": 0.0101}),
          ("G3a: one video loses 5.1%", {"credited_dropped_share_worst_video": 0.051}),
-         ("G3b: credited share falls 1.1 pp", {"filtered": PASS_S["filtered"] | {"credited_share": 0.519}}),
+         ("G3b: credited share falls 1.1 pp", {"credited_share": {"baseline": 0.53, "filtered": 0.519}}),
+         ("G3b: no credited share measured", {"credited_share": {"baseline": None, "filtered": None}}),
          ("G3c: a video fails only when filtered", {"newly_failed": ["GH088416"]})]
 for name, over in FAILS:
     check(f"FAIL when {name}", olympic_ring.verdict(PASS_S | over)["pass"] is False)
@@ -754,15 +755,23 @@ want = real["margins"][0.0]["arm"]["credited"] / (2 * real["margins"][0.0]["arm"
 check("ASTRA 4.1: G3b counts a video that fails only when filtered: its lost credits halve the filtered share and G3b FAILS",
       sk["newly_failed"] == ["GH159681"] and math.isclose(sk["filtered"]["credited_share"], want)
       and math.isclose(sk["baseline"]["credited_share"], real["base"]["credited"] / real["base"]["events"])
+      and sk["credited_share"]["filtered"] == sk["filtered"]["credited_share"]
       and olympic_ring.verdict(sk)["gate"]["G3b_credited_share"] is False, str(sk["filtered"]["credited_share"]))
 check("a video that fails only when filtered is G3c's failure AND stays in the filter's cost (G3a)",
       sn["newly_failed"] == ["GH138416"] and sn["credited_dropped"] == 3 and sn["videos_compared"] == 1
       and olympic_ring.verdict(sn)["gate"]["G3c_no_new_failures"] is False)
 only_new = olympic_ring.summarise_margin([newly], 0.0)
 vn = olympic_ring.verdict(only_new)
-check("ASTRA 1.5: every filtered arm failing is a FAIL verdict (G1, G3b unmeasured -> fail; G3c fails), not a crash",
+check("ASTRA 1.5: every filtered arm failing is a FAIL verdict (G1 unmeasured -> fail; G3c fails), not a crash",
       vn["pass"] is False and vn["gate"]["G3c_no_new_failures"] is False and vn["gate"]["G1_linked_unexplained"] is False
-      and vn["gate"]["G3b_credited_share"] is False and vn["secondary"] == {}, str(vn))
+      and vn["secondary"] == {}, str(vn))
+check("ASTRA 5: ... and G3b is still MEASURED there (attribution precedes linking): credits kept -> it passes on its own",
+      only_new["credited_share"]["filtered"] == only_new["credited_share"]["baseline"] is not None
+      and vn["gate"]["G3b_credited_share"] is True, str(only_new.get("credited_share")))
+only_killed = olympic_ring.summarise_margin([killed], 0.0)
+check("ASTRA 5: with every filtered arm failing AND the credits lost, G3b reports the loss (0%) and fails",
+      "baseline" not in only_killed and only_killed["credited_share"]["filtered"] == 0.0
+      and olympic_ring.verdict(only_killed)["gate"]["G3b_credited_share"] is False, str(only_killed.get("credited_share")))
 zero = copy.deepcopy(real)
 for arm_ in (zero["base"], zero["margins"][0.0]["arm"]):
     arm_["linked"]["unexplained"] = 0
