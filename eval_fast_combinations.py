@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -175,7 +176,11 @@ def main(argv=None) -> int:
     if a.out.exists():
         raise SystemExit(f"REFUSED: {a.out} exists. The held-out run is done once; a second run with other "
                          "settings is not allowed by the gate")
-    frozen = a.e2e_dir / "frozen"
+    # Everything this invocation writes before the marker (frozen rule copies, pipeline outputs) goes
+    # in a folder created for it alone, so a concurrent invocation can never overwrite what it scores.
+    a.e2e_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=a.e2e_dir))
+    frozen = run_dir / "frozen"
     t, tune_sha, arm_rule, arm_path = read_tune(a.tune, a.rule, frozen)
     commit = tune.gate_commit()
     if commit != t.get("gate_commit"):
@@ -207,7 +212,7 @@ def main(argv=None) -> int:
     base_c = {v: fc.counts(vd, fc.detections(vd, base_rule)) for v, vd in loaded.items()}
     check_finder_reproduction(fc.total(base_c, E2E_VIDEOS))
     sha = classify.read_manifest(a.classifier)["sha256"]
-    rows_b = run_e2e(a, base_path, a.e2e_dir / "baseline", sha, loaded, base_rule)
+    rows_b = run_e2e(a, base_path, run_dir / "baseline", sha, loaded, base_rule)
     nb = {v: named_counts(loaded[v], rows_b[v]) for v in E2E_VIDEOS}
     named_b = check_named_reproduction(nb)
 
@@ -226,7 +231,7 @@ def main(argv=None) -> int:
     ver = fc.verdict(arm_t, base_t, diffs["f1"])
 
     # End to end on V5+V9 (the classifier checkpoint's own held-out videos).
-    rows_a = run_e2e(a, arm_path, a.e2e_dir / "arm", sha, loaded, arm_rule)
+    rows_a = run_e2e(a, arm_path, run_dir / "arm", sha, loaded, arm_rule)
     na = {v: named_counts(loaded[v], rows_a[v]) for v in E2E_VIDEOS}
     labels_e2e = int(sum(c[:, NLAB].sum() for c in nb.values()))
     end_to_end = {"videos": list(E2E_VIDEOS), "labelled": labels_e2e,
@@ -234,7 +239,7 @@ def main(argv=None) -> int:
                   "difference_share": paired_named_ci(na, nb)}
 
     out = {"gate": str(tune.GATE), "gate_commit": commit, "head": tune._git("rev-parse", "HEAD"),
-           "tune_file_sha256": tune_sha, "arm": t["chosen_arm"], "arm_rule": arm_rule,
+           "tune_file_sha256": tune_sha, "run_dir": str(run_dir), "arm": t["chosen_arm"], "arm_rule": arm_rule,
            "baseline_rule": base_rule, "control_rule": ctl_rule, "held_out": held, "videos": checks,
            "excluded": excluded, "reproduction": {"reference": {k: list(v) if isinstance(v, tuple) else v
                                                                 for k, v in REFERENCE.items()}, "ok": True},

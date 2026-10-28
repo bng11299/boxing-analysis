@@ -11,6 +11,7 @@ Run:  python tests/test_fastcombo_eval.py
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import tempfile
@@ -27,6 +28,16 @@ import tune_fast_combinations as tune  # noqa: E402
 from boxingvi import data as bdata  # noqa: E402
 from boxingvi import fastcombo as fc  # noqa: E402
 from boxingvi.data import CLASSES, N_JOINTS, Span, Track  # noqa: E402
+
+# Nothing these tests do may touch the repo's real experiment state: the started marker points at a
+# temp folder from the first line to the last (never restored: this process ends with the file), and
+# the tests run from a temp working directory, so every default relative output lands there too.
+REAL_STARTED = tune.STARTED
+SANDBOX = Path(tempfile.mkdtemp())
+tune.STARTED = SANDBOX / "results" / "fast_combinations_heldout.started"
+REAL_RESULTS = ROOT / "results"
+RESULTS_BEFORE = sorted(p.name for p in REAL_RESULTS.iterdir()) if REAL_RESULTS.is_dir() else []
+os.chdir(SANDBOX)
 
 PASS = FAIL = 0
 
@@ -189,12 +200,10 @@ held_saved = bdata.HELD_OUT_VIDEOS
 bdata.HELD_OUT_VIDEOS = ("V2", "V3", "V5", "V9")
 check("training videos are every source not held out, in order",
       tune.training_videos() == ["V1", "V4", "V6", "V7", "V8", "V10"], str(tune.training_videos()))
-started_saved = tune.STARTED
-tune.STARTED = tmp / "results" / "fast_combinations_heldout.started"
 check("the started marker is a fixed path under the repo, not an option",
-      started_saved == ROOT / "results" / "fast_combinations_heldout.started"
+      REAL_STARTED == ROOT / "results" / "fast_combinations_heldout.started"
       and "--heldout" not in tune.main.__code__.co_consts)
-tune.STARTED.parent.mkdir(parents=True)
+tune.STARTED.parent.mkdir(parents=True, exist_ok=True)
 tune.STARTED.write_text("{}", encoding="utf-8")
 raises("tuning again after the held-out run started is refused",
        lambda: tune.main(["--data", "x", "--poses", str(tmp)]), SystemExit)
@@ -295,7 +304,7 @@ ev.classify.read_manifest = lambda p: {"sha256": "s"}
 raises("named-right 0 instead of 352: the run stops",
        lambda: ev.main(["--data", "x", "--poses", str(pose_dir), "--classifier", "x", "--stance", "orthodox",
                         "--tune", str(tf), "--rule", str(armrule), "--baseline", str(v6rule),
-                        "--out", str(tmp / "never.json")]), SystemExit)
+                        "--out", str(tmp / "never.json"), "--e2e-dir", str(tmp / "e2e-fail")]), SystemExit)
 check("... after the baseline only: no arm detection, no arm end-to-end run",
       ("detect", True) not in calls and ("e2e", "arm_rule.json") not in calls
       and calls.count(("e2e", "baseline_rule.json")) == 1 and ("e2e", v6rule.name) not in calls, str(calls))
@@ -310,6 +319,8 @@ rc_ = ev.main(["--data", "x", "--poses", str(pose_dir), "--classifier", "x", "--
                "--e2e-dir", str(tmp / "e2e")])
 res_ = json.loads((tmp / "done.json").read_text(encoding="utf-8")) if (tmp / "done.json").is_file() else {}
 check("it returns 0 and writes the result with a verdict", rc_ == 0 and "verdict" in res_ and "end_to_end" in res_)
+check("this invocation's frozen copies and outputs live in its own new folder under --e2e-dir",
+      Path(res_.get("run_dir", "")).parent == tmp / "e2e" and (Path(res_.get("run_dir", "x")) / "frozen" / "baseline_rule.json").is_file())
 check("order: baseline reproduced (finder, end to end) -> marker -> arm",
       calls.index("named-reproduced") < calls.index(("detect", True)) < calls.index(("e2e", "arm_rule.json")))
 check("the arm's end-to-end stage gets the FROZEN rule file, never the one named on the command line",
@@ -323,7 +334,6 @@ ev.check_named_reproduction = named_saved
 (ev.read_tune, tune.gate_commit, tune.load_video, ev.run_e2e, fc.detections, ev.check_finder_reproduction,
  ev.freeze) = saved_fns
 ev.classify.read_manifest = classify_saved
-tune.STARTED = started_saved
 
 check("the reference is RESULTS rows 5a-5c", ev.REFERENCE == {"detections_scored": 686, "labelled": 742, "hits": 434,
                                                              "jab": (84, 264), "named_right": 352})
@@ -389,9 +399,11 @@ check("... and nothing was written", not (tmp / "tune_late.json").exists() and n
 fc.choose_arm = choose_saved
 tune.STARTED.unlink()
 tune.load_video = saved_fns[2]
-tune.STARTED = started_saved
 
 bdata.HELD_OUT_VIDEOS = held_saved
+check("the tests left the repo's real results/ exactly as they found it, and no real marker exists",
+      (sorted(p.name for p in REAL_RESULTS.iterdir()) if REAL_RESULTS.is_dir() else []) == RESULTS_BEFORE
+      and not REAL_STARTED.exists(), str(RESULTS_BEFORE))
 if not had:
     delattr(bdata, "PERSON_OF_VIDEO")
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
