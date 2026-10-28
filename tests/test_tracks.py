@@ -257,27 +257,27 @@ raises("a NaN track id is refused", lambda: PoseTable.load(stored(track_id=nan_i
 neg_f = table.frame.astype(np.float64)
 neg_f[0] = -1.0
 raises("a whole but negative frame is refused", lambda: PoseTable.load(stored(frame=neg_f)), "below 0")
-raises("a string-typed id array is refused", lambda: PoseTable.load(stored(track_id=table.track_id.astype(str))), "integer array")
-raises("a 2-D frame array is refused", lambda: PoseTable.load(stored(frame=table.frame.reshape(-1, 1))), "1-D")
+raises("a string-typed id array is refused", lambda: PoseTable.load(stored(track_id=table.track_id.astype(str))), "track_id has dtype")
+raises("a 2-D frame array is refused", lambda: PoseTable.load(stored(frame=table.frame.reshape(-1, 1))), "frame has shape (55, 1)")
 raises("a NaN fps in the file is refused", lambda: PoseTable.load(stored(fps=np.float64("nan"))), "finite")
 raises("a zero fps in the file is refused", lambda: PoseTable.load(stored(fps=np.float64(0.0))), "positive")
 raises("a fractional n_frames (7.5) is refused, not read as 7", lambda: PoseTable.load(stored(n_frames=np.float64(7.5))), "whole number")
 raises("n_frames of 0 is refused", lambda: PoseTable.load(stored(n_frames=np.int64(0))), "at least 1")
 raises("a fractional width is refused", lambda: PoseTable.load(stored(width=np.float64(640.7))), "whole number")
 raises("a width of 0 is refused", lambda: PoseTable.load(stored(height=np.int64(0))), "at least 1")
-raises("a vector where a scalar belongs is refused", lambda: PoseTable.load(stored(fps=np.array([30.0, 60.0]))), "single number")
-raises("a missing field is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "conf", tmp / "missing.npz")), "'conf' is missing")
+raises("a vector where a scalar belongs is refused", lambda: PoseTable.load(stored(fps=np.array([30.0, 60.0]))), "fps has shape (2,), expected ()")
+raises("a missing field is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "conf", tmp / "missing.npz")), "missing conf")
 check("whole-valued FLOAT arrays are still accepted (exactly representable), with identical content",
       np.array_equal(PoseTable.load(stored(frame=table.frame.astype(np.float64), track_id=table.track_id.astype(np.float64))).track_id,
                      table.track_id))
 check("and the ordinary round trip is unchanged", np.array_equal(PoseTable.load(f).frame, table.frame))
-raises("a NUMERIC source is refused, not turned into the text '5'", lambda: PoseTable.load(stored(source=np.int64(5))), "source must be a single string")
-raises("a numeric model is refused", lambda: PoseTable.load(stored(model=np.float64(1.5))), "model must be a single string")
-raises("a vector model (two strings) is refused, not str()'d", lambda: PoseTable.load(stored(model=np.array(["a", "b"]))), "model must be a single string")
-raises("a vector source is refused", lambda: PoseTable.load(stored(source=np.array(["GH000001.mp4", "x"]))), "source must be a single string")
-raises("a numeric video_fp is refused", lambda: PoseTable.load(stored(video_fp=np.int64(7))), "video_fp must be a single string")
-raises("a missing source is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "source", tmp / "nosrc.npz")), "'source' is missing")
-raises("a missing model is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "model", tmp / "nomodel.npz")), "'model' is missing")
+raises("a NUMERIC source is refused, not turned into the text '5'", lambda: PoseTable.load(stored(source=np.int64(5))), "source has dtype")
+raises("a numeric model is refused", lambda: PoseTable.load(stored(model=np.float64(1.5))), "model has dtype")
+raises("a vector model (two strings) is refused, not str()'d", lambda: PoseTable.load(stored(model=np.array(["a", "b"]))), "model has shape (2,), expected ()")
+raises("a vector source is refused", lambda: PoseTable.load(stored(source=np.array(["GH000001.mp4", "x"]))), "source has shape (2,), expected ()")
+raises("a numeric video_fp is refused", lambda: PoseTable.load(stored(video_fp=np.int64(7))), "video_fp has dtype")
+raises("a missing source is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "source", tmp / "nosrc.npz")), "missing source")
+raises("a missing model is a ValueError naming it", lambda: PoseTable.load(_missing(old_fields, "model", tmp / "nomodel.npz")), "missing model")
 check("a proper string source and model still load, unchanged",
       PoseTable.load(f).source == table.source and PoseTable.load(f).model == table.model)
 
@@ -367,6 +367,130 @@ check("box_at interpolates between keyframes",
 low = PoseTable(table.frame, table.track_id, table.box, table.xy, np.where(np.isin(np.arange(N_JOINTS), [9, 10]), 0.05, 0.9)
                 .astype(np.float32)[None].repeat(len(table.frame), 0), N, 50.0, W, H)
 check("unsure wrists are not used to credit a punch", olympic.attribute([left_a], low)[0].track_id is None)
+
+print("PoseTable.load: every .npy header is checked before anything is allocated")
+import io  # noqa: E402
+import tracemalloc  # noqa: E402
+import zipfile  # noqa: E402
+
+
+def npy_bytes(v) -> bytes:
+    b = io.BytesIO()
+    np.save(b, np.asarray(v))
+    return b.getvalue()
+
+
+def npy_header_only(shape, descr: str) -> bytes:
+    """A .npy that is all header: it claims `shape` and carries no data at all."""
+    b = io.BytesIO()
+    np.lib.format.write_array_header_1_0(b, {"descr": descr, "fortran_order": False, "shape": shape})
+    return b.getvalue()
+
+
+def table_npz(path, method=zipfile.ZIP_STORED, method_key="xy", **over) -> Path:
+    """`old_fields` written member by member; `over` replaces members (bytes are written
+    as given, anything else saved as .npy); `method_key` uses zip `method`."""
+    members = dict(old_fields) | over
+    with zipfile.ZipFile(path, "w") as zf:
+        for k, v in members.items():
+            zf.writestr(zipfile.ZipInfo(k + ".npy"), v if isinstance(v, bytes) else npy_bytes(v),
+                        compress_type=method if k == method_key else zipfile.ZIP_STORED)
+    return Path(path)
+
+
+def table_bomb(path, rows: int, descr: str = "<f4") -> Path:
+    return table_npz(path, frame=npy_header_only((rows,), "<i8"), track_id=npy_header_only((rows,), "<i8"),
+                     box=npy_header_only((rows, 4), descr), xy=npy_header_only((rows, N_JOINTS, 2), descr),
+                     conf=npy_header_only((rows, N_JOINTS), descr))
+
+
+def peak_mb(fn) -> float:
+    """Peak traced allocation (MB) while `fn` runs; it must raise ValueError."""
+    tracemalloc.start()
+    try:
+        fn()
+    except ValueError:
+        pass
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return peak / 2 ** 20
+
+
+tb = table_bomb(tmp / "tbomb.npz", 10 ** 12)
+check("the tracks header bomb is a few KB on disk", tb.stat().st_size < 8192, str(tb.stat().st_size))
+raises("a 10^12-row header bomb is refused at the row cap", lambda: PoseTable.load(tb), "the cap is")
+mb = peak_mb(lambda: PoseTable.load(tb))
+check("... with a peak under 20 MB", mb < 20, f"{mb:.1f} MB")
+over = table_bomb(tmp / "tover.npz", pose_yolo.MAX_TABLE_ROWS + 1)
+raises("one row past MAX_TABLE_ROWS is refused", lambda: PoseTable.load(over), "the cap is")
+at_cap = table_bomb(tmp / "tcap.npz", pose_yolo.MAX_TABLE_ROWS, "<f8")
+raises("exactly the cap at float64 with no data is refused by the zip-entry size check",
+       lambda: PoseTable.load(at_cap), "promises")
+mb = peak_mb(lambda: PoseTable.load(at_cap))
+check("... before allocating (peak under 20 MB; np.load took ~880 MB)", mb < 20, f"{mb:.1f} MB")
+for label, method in (("bz2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA)):
+    raises(f"a {label}-compressed member is refused before it is decompressed",
+           lambda m=method: PoseTable.load(table_npz(tmp / f"t{label}.npz", m)), "compression method")
+obj = npy_header_only((n_rows, 4), "|O")
+raises("an object-dtype box is refused from its header (never unpickled)",
+       lambda: PoseTable.load(table_npz(tmp / "tobj.npz", box=obj)), "box has dtype '|O'")
+raises("a box with one row fewer than frame is refused",
+       lambda: PoseTable.load(table_npz(tmp / "tshort.npz", box=old_fields["box"][:-1])), "box has shape")
+raises("an xy with 16 joints is refused",
+       lambda: PoseTable.load(table_npz(tmp / "tj16.npz", xy=old_fields["xy"][:, :16])), "xy has shape")
+raises("a file that is not a zip is a ValueError",
+       lambda: PoseTable.load((tmp / "tnot.npz").write_bytes(b"not a zip") and tmp / "tnot.npz"), "not a readable")
+
+# The zip's own directory is bounded before zipfile reads it (Astra review of #28: ZipFile
+# built one object per member, however many, before any cap).
+many = table_npz(tmp / "tmany.npz", **{f"pad{i:05d}": b"" for i in range(5000)})
+raises("a table padded with 5,000 empty members is refused from its end record",
+       lambda: PoseTable.load(many), "zip directory of 5,011 members")      # 11 old-format members + 5,000
+mb = peak_mb(lambda: PoseTable.load(many))
+check("... before zipfile builds the 5,000 entries (peak under 1 MB)", mb < 1, f"{mb:.2f} MB")
+good = table_npz(tmp / "tgood.npz")
+check("the member-by-member test table itself loads", PoseTable.load(good).n_frames == table.n_frames)
+z64 = bytearray(good.read_bytes())
+z64[-12:-10] = (0xFFFF).to_bytes(2, "little")      # end record: total entries -> the zip64 marker
+(tmp / "tz64.npz").write_bytes(bytes(z64))
+raises("an end record that defers to a zip64 directory is refused",
+       lambda: PoseTable.load(tmp / "tz64.npz"), "zip64 or multi-disk")
+with zipfile.ZipFile(tmp / "tcomment.npz", "w") as zf:
+    for k, v in old_fields.items():
+        zf.writestr(k + ".npy", npy_bytes(v))
+    zf.comment = b"np.savez never writes one"
+raises("an archive comment (end record not at the end) is not a readable table",
+       lambda: PoseTable.load(tmp / "tcomment.npz"), "not a readable")
+forged = bytearray(good.read_bytes())
+forged[-2:] = (1).to_bytes(2, "little")           # the end record claims a 1-byte comment that is not there
+(tmp / "tforged.npz").write_bytes(bytes(forged))
+raises("an end record claiming a comment is not a readable table (zipfile alone would accept it)",
+       lambda: PoseTable.load(tmp / "tforged.npz"), "not a readable")
+import warnings  # noqa: E402
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")                 # zipfile warns on the duplicate it is told to write
+    with zipfile.ZipFile(tmp / "tdup.npz", "w") as zf:
+        for k, v in old_fields.items():
+            zf.writestr(k + ".npy", npy_bytes(v))
+        zf.writestr("frame.npy", npy_bytes(old_fields["frame"]))
+raises("two members with one name are refused (which one is read would be zipfile's choice)",
+       lambda: PoseTable.load(tmp / "tdup.npz"), "each named once")
+saved_cap = pose_yolo.MAX_NPZ_MEMBERS
+pose_yolo.MAX_NPZ_MEMBERS = 5
+try:
+    raises("the member cap is read when the loader runs, not at import",
+           lambda: PoseTable.load(good), "at most 5 members")
+finally:
+    pose_yolo.MAX_NPZ_MEMBERS = saved_cap
+
+rt_src = dataclasses.replace(table, video_fp="ab" * 32)
+rt_src.save(tmp / "trt.npz")
+rt = PoseTable.load(tmp / "trt.npz")
+check("a real save round-trips exactly (every array, dtype and field)",
+      all(np.array_equal(getattr(rt, k), getattr(rt_src, k)) and getattr(rt, k).dtype == getattr(rt_src, k).dtype
+          for k in ("frame", "track_id", "box", "xy", "conf"))
+      and (rt.n_frames, rt.fps, rt.width, rt.height, rt.source, rt.model, rt.video_fp)
+      == (rt_src.n_frames, rt_src.fps, rt_src.width, rt_src.height, rt_src.source, rt_src.model, rt_src.video_fp))
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

@@ -306,7 +306,8 @@ def skip_mask(track: Track, orig_frames: np.ndarray, skips: np.ndarray, half: in
 
 
 def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: str, bridge: int,
-                   min_rows: int, skips: "np.ndarray | None" = None, smooth_s: float = punchfind.SMOOTH_S) -> dict:
+                   min_rows: int, skips: "np.ndarray | None" = None, smooth_s: float = punchfind.SMOOTH_S,
+                   keep: "list | None" = None) -> dict:
     """The rule on each segment (bridge, wrist_signal, detect) and the EXPOSURE it ran on, for one
     person: the single implementation behind `find_bursts` (a linked boxer) and
     `find_bursts_credited` (a credited fragment). Returns {"mask", "raw" [(frame, hand index, peak
@@ -322,7 +323,12 @@ def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: 
     unmasked frame would be a "peak" for being higher than a zero, and a punch whose true peak is under
     the mask would come back as a burst at the mask's edge (measured: it doubled the burst rate there).
     That frame keeps its true signal, so the next one is compared with it, not with a zero. With None the
-    result is exactly what it was without the argument."""
+    result is exactly what it was without the argument.
+
+    `keep`, when a list, receives one (segment rows, bridged track, signal, peak frames, peak hands) per
+    PROCESSED segment, so a caller that also names the punches (boxers.find_and_classify) reads each one from
+    the very track and signal it was found on, without a second implementation of the scan. It changes
+    nothing else."""
     skips = check_skips(skips, table.n_frames)
     half = skip_mask_half(table.fps, smooth_s)
     out = {"mask": np.zeros(table.n_frames, dtype=bool), "raw": [], "segments": 0, "short_segments": 0,
@@ -353,6 +359,8 @@ def _scan_segments(table: PoseTable, segs: "list[np.ndarray]", rule: dict, who: 
         row = {int(f): i for i, f in enumerate(track.frame_ids)}
         for f, h in zip(frames, hands):
             out["raw"].append((int(f), int(h), float(sig[row[int(f)], int(h)])))
+        if keep is not None:
+            keep.append((seg, track, sig, frames, hands))
     for f, _h, _p in out["raw"]:
         if not mask[f]:
             raise RuntimeError(f"{who}: a burst at frame {f} lies outside the exposure it was "

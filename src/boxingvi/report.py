@@ -555,8 +555,14 @@ def _join(items: "list[str]") -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
-def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tuple[str, list[str]]":
-    """(text, the numbers it states). Fixed templates only."""
+def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str = "your",
+            identified: "tuple[str, float] | None" = None) -> "tuple[str, list[str]]":
+    """(text, the numbers it states). Fixed templates only. `who` is the possessive the text uses for the
+    person ("your"; the per-boxer report passes "this boxer's"). `identified`, (label, minutes), adds the rate
+    over the time that person was identified, beside the rate over the whole footage."""
+    if who not in ("your", "this boxer's"):
+        raise ValueError("summary: who out of range")
+    Who = who[0].upper() + who[1:]
     w = _Writer()
     hc = facts["hand_check"]
     if hc["verdict"] == "warn":
@@ -599,6 +605,9 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
     else:
         w.say(f"In {where} ({footage} of footage) the tool found {w.count(facts['n_found'])} "
               f"{_punches(facts['n_found'])}, {w.rate(facts['per_min'])} a minute.")
+        if identified is not None and identified[1] > 0:
+            w.say(f"That is {w.rate(facts['n_found'] / identified[1])} a minute of the time {identified[0]} was "
+                  f"identified.")
         if facts["n_named"]:
             sh = shares(facts["types"])
             order = sorted((c for c in CLASSES if facts["types"][c]), key=lambda c: (-facts["types"][c], c))
@@ -606,7 +615,7 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
                      f"({w.count(facts['types'][c])})" for c in order]
             w.say(f"Of the {w.count(facts['n_named'])} it could name, {_join(parts)}.")
             lead = facts["n_type_lead"] / facts["n_named"]
-            w.say(f"By punch type, {w.pct(lead)} were thrown with your lead hand.")
+            w.say(f"By punch type, {w.pct(lead)} were thrown with {who} lead hand.")
             if facts["n_hands_disagree"]:
                 k = facts["n_hands_disagree"]
                 w.say(f"For {w.count(k)} {_punches(k)} the punch type and the wrist that moved point to "
@@ -627,10 +636,10 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None") -> "tupl
             se = math.sqrt(first["n"] / first["minutes"] ** 2 + last["n"] / last["minutes"] ** 2)
             span = f"from {a_s} a minute in round {w.count(1)} to {b_s} in round {w.count(last['round'])}"
             if abs(last["per_min"] - first["per_min"]) <= CHANCE_SE * se or a == b:
-                w.say(f"Your punch rate went {span}: a difference chance alone could produce.")
+                w.say(f"{Who} punch rate went {span}: a difference chance alone could produce.")
             else:
                 trend = "dropped" if b < a else "rose"
-                w.say(f"Your punch rate {trend} by {w.pct(abs(b / a - 1))}, {span}.")
+                w.say(f"{Who} punch rate {trend} by {w.pct(abs(b / a - 1))}, {span}.")
         if facts["n_outside_rounds"]:
             k = facts["n_outside_rounds"]
             w.say(f"{w.count(k)} {_punches(k)} fell outside the rounds and {'is' if k == 1 else 'are'} not counted.")
@@ -719,7 +728,9 @@ def _check_result(hc: dict) -> str:
 
 
 def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict, text: str,
-                   fps: float, how_cut: str = "") -> None:
+                   fps: float, how_cut: str = "", extra: "tuple[tuple[str, list], ...]" = ()) -> None:
+    """`extra`: further (sheet name, rows) written after the four standard sheets, every cell through `_cell`
+    (the per-boxer report's Identity sheet). Without it the workbook is exactly the solo report's."""
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -780,4 +791,8 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
                  f"Benchmark = BoxingVI, held-out videos {'/'.join(bench['videos'])}; skeletons from AlphaPose, "
                  "not the YOLO11-pose used on your footage. Counts are estimates."):
         ws.append([_cell(line)])
+    for name, sheet_rows in extra:
+        ws = wb.create_sheet(_cell(name))
+        for r in sheet_rows:
+            ws.append([_cell(v) for v in r])
     wb.save(path)
