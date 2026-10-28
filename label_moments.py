@@ -216,6 +216,10 @@ class App:
             self.message = ""
             try:
                 self.s.label(action)
+            except lm.FileChanged as e:
+                self.message = f"NOT SAVED: {e}. Press Q, then run the command again."
+                self._update_status()
+                return "file-changed"
             except lm.SaveFailed as e:
                 self.message = f"NOT SAVED: {e}. Close it there, then press the key again."
                 self._update_status()
@@ -235,19 +239,26 @@ class App:
 
     def quit(self):
         """Save (it records the time since the last answer) and close. If the save fails the window stays
-        open, so answers kept only in memory are not thrown away."""
+        open, so answers kept only in memory are not thrown away -- unless the file changed underneath this
+        window: then its copy is the stale one, and it closes without writing."""
         try:
             self.s.save()
+        except lm.FileChanged:
+            self._close()
+            return "closed-unsaved"
         except lm.SaveFailed as e:
             self.message = f"NOT SAVED: {e}. Close it there, then press Q again."
             self._update_status()
             return "save-failed"
+        self.closed = True
+        self._close()
+        return "quit"
+
+    def _close(self):
         for name in ("after_id", "poll_id", "arm_id"):
             self._cancel(name)
         self.pool.shutdown(wait=False, cancel_futures=True)
-        self.closed = True
         self.root.destroy()
-        return "quit"
 
 
 def ask_description(session, read=input, write=print) -> bool:
@@ -307,7 +318,8 @@ def main(argv=None, roots=None, read=input) -> int:
         app = App(root, session, guard, meta, a.labels.name.split(".")[0])
         root.mainloop()
         if not app.closed:
-            print(f"NOT everything saved: {summary(lf)} in memory; run again to check the file.", file=sys.stderr)
+            print("NOT saved from this window: the file changed underneath it (another copy of the tool?), so "
+                  "it was not overwritten. Check it with --verify, then run the command again.", file=sys.stderr)
             return 3
         print(f"saved: {summary(lf)}; minutes so far {session.minutes():.1f}")
         if lf.first_empty() is None:

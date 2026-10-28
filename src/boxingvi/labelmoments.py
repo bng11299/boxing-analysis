@@ -76,6 +76,11 @@ class SaveFailed(OSError):
     """The labels file could not be replaced (open in another program?); it is unchanged on disk."""
 
 
+class FileChanged(SaveFailed):
+    """The labels file on disk is no longer what this session read or last wrote (another copy of the tool,
+    or an editor, saved it since). Nothing was written: an old copy must never overwrite newer answers."""
+
+
 # ---- paths ----------------------------------------------------------------------------------------
 def _norm(p) -> str:
     s = str(p)
@@ -240,6 +245,7 @@ class LabelFile:
             times.append(int(m.group(1)))
             values.append(m.group(2))
         lf = cls(p, lines, newline, bom, trailing, head_idx, row_idx, times, values)
+        lf.on_disk = raw            # what the file holds as far as this session knows
         missing = [k for k in HEADER_KEYS if k not in head_idx]
         if missing:
             raise Refused(f"missing header {missing}")
@@ -298,8 +304,17 @@ class LabelFile:
 
     def save(self) -> None:
         """Atomic: a temp file beside the target, then a rename. A crash leaves the old file whole, and a
-        hard link planted at the target is replaced, not written through."""
+        hard link planted at the target is replaced, not written through. Refused (FileChanged) if the file
+        on disk is not what this session read or last wrote, so a stale session never overwrites newer
+        answers."""
         data = self.to_bytes()
+        try:
+            current = self.path.read_bytes()
+        except OSError:
+            raise SaveFailed("could not read the labels file back before saving") from None
+        if current != getattr(self, "on_disk", None):
+            raise FileChanged("the labels file was changed by something else since this window opened it "
+                              "(another copy of this tool?); nothing was written")
         tmp = None
         try:
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".label_moments-", suffix=".tmp")
@@ -308,6 +323,7 @@ class LabelFile:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.path)
+            self.on_disk = data
         except OSError:
             if tmp is not None:
                 try:

@@ -89,3 +89,18 @@ original shown, a name typed into `# A:`, labels written outside `~/comps-partic
 - Someone with write access to `~/comps-participant-data/` could edit the CSV between sessions; the tool
   re-validates it on every start, and the gate parses it again.
 - Labels the operator gives are trusted as given: the tool cannot tell a careless answer from a careful one.
+
+### Iteration 4 -- found in use: a stale session could overwrite newer answers
+- **What happened (10-27, real use, no data lost):** a v3 run left waiting at the A prompt since 19:41 was
+  still open after v3 had been labelled in another terminal (20:32). Its in-memory copy had every row
+  empty; typing a colour there would have saved that copy over the finished file. Two v2 runs were also
+  waiting on the same file. All three were stopped before any of them wrote (files checked unchanged); the
+  finished v3 file was backed up beside itself first.
+- **Missed by every gate so far:** the tests and both reviews treated one session per file as given.
+- **Fix:** `LabelFile.save` reads the file back first and refuses (`FileChanged`, nothing written) unless
+  it still holds exactly what this session read or last wrote. The A prompt then fails with NOT SAVED; a
+  window refuses the answer and, on Q, closes without writing.
+- Test gate: 169 passed, 0 failed, 1 skipped, base Python and venv (new: the 19:41 scenario replayed, two
+  copies on one file, a hand edit between saves, the stale A prompt, a window whose file changed).
+  #31 compatibility unchanged; `--check` on v2 and v1 ok; v3 still complete.
+- Residual: a write landing between the read-back and the rename (milliseconds) is not caught.

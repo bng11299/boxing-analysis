@@ -467,6 +467,41 @@ finally:
 s.label("L")
 check("the next save writes the answer", "0,L" in p.read_text())
 
+# the near-miss of 2026-10-27: a run left waiting at the A prompt since before the labelling, then answered
+p = fresh()
+stale = lm.Session(lm.LabelFile.load(p), clock=Clock())        # opened first, left at the prompt
+done = lm.Session(lm.LabelFile.load(p), clock=Clock())         # the run that did the labelling
+done.describe("white")
+for v in ("L", "R", "?"):
+    done.label(v)
+finished = p.read_bytes()
+raises("a stale session cannot save its old copy over newer answers", lambda: stale.describe("white"),
+       lm.FileChanged, "changed by something else")
+check("... and the finished file is untouched", p.read_bytes() == finished)
+raises("a stale session cannot answer a row either", lambda: stale.label("L"), lm.FileChanged, "nothing")
+check("... still untouched", p.read_bytes() == finished)
+p = fresh()
+a1 = lm.Session(lm.LabelFile.load(p), clock=Clock())
+a2 = lm.Session(lm.LabelFile.load(p), clock=Clock())
+a1.describe("red")
+raises("two copies on one file: the second to save is refused", lambda: a2.describe("blue"), lm.FileChanged)
+check("... and the first copy's A stands", "# A: the boxer in red gloves" in p.read_text())
+a1.label("L")
+check("the session that saved last keeps saving", "0,L" in p.read_text())
+p.write_text(p.read_text().replace("0,L", "0,R"))                # an editor changes the file meanwhile
+raises("a hand edit since the last save is not overwritten", lambda: a1.label("R"), lm.FileChanged)
+check("... the edit stands", "0,R" in p.read_text())
+p = fresh()
+answers = iter(["white"])
+stale = lm.Session(lm.LabelFile.load(p), clock=Clock())
+lm.Session(lm.LabelFile.load(p), clock=Clock()).describe("red")
+said = []
+try:
+    cli.ask_description(stale, read=lambda _: next(answers), write=said.append)
+    check("the A prompt of a stale run refuses to save", False, "did not raise")
+except lm.FileChanged:
+    check("the A prompt of a stale run refuses to save", "# A: the boxer in red gloves" in p.read_text())
+
 # ---- 8. the CLI: check, verify, refusals, and never opening the method's output --------------------
 print("\n-- 8. the command line")
 p = fresh()
@@ -648,6 +683,23 @@ if root is not None:
     clk.t += 5.0
     check("quit after the file is free saves and closes", app.handle("quit") == "quit" and app.closed)
     check("quit saved the time spent", lm.LabelFile.load(p).prior_minutes() > 0)
+
+    root = tk.Tk()
+    root.withdraw()
+    p = fresh()
+    clk = Clock()
+    s = lm.Session(lm.LabelFile.load(p), clock=clk)
+    s.describe("red")
+    app = cli.App(root, s, guard, meta, "syn-v1", clock=clk)
+    pump(app, lambda: app.clip is not None)
+    other = lm.Session(lm.LabelFile.load(p), clock=Clock())      # a second window answers row 1
+    other.label("R")
+    newer = p.read_bytes()
+    clk.t += 1.0
+    check("a window whose file changed underneath it refuses to answer",
+          app.on_key(Ev("l")) == "file-changed" and "NOT SAVED" in app.status.cget("text"))
+    check("a window whose file changed underneath it closes on Q without writing",
+          app.handle("quit") == "closed-unsaved" and not app.closed and p.read_bytes() == newer)
 
 guard.close()
 print(f"\n=== {PASS} passed, {FAIL} failed, {SKIP} skipped ===")
