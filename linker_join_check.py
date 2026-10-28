@@ -109,7 +109,8 @@ def cmd_sample(a) -> int:
             table, info, events, attrs = olympic_link.load_video(t, a.tracks)
             lk = linking.link_video(table, attrs)
         except (ValueError, OSError, RuntimeError) as e:
-            print(f"{vid}: did not link ({type(e).__name__})")
+            why = str(e) if isinstance(e, lm.Refused) else type(e).__name__     # a Refused names a check, never a path
+            print(f"{vid}: did not link ({why})")
             continue
         joins = jc.joins_of(lk, vid)
         per_video[vid] = {"joins": joins, "positions": jc.positions_of(lk, linking.credited_counts(attrs)),
@@ -303,9 +304,11 @@ def cmd_check(a) -> int:
         print("every join answered." if c["empty"] == 0 else "run the same command again to carry on.")
         return 0
     finally:
-        videos.close()
-        if lock:
-            lock.close()
+        try:
+            videos.close()
+        finally:
+            if lock:
+                lock.close()
 
 
 def cmd_verify(a) -> int:

@@ -1,0 +1,80 @@
+## feat/linker-join-check -- 2026-10-28: hand-checked linker joins (option A), the tool
+
+Gate: `docs/gates/linker-join-check.md`, committed `ec52160` BEFORE any code, sample or answer (bar agreed by Brendan
+2026-10-28: three-way verdict against p\*, n = 100; ADR-0018 in the vault). Stacked on PR #35 (`feat/label-moments`)
+to reuse its window.
+
+**Acceptance criteria**
+1. The sampler is seeded and reproducible (same frame + seed -> same 100 in the same order, whatever order the frame
+   arrives in); strata proportional by the median gap; the shown order shuffled.
+2. Resume works: every answer saved at once, a rerun starts at the first unanswered join, a different sample cannot
+   be resumed into, a stale window cannot overwrite newer answers.
+3. Out-of-range joins are refused: outside the video, gap over the linker's 2 s, fragments out of order, or not
+   matching the tracks file.
+4. Nothing reveals the linker's decision: no chain / boxer / cost in the sample file or a Join; the window shows
+   "join k of n" and the two fragments' boxes only, never a bystander's.
+5. The score is computed once, from a complete file, U excluded, three-way verdict against p\*.
+6. #35's behaviour is unchanged by the hook refactor (its own tests pass).
+
+**Threat sketch.** Assets: Olympic frames (research-use only) and the integrity of the answers. Entry points: the
+sample and answers files, `--data` / `--tracks` / `--dir`, ffmpeg. Trust boundary: files on disk, validated on load.
+Top threats: (1) Olympic-derived output leaving `results/`; (2) a tampered or swapped sample / answers file
+corrupting the measurement.
+
+**Design.** `src/boxingvi/joincheck.py` holds the frame, draw, files, clip and score; `linker_join_check.py` the
+CLI and `JoinApp`, a subclass of #35's `label_moments.App`. #35 gained hooks, not copies: `labelmoments.replace_file`
+(atomic save + stale-session refusal), `decode_frames` (the ffmpeg decode), `VideoGuard(path_check=...)`, and App
+hook methods (`key`, `decode`, `hold_view`, `play_view`, `status_text`, `answer_blocked`, ...). Frames are decoded in
+memory; no clip is written to disk.
+
+### Iteration 1
+- GATE test: `tests/test_linker_join_check.py` 130 passed, 0 failed (after 3 first-run failures: Wilson's lower bound
+  at x = 0 left 3e-18, now exact at the ends; two test expectations corrected). `tests/test_label_moments.py`
+  169 passed, 1 skipped (symlinks, account permission; skipped before this change too). Full suites not run: a seed
+  sweep holds the CPU (instruction).
+- GATE review, Astra (read-only, code only, medium; the one Astra review): **FIX FIRST**, 3 blocking + 3 should-fix.
+  Code-reviewer subagent: **SHIP**, no blocking, 4 should-fix + 6 nits; it confirmed clip boundaries, the gap bound
+  (matches `linking.candidate_links`), the draw, the score maths and #35's unchanged behaviour.
+  1. two windows could both pass the stale-file check and the second rename drop the first's answer -- Astra
+     blocking (inherited from #35) -> `SessionLock` (OS lock, released if the process dies), one window per file;
+  2. the stratum was recoverable: `strata` sat in the file the window loads, the gap length was captioned, and
+     `sample` printed the median -- Astra blocking, reviewer should-fix -> strata not stored (derived in `score`),
+     no gap length shown, no median printed;
+  3. `score` trusted the sample's p\* and positions: a p\* of 1 made 100 D answers "acceptable" -- Astra blocking,
+     also my security pass -> `parse_sample` enforces the gate's seed / n / target, recomputes p\*, cross-checks
+     totals and strata, types every number;
+  4. a clip decoded only to fragment 2's first frame was answerable -- Astra -> the whole clip or U only;
+  5. any ancestor named `results` was accepted; sampling did not check `--data` containment -- Astra, reviewer nit
+     -> `RESULTS_ROOTS` (this checkout's and the main checkout's results/), containment before any read;
+  6. boundary frames off the 2-frame grid played at half speed -- Astra -> per-frame durations (the test caught
+     one more: the last frame was held two frame-times);
+  7. ~400 MB peak per decode -- reviewer -> one buffer viewed, not copied (`decode_raw`);
+  8. a bad sample was written before validation and then blocked every rerun; link errors were tracebacks --
+     reviewer -> validate bytes first; per-video "did not link";
+  9. nits taken: clip plays once before the still (the gate's order), decode failure says "Space retries", item
+     noun, exit message. Kept: `lm._under` imported across modules (one canonical path rule).
+- GATE security (own pass, changed files): ffmpeg by argument array with `-protocol_whitelist file`; videos resolved
+  under `--data` and held open (VideoGuard); sample and result create-only (`xb`, fsync); answers parsed strictly and
+  pinned to the sample's sha256; `verify` shows no S / D / U split (no interim peeking); messages name checks, not
+  paths. Finding 3 above was mine too. Residual: `check_out_dir` trusts two fixed roots, not git's ignore rules.
+
+### Iteration 2 (`d7d16c6`)
+- GATE test: 149 passed (new negative tests: edited p\*, positions, seed, n, totals, strata, median, target, camera;
+  second window refused; truncated decode; foreign results/ folder; clip plays before the still; no gap length in
+  any caption; real-time durations). #35: 169 passed, 1 skipped.
+- GATE review, code-reviewer (re-review; the one Astra review was spent): **SHIP**, every round-1 fix correct,
+  `parse_sample` accepts every sample `build_sample` writes, #35 unchanged but for the caption. Should-fix: the lock
+  file's `open` outside its try (a traceback with a path); a `Refused` while sampling reported only by type. Nits:
+  median bound hard-coded; a float seed accepted; lock not released if `videos.close()` raised.
+- GATE security: the two should-fixes are error-path leaks (a path in a traceback; a reason lost); nothing else new.
+
+### Iteration 3
+- Fixed both should-fixes and those three nits; new negative tests (unopenable lock file -> refusal; float seed).
+- GATE test: 151 passed, 0 failed; #35 169 passed, 1 skipped.
+- Not tested: the per-video "did not link" line in `sample` (needs a full Olympic task layout; the gate's "all 23
+  or nothing" is tested through `build_sample`).
+
+**Residuals accepted.** A join within about 1 s of a video's end is U-only if its stored frame count overcounts
+what decodes (whole-clip rule; constant-rate GoPro footage, unlikely). The checker knows every pair is a linker join
+(no foils), which may lean answers towards "same" -- stated in the PR, not designed out (time). No real-footage run
+of the window yet: the first `check --dry` on the 23 videos is the real-data smoke test, before Brendan's session.

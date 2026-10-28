@@ -250,6 +250,7 @@ raises("a join naming an unknown video is refused",
 raises("a duplicated join is refused", tampered(lambda x: x["joins"].__setitem__(1, x["joins"][0])), contains="twice")
 raises("n other than the gate's 100 is refused", tampered(lambda x: x.update(n=99)), contains="seed and n")
 raises("a seed other than the gate's is refused", tampered(lambda x: x.update(seed=7)), contains="seed and n")
+raises("a float seed is refused", tampered(lambda x: x.update(seed=20261027.0)), contains="whole number")
 raises("a dropped join is refused", tampered(lambda x: x["joins"].pop()), contains="does not match")
 raises("an edited p* is refused (an inflated p* would make any answers 'acceptable')",
        tampered(lambda x: x["frame"].update(p_star=0.5)), contains="p*")
@@ -322,6 +323,9 @@ lock.close()
 lock2 = jc.SessionLock(ap_)
 check("once the first window lets go, a new one may open", lock2._f is not None)
 lock2.close()
+(d / "blocked.csv.lock").mkdir()
+raises("a lock file that cannot be opened is a refusal, not a traceback with a path",
+       lambda: jc.SessionLock(d / "blocked.csv"), contains="cannot be opened")
 check("... and the newer answer is still there", jc.AnswerFile.load(ap_, S).values[2] == "U")
 bclk = Clock()
 bs = jc.Session(jc.AnswerFile.load(ap_, S), clock=bclk)

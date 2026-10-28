@@ -273,7 +273,7 @@ def parse_sample(raw_bytes: bytes, manifest) -> Sample:
         raise Refused("the sample's frame summary has unexpected keys")
     if not isinstance(d["videos"], dict) or not isinstance(d["joins"], list):
         raise Refused("the sample file's sections have the wrong types")
-    if d["gate"] != GATE or d["seed"] != SEED or isinstance(d["seed"], bool) or _int(d["n"], "n") != N_SAMPLE:
+    if d["gate"] != GATE or _int(d["seed"], "seed") != SEED or _int(d["n"], "n") != N_SAMPLE:
         raise Refused("the sample was not drawn with the gate's seed and n")
     if len(d["joins"]) != N_SAMPLE:
         raise Refused("the sample's join count does not match n")
@@ -320,7 +320,7 @@ def parse_sample(raw_bytes: bytes, manifest) -> Sample:
     if total != sum(i["joins"] for i in d["videos"].values()) or total < N_SAMPLE \
             or _int(fr["short"], "short") + _int(fr["long"], "long") != total:
         raise Refused("the frame's join counts do not add up")
-    med = _num(fr["median_gap"], "median gap", 1.0, 240.0 * 2)
+    med = _num(fr["median_gap"], "median gap", 1.0, float(max_gap_frames(240.0)))
     n_short = sum(stratum(j, med) == "short" for j in joins)
     if (_int(fr["n_short"], "n_short"), _int(fr["n_long"], "n_long")) != (n_short, N_SAMPLE - n_short):
         raise Refused("the sample's strata do not match its median gap")
@@ -461,7 +461,11 @@ class SessionLock:
     def __init__(self, answers_path):
         p = Path(answers_path)
         self.path = p.with_name(p.name + ".lock")
-        self._f = open(self.path, "a+b")
+        try:
+            self._f = open(self.path, "a+b")
+        except OSError:
+            self._f = None
+            raise Refused("the answers file's lock cannot be opened") from None
         try:
             if os.name == "nt":
                 import msvcrt
