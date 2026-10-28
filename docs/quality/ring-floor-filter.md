@@ -95,4 +95,16 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   note: when every filtered arm fails, G3b was never computed (reported unmeasured) although attribution counts
   exist. Fixed: G3b's credited shares are computed before any early return, over every video whose baseline ran;
   tests for both cases (credits kept -> G3b measured and passing; credits lost -> 0% and failing). 204 checks.
-- A complete review of the final commit is still owed; it is not counted as passed.
+- A complete review of the final commit is still owed; it is not counted as passed.- Fresh clone at `e787657`: all 21 Python suites green (3,324 checks; `test_ring` 204). The machine scripts were not
+  touched by this branch and were not re-run.
+
+## Security gate (secure-software-assurance defaults), at `e787657`
+- Trust boundaries: the floor file and the stillness file (size cap, strict UTF-8 JSON, duplicate keys, NaN/Infinity
+  and 10**400 refused, exact key sets, a sweep of every field x 8 wrong-type values); video files through the
+  existing `probe` caps; tables through the existing strict `PoseTable.load`; labels through the strict CVAT loader.
+- Every subprocess is an argument list with a timeout (ffmpeg seeks and the PNG encoder); no shell strings.
+- Outputs: only under the gitignored data/ or results/ (or outside the repo); the guard checks the resolved path and
+  the name's folder; writes replace any link planted at the name. `git check-ignore` confirms every derived path
+  (backgrounds, stillness, floors, evaluation reports, self-check) is ignored; nothing derived is tracked.
+- Inputs bound to their video by content fingerprint before anything is left out; duplicate ids and recordings refused.
+- No secrets, no network, no pickles, no participant footage touched.
