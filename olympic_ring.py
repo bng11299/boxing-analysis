@@ -104,9 +104,11 @@ def load_stillness(path) -> dict:
             raise ValueError(f"{p.name}: bad entry {vid!r}")
         if not isinstance(e["video_fp"], str) or not ring.FINGERPRINT.fullmatch(e["video_fp"]):
             raise ValueError(f"{p.name}: {vid}: bad video_fp")
-        ring._whole(e["width"], f"{vid}: width", 1, ring.MAX_SIDE)
-        ring._whole(e["height"], f"{vid}: height", 1, ring.MAX_SIDE)
-        if e["samples"] != ring.STILL_SAMPLES or isinstance(e["samples"], bool):
+        w = ring._whole(e["width"], f"{vid}: width", 1, ring.MAX_SIDE)
+        h = ring._whole(e["height"], f"{vid}: height", 1, ring.MAX_SIDE)
+        if w * h > MAX_PIXELS:
+            raise ValueError(f"{p.name}: {vid}: {w}x{h} is larger than any video this project reads")
+        if ring._whole(e["samples"], f"{vid}: samples", 1, 1000) != ring.STILL_SAMPLES:
             raise ValueError(f"{p.name}: {vid}: measured on {e['samples']!r} samples, the rule needs {ring.STILL_SAMPLES}")
         motion, mx = ring._number(e["motion_px"], f"{vid}: motion_px"), ring._number(e["max_px"], f"{vid}: max_px")
         if not 0 <= motion <= mx:
@@ -380,8 +382,8 @@ def _share(num, den):
 def summarise_margin(rows: "list[dict]", m: float) -> dict:
     """Pooled numbers of one margin over the given per-video results. Videos whose BASELINE fails are left
     out of both arms and listed; a video that fails only when filtered is counted (gate G3c)."""
-    out = {"margin_px": m, "videos": len(rows)}
-    full = rows[0]["base"] is not None
+    out = {"margin_px": m, "videos": len(rows), "baseline_failed": [], "newly_failed": []}
+    full = bool(rows) and rows[0]["base"] is not None     # no rows: every bar is unmeasured (Astra, review 2)
     failed = lambda arm: "linked_error" in arm or "credited_path_error" in arm  # noqa: E731
     if full:
         base = [r["base"] for r in rows]
@@ -436,8 +438,11 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
     rb, rf = b["linked_unexplained_per_exposure_min"], f["linked_unexplained_per_exposure_min"]
     # No baseline rate, or a baseline of 0 unexplained: there is nothing to cut, so no ratio (G1 cannot pass).
     out["ratio"] = rf / rb if rb and rf is not None else None
-    out["ratio_ci95"] = list(bootstrap_ratio([_linked_ue(base[i]["linked"]) for i in ok],
-                                             [_linked_ue(filt[i]["linked"]) for i in ok]))
+    # An unbounded resample (a zero baseline rate) is written as null: strict JSON has no Infinity, and the
+    # report must still be written so the FAIL is on record (Astra, review 2).
+    out["ratio_ci95"] = [x if math.isfinite(x) else None
+                         for x in bootstrap_ratio([_linked_ue(base[i]["linked"]) for i in ok],
+                                                  [_linked_ue(filt[i]["linked"]) for i in ok])]
     return out
 
 
@@ -453,12 +458,12 @@ def verdict(s: dict) -> dict:
     measured = b is not None and f is not None
     g = {
         "G1_linked_unexplained": measured and s["ratio"] is not None and s["ratio"] <= G1_MAX_RATIO
-                                 and s["ratio_ci95"][1] < G1_MAX_UPPER,
-        "G2_nonboxer_removed": (s["noncredited_removed_share"] or 0.0) >= G2_MIN_REMOVED,
-        "G3a_boxers_kept": (s["credited_dropped_share"] or 0.0) <= G3A_MAX_DROPPED
+                                 and s["ratio_ci95"][1] is not None and s["ratio_ci95"][1] < G1_MAX_UPPER,
+        "G2_nonboxer_removed": s["noncredited_removed_share"] is not None and s["noncredited_removed_share"] >= G2_MIN_REMOVED,
+        "G3a_boxers_kept": s["credited_dropped_share"] is not None and s["credited_dropped_share"] <= G3A_MAX_DROPPED
                            and s["credited_dropped_share_worst_video"] <= G3A_MAX_DROPPED_VIDEO,
         "G3b_credited_share": measured and _ge(f["credited_share"], b["credited_share"], G3B_MAX_FALL),
-        "G3c_no_new_failures": not s.get("newly_failed", []),
+        "G3c_no_new_failures": s.get("videos", 0) > 0 and not s.get("newly_failed", []),   # no video: unmeasured
     }
     sec = {} if not measured else {
         "S1_link_coverage": _ge(f["link_coverage"], b["link_coverage"], S1_MAX_FALL),
@@ -513,10 +518,15 @@ def cmd_evaluate(a) -> int:
             raise ValueError(f"held-out needs all {29 - len(DEV_VIDEOS)} held-out tables, found {len(tasks)}")
     # Every input is bound to the video it describes BEFORE anything is left out: a stale stillness entry from
     # another recording must stop the run, not quietly drop a video (Astra, review 1).
+    stems = [t.video.stem for t in tasks]
+    if len(set(stems)) != len(stems):
+        raise ValueError(f"a video id appears in more than one task: {sorted({s for s in stems if stems.count(s) > 1})}")
+    fps = {t.video.stem: fingerprint(t.video) for t in tasks}
+    if len(set(fps.values())) != len(fps):
+        raise ValueError("two tasks hold the same recording (equal fingerprints): it would be pooled twice")
     no_still = [t.video.stem for t in tasks if t.video.stem not in still]
     if no_still:
         raise ValueError(f"no stillness entry for {no_still}: run prepare first")
-    fps = {t.video.stem: fingerprint(t.video) for t in tasks}
     stale = [v for v, fp in fps.items() if still[v]["video_fp"] != fp]
     if stale:
         raise ValueError(f"{stale}: the stillness entry was measured on a different recording: run prepare again")

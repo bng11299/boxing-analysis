@@ -272,6 +272,11 @@ check("frames, rate, size, source and FINGERPRINT are kept; the model string say
 ft.save(tmp / "ft.npz")
 check("the filtered table saves and loads through the strict loader", len(PoseTable.load(tmp / "ft.npz").frame) == len(ft.frame))
 check("dropping nothing changes nothing", np.array_equal(ring.without_ids(tf, frozenset()).frame, tf.frame))
+long_model = PoseTable(tf.frame, tf.track_id, tf.box, tf.xy, tf.conf, tf.n_frames, tf.fps, tf.width, tf.height,
+                       source=tf.source, model="m" * 4090, video_fp=FP)
+raises("ASTRA 2.6: a note that would push the model string past the loader's 4096-character cap is refused before writing",
+       lambda: ring.without_ids(long_model, {2}, "+ringfloor margin=0px"), "4096")
+check("... while the same table without a note still filters", len(ring.without_ids(long_model, {2}).frame) == len(tf.frame) - 4)
 
 # ======================================================================== camera stillness
 print("camera stillness: phase correlation on pixels, no labels")
@@ -377,6 +382,12 @@ for name, over in [("ASTRA 1.2: 1 sample (the rule measures 24)", {"samples": 1}
 SPATHS = [("format",), ("videos",), ("videos", "GH1")] + [("videos", "GH1", k) for k in sorted(olympic_ring.STILL_KEYS)]
 sweep("stillness file", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE}}, SPATHS, olympic_ring.load_stillness,
       legal={("videos.GH1.motion_px", "1.5"), ("videos.GH1.max_px", "1.5")})
+raises("ASTRA 2.5: a stillness entry for a 16384x16384 frame (no video this project reads)",
+       lambda: olympic_ring.load_stillness(write_doc("sbig.json", {"format": olympic_ring.STILLNESS_FORMAT,
+                                                                   "videos": {"GH1": SE | {"width": 16384, "height": 16384}}})), "larger than")
+raises("ASTRA 2.5: samples written as 24.0 (prepare writes a whole number)",
+       lambda: olympic_ring.load_stillness(write_doc("s24.json", raw=json.dumps({"format": olympic_ring.STILLNESS_FORMAT, "videos": {"GH1": SE}})
+                                                     .replace('"samples": 24', '"samples": 24.0').encode())), "whole number")
 raises("a stillness file with an extra top-level key",
        lambda: olympic_ring.load_stillness(write_doc("sx.json", {"format": olympic_ring.STILLNESS_FORMAT, "videos": {}, "x": 1})))
 raises("a stillness file with NaN",
@@ -412,7 +423,7 @@ check("a filtered arm with no exposure gives an infinite (failing) bound, not a 
 print("olympic_ring.py: the verdict needs every gate bar; secondary bars never change it")
 ARM = {"linked_unexplained_per_exposure_min": 40.0, "credited_path_unexplained_per_exposure_min": 45.0,
        "credited_share": 0.53, "link_coverage": 0.65, "ab_noncredited_share": 0.3, "median_both_identified": 0.57}
-PASS_S = {"ratio": 0.8, "ratio_ci95": (0.7, 0.95), "noncredited_removed_share": 0.3, "credited_dropped_share": 0.005,
+PASS_S = {"videos": 23, "ratio": 0.8, "ratio_ci95": (0.7, 0.95), "noncredited_removed_share": 0.3, "credited_dropped_share": 0.005,
           "credited_dropped_share_worst_video": 0.02, "newly_failed": [], "baseline": dict(ARM),
           "filtered": ARM | {"linked_unexplained_per_exposure_min": 32.0, "ab_noncredited_share": 0.2}}
 check("all bars met: PASS", olympic_ring.verdict(PASS_S)["pass"] is True)
@@ -676,6 +687,21 @@ for arm_ in (zero["base"], zero["margins"][0.0]["arm"]):
 sz = olympic_ring.summarise_margin([zero], 0.0)
 check("ASTRA 1.6: a baseline with 0 unexplained bursts gives no ratio and a failing G1, not a ZeroDivisionError",
       sz["ratio"] is None and olympic_ring.verdict(sz)["gate"]["G1_linked_unexplained"] is False, str(sz.get("ratio")))
+try:
+    json.dumps(sz, allow_nan=False)
+    ok_json = sz["ratio_ci95"][1] is None
+except ValueError as e:
+    ok_json = False
+check("ASTRA 2.1: an unbounded bootstrap (zero baseline) is written as null, so the FAIL report serialises", ok_json,
+      str(sz.get("ratio_ci95")))
+s_empty = olympic_ring.summarise_margin([], 0.0)
+v_empty = olympic_ring.verdict(s_empty)
+check("ASTRA 2.2: no video to compare is a FAIL on every gate bar, not an IndexError",
+      v_empty["pass"] is False and not any(v_empty["gate"].values()) and s_empty["credited_dropped_share"] is None, str(v_empty))
+all_base_fail = copy.deepcopy(broken)
+all_base_fail["video"] = "GH078416"
+check("ASTRA 2.3: with every baseline failed, G3a (nothing measured) FAILS instead of passing on 'None or 0'",
+      olympic_ring.verdict(olympic_ring.summarise_margin([all_base_fail], 0.0))["gate"]["G3a_boxers_kept"] is False)
 check("the local report carries per-video counts, with the linked (unexplained, minutes) of both arms when both ran",
       set(sm["per_video"]) == {"GH078416", "GH128416"} and "linked_ue_filtered" in sm["per_video"]["GH078416"]
       and "linked_ue_baseline" not in sm["per_video"]["GH128416"])
@@ -726,6 +752,33 @@ rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--flo
                      "--rule", str(rule_f)])
 check("ASTRA 1.3: a stale stillness entry (another recording) stops the run BEFORE it can quietly leave a video out",
       rc == 1 and "GH069681" in err and "different recording" in err, err)
+moving_prep = tmp / "prep_moving"
+moving_prep.mkdir()
+mv_doc = json.loads((prep / "stillness.json").read_text(encoding="utf-8"))
+for v_ in mv_doc["videos"].values():
+    v_["motion_px"] = v_["max_px"] = 100.0
+(moving_prep / "stillness.json").write_text(json.dumps(mv_doc), encoding="utf-8")
+mv_out = tmp / "res" / "moving.json"
+rc, err = run_quiet(ev_args[:8] + [str(moving_prep), "--rule", str(rule_f), "--split", "dev", "--out", str(mv_out)])
+mv = json.loads(mv_out.read_text(encoding="utf-8")) if mv_out.is_file() else {}
+check("ASTRA 2.2: every video left out still writes a report (no video compared, no margin chosen), not an IndexError",
+      rc == 0 and mv.get("videos") == [] and mv.get("left_out_camera_moves") == ["GH069681", "GH078416"]
+      and mv.get("selected_margin_px") is None, err)
+import shutil  # noqa: E402
+
+for label, second_task, second_name in (("the same video id in two tasks", "task_kam4_gh078416", "GH078416"),
+                                        ("the same recording under two ids", "task_kam2_gh128416", "GH128416")):
+    dsd, trd = tmp / f"ds_dup_{second_name}", tmp / f"trk_dup_{second_name}"
+    shutil.copytree(ds / "task_kam2_gh078416", dsd / "task_kam2_gh078416")
+    (dsd / second_task / "data").mkdir(parents=True)
+    shutil.copy(ds / "task_kam2_gh078416" / "data" / "GH078416.mp4", dsd / second_task / "data" / f"{second_name}.mp4")
+    shutil.copy(ds / "task_kam2_gh078416" / "annotations.json", dsd / second_task / "annotations.json")
+    trd.mkdir()
+    for nm in {"GH078416", second_name}:
+        shutil.copy(trk / "GH078416.tracks.npz", trd / f"{nm}.tracks.npz")
+    rc, err = run_quiet(["evaluate", "--data", str(dsd), "--tracks", str(trd), "--floors", str(floors_p), "--prep-dir", str(prep),
+                         "--rule", str(rule_f)])
+    check(f"ASTRA 2.4: {label} is refused (it would be pooled twice), with a reason", rc == 1 and err.strip() != "", err)
 rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--floors", str(tmp / "bin.json"), "--prep-dir", str(prep), "--rule", str(rule_f)])
 check("a malformed floor file stops the run with a reason, not a traceback", rc == 1 and "UTF-8 JSON" in err, err)
 

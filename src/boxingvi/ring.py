@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from boxingvi.boxers import replace_bytes
-from boxingvi.pose_yolo import PoseTable
+from boxingvi.pose_yolo import MAX_POSE_TEXT, PoseTable
 from boxingvi.video import MAX_PIXELS, PROBE_TIMEOUT_S, VideoInfo, _tool, probe
 
 FORMAT = "boxing-comps ring floor v1"
@@ -267,10 +267,13 @@ def ids_outside(table: PoseTable, floor: Floor, margin_px: float,
 def without_ids(table: PoseTable, drop, note: str = "") -> PoseTable:
     """A copy of the table without the given ids; everything else, the fingerprint included, unchanged.
     `note` is appended to `model` so a written table says it was filtered."""
+    model = table.model + (f" {note}" if note else "")
+    if len(model) > MAX_POSE_TEXT:      # the strict loader would refuse the written table (Astra, review 2)
+        raise ValueError(f"model string would exceed {MAX_POSE_TEXT} characters with the filter's note")
     keep = ~np.isin(table.track_id, np.fromiter(drop, np.int64, len(drop)))
     return PoseTable(table.frame[keep], table.track_id[keep], table.box[keep], table.xy[keep], table.conf[keep],
                      table.n_frames, table.fps, table.width, table.height, source=table.source,
-                     model=table.model + (f" {note}" if note else ""), video_fp=table.video_fp)
+                     model=model, video_fp=table.video_fp)
 
 
 # ---------------------------------------------------------------- camera stillness (pixels, never labels)

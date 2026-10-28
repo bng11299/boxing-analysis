@@ -45,3 +45,20 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   | 7 | JSON integer 10**400 -> `OverflowError`, not `ValueError` | SHOULD-FIX | caught in `_number`; floor and stillness tests |
 
   175 checks pass after the fixes.
+- Added in iteration 1 on LESSONS 2026-10-25: a sweep of every floor field (11) and stillness field (9) x 8
+  wrong-type values; all 160 combinations behave (`cde3291`, 177 checks). Full suite: 21 of 21 Python suites green.
+
+## Iteration 2
+- **Astra review 2** (on `ea42d7b`): **FIX FIRST**, 6 findings, all on failure paths; Astra confirmed fixes
+  1, 3, 4, 5 and 7 of review 1 correct. Source-derived again (Python blocked in its sandbox).
+
+  | # | Finding | Resolution |
+  |---|---|---|
+  | 1 | Zero baseline -> infinite bootstrap bound -> strict JSON write fails, no report | unbounded bound written as null; G1 fails on null; test serialises it |
+  | 2 | Every video left out -> `rows[0]` IndexError | empty summary; every gate bar FAILS (G3c too: unmeasured); dev and CLI tests |
+  | 3 | Every baseline failed -> G3a passes on `None or 0.0` | G2 and G3a need a measured share; test |
+  | 4 | Two tasks with one video id, or one recording under two ids, pass the "all 25" count and pool twice | distinct ids and distinct fingerprints required before anything else; two CLI tests |
+  | 5 | Stillness accepts 16384x16384 and `samples: 24.0` | `MAX_PIXELS` check; samples must be the integer 24; tests |
+  | 6 | `+ringfloor` note can push `model` past the loader's 4096-character cap: written tables refused by the CLIs | `without_ids` refuses before writing; test |
+
+  187 checks pass after the fixes.
