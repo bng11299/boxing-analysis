@@ -302,7 +302,8 @@ def main(argv=None) -> int:
         "the per-clip cut (Y_clip) was CHOSEN looking at these videos' numbers and at V6's second half "
         "(ADR-0014, 2026-10-13): this is no longer a clean test of it",
         "held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
-        "the video-disjoint split may not be athlete-disjoint (O55)",
+        "V5 and V9 are each a person seen in no other video (O55): athlete-disjoint; gate 1 re-scores the "
+        "checkpoint on V2/V5/V9, and V2 is NOT (its instructor trains in V3)",
         "YOLO keeps one person per frame; other-person clips are counted, and scored in all_seen"]
     for line in summary_lines(report):
         print(line)

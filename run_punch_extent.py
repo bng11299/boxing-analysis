@@ -27,7 +27,7 @@ What V6's first half WAS used for, so the second half is the clean number: the
 width level (0.5, from 0.5 / 0.6 / 0.7) and the choice of this rule over a
 threshold walk were made looking at the first half only.
 
-Limits: V6 is one athlete, hooks and uppercuts only, AlphaPose at 24 fps, and its
+Limits: V6 is one athlete -- the same person as training video V1 (O55) -- hooks and uppercuts only, AlphaPose at 24 fps, and its
 labelled spans run nearly twice as long as the training clips of the same types
 (0.67 s against 0.3-0.4 s), so an extent built from the training clips is
 expected to come up short of them. The extent of a jab or a cross is checked on
@@ -171,7 +171,8 @@ def main(argv=None) -> int:
     out["first_half_was_used_for"] = "choosing the width level (0.5 of 0.5/0.6/0.7) and this rule over a threshold walk"
     out["limits"] = ["the per-clip cut was chosen looking at V6's second half and at V5/V9 (ADR-0014, 2026-10-13): "
                      "this gate is no longer an independent test of it",
-                     "V6: one athlete, hooks and uppercuts only, AlphaPose at 24 fps",
+                     "V6: one athlete, the same person as training video V1 (O55: not athlete-disjoint), hooks and "
+                     "uppercuts only, AlphaPose at 24 fps",
                      "V6's labelled spans run nearly twice as long as training clips of the same types",
                      "the extent of a jab or cross has not been checked against a label here"]
 

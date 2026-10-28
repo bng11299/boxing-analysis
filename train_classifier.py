@@ -57,6 +57,11 @@ def reference_metrics(path: Path, seed: int, t_out: int) -> dict:
     d = json.loads(path.read_text(encoding="utf-8"))
     if d.get("seed") != seed or d.get("balanced") or d.get("include_v6"):
         raise ValueError(f"{path} is not a seed-{seed}, unbalanced, V6-excluded run")
+    # The checkpoint's split, said outright: a run on the athlete-disjoint split
+    # must be refused for what it is, not because its numbers happen to differ.
+    if d.get("val_videos") != sorted(PIPELINE_HELD_OUT_VIDEOS):
+        raise ValueError(f"{path} held out {d.get('val_videos')!r}, not the checkpoint's "
+                         f"{sorted(PIPELINE_HELD_OUT_VIDEOS)} (O55: the headline split is not this one)")
     epochs = d.get("stgcnpp_epochs")
     if isinstance(epochs, bool) or not isinstance(epochs, int) or not 1 <= epochs <= 1000:
         raise ValueError(f"{path} does not record its ST-GCN++ epochs (stgcnpp_epochs={epochs!r}); "

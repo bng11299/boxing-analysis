@@ -237,8 +237,28 @@ try:
     data.person_of("V11")
 except ValueError as e:
     check("... and says the id is unknown rather than guessing", "unknown video id" in str(e))
-raises("an unknown held-out id is refused before splitting",
-       lambda: data.split_by_video(corpus + [_clip("V11")], held_out=("V2", "V3", "V11")))
+else:
+    check("... and says the id is unknown rather than guessing", False, "no exception raised")
+# V11 is held out but absent from the corpus: only the held-out pre-check can catch it.
+try:
+    data.split_by_video(corpus, held_out=("V2", "V3", "V11"))
+except ValueError as e:
+    check("an unknown held-out id is refused before splitting", "unknown video id 'V11'" in str(e), str(e))
+else:
+    check("an unknown held-out id is refused before splitting", False, "no exception raised")
+try:
+    data.split_by_video(corpus, held_out="V2")
+except ValueError as e:
+    check("a bare string hold-out is refused as a string, not read letter by letter",
+          "not the string 'V2'" in str(e), str(e))
+else:
+    check("a bare string hold-out is refused as a string, not read letter by letter", False, "no exception")
+def _reassign_v3():
+    data.PERSON_OF_VIDEO["V3"] = "V3"   # would make V2 and V3 separate people
+
+
+raises("the person map cannot be changed at run time", _reassign_v3, TypeError)
+check("... and V3 is still V2's person", data.person_of("V3") == "V2+V3")
 raises("an unknown video in the corpus is refused even when it is not held out",
        lambda: data.split_by_video(corpus + [_clip("V11")]))
 raises("a clip with no video id is refused, not treated as its own person",
@@ -252,6 +272,8 @@ except ValueError as e:
     check("... and the refusal names the person and both sides",
           "V2+V3" in str(e) and "V3 in training" in str(e) and "V2 held out" in str(e)
           and "O55" in str(e), str(e))
+else:
+    check("... and the refusal names the person and both sides", False, "no exception raised")
 _with_v6 = corpus + [_clip("V6"), _clip("V6")]
 raises("holding out V6 while V1 trains is refused",
        lambda: data.split_by_video(_with_v6, held_out=("V6",)))

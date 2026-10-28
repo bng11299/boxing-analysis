@@ -1028,6 +1028,7 @@ good_run = {"model": "st-gcn++ pretrained", "accuracy": 0.8, "macro_f1": 0.7, "t
 def reference(**top):
     p = tmp / "ref.json"
     p.write_text(json.dumps({"seed": 0, "balanced": False, "include_v6": False, "epochs": 30,
+                             "val_videos": ["V2", "V5", "V9"],   # as the real 09-22 reference records
                              "results": [good_run], **top}), encoding="utf-8")
     return p
 
@@ -1039,6 +1040,11 @@ raises("a reference without stgcnpp_epochs is refused (the 09-16 file: 30 for th
 raises("another seed is refused", lambda: train_classifier.reference_metrics(reference(stgcnpp_epochs=20, seed=1), 0, 50))
 raises("another pretrained checkpoint is refused", lambda: train_classifier.reference_metrics(
     reference(stgcnpp_epochs=20, results=[{**good_run, "pretrained_from": {"sha256": "0" * 64}}]), 0, 50))
+raises("a reference from the athlete-disjoint split is refused for its split (O55)",
+       lambda: train_classifier.reference_metrics(
+           reference(stgcnpp_epochs=20, val_videos=["V2", "V3", "V5", "V9"]), 0, 50))
+raises("a reference that does not say what it held out is refused",
+       lambda: train_classifier.reference_metrics(reference(stgcnpp_epochs=20, val_videos=None), 0, 50))
 
 print("run_baseline saves the model it scored")
 from run_baseline import run_stgcnpp  # noqa: E402

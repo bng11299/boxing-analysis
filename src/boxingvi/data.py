@@ -32,6 +32,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from types import MappingProxyType
 from pathlib import Path
 
 import numpy as np
@@ -128,7 +129,8 @@ def split_by_subject(clips: list[Clip]) -> tuple[list[Clip], list[Clip]]:
                 "these clips carry no subject id, so the official "
                 "S1-S15 / S16-S20 split cannot be applied -- the release does "
                 "not ship subject identifiers (ISSUES-LOG O10). Use "
-                "split_by_video() and report the split as video-disjoint."
+                "split_by_video() and report the split as athlete-disjoint by video "
+                "(PERSON_OF_VIDEO, O55), not subject-disjoint."
             )
         raise ValueError(f"unrecognised subject ids: {unknown}")
     train = [c for c in clips if c.subject in set(TRAIN_SUBJECTS)]
@@ -278,11 +280,11 @@ VIDEOS = tuple(f"V{i}" for i in range(1, 11))
 # id is the videos they appear in, so every results file says which videos
 # were grouped without a lookup. This map is the ONLY place that knowledge
 # lives; every split that claims to be athlete-disjoint goes through it.
-PERSON_OF_VIDEO = {
+PERSON_OF_VIDEO = MappingProxyType({
     "V1": "V1+V6", "V6": "V1+V6",
     "V2": "V2+V3", "V3": "V2+V3",
     "V4": "V4", "V5": "V5", "V7": "V7", "V8": "V8", "V9": "V9", "V10": "V10",
-}
+})   # read-only: edit the source, never the map at run time
 if set(PERSON_OF_VIDEO) != set(VIDEOS):   # a new video must be watched before it is split
     raise RuntimeError("PERSON_OF_VIDEO does not cover exactly the corpus videos")
 
@@ -630,6 +632,8 @@ def split_by_video(clips, held_out: tuple = HELD_OUT_VIDEOS):
     video id the person map does not know. Strictly better than a clip-level
     split, which leaks by construction.
     """
+    if isinstance(held_out, str):   # "V2" would iterate as "V", "2"
+        raise ValueError(f"held_out must be a tuple of video ids, not the string {held_out!r}")
     for v in held_out:
         person_of(v)
     train, val = _split_videos(clips, held_out)
@@ -679,7 +683,7 @@ def group_folds(clips, k: int = 3, key=lambda c: c.source) -> list[tuple[str, ..
 
     Why this exists: the single held-out split (HELD_OUT_VIDEOS) is also the
     set every design decision was checked against, so it is a validation set
-    doubling as the test set. Cross-validating over every video puts each clip
+    doubling as the test set. Cross-validating over every group puts each clip
     in a test fold exactly once, and most of those clips were never looked at.
     """
     sizes: dict[str, int] = {}
