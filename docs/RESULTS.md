@@ -66,6 +66,8 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 9b | Punches the linker identity leaves unassigned (on credited fragments in neither chain) | 3,772 of 11,756 found (32.1%) | C16 | same | new | `feat/per-boxer-report` | **new** (note 9) |
 | 9c | Labels with no owner among boxers A and B | 3,020 of 4,605 (65.6%): 2,182 credited to nobody, 838 to a fragment in neither chain; owned 1,585 of 2,423 credited (65.4%, = row 7b) | C16 | same | new | `feat/per-boxer-report` | **new** (note 9) |
 | 9d | Punches found per labelled punch: per boxer against its owned labels (conditional on the linker's identity); whole video; credited fragments | per boxer 5.04 (left 4.34, right 6.23; per boxer-video relative error median +4.32, IQR +3.31 to +5.53, 58 boxer-videos); whole video 2.55; credited fragments 4.16 | C16 | same | new | `feat/per-boxer-report` | **new: NOT a count error** (note 9) |
+| 10a | Ring-floor feet filter, DEVELOPMENT videos only (4): credited punches whose credited person is dropped; non-boxer person-frames removed, margins −30 to +60 px (selection bar: at most 0.5% dropped) | best, +60 px: 2.0% (8 of 392; worst video 3.4%) and 28.2%; at 0 px 4.6% and 75.4%. **No margin qualifies: stopped before any held-out run** | C17 | `results/olympic_ring/dev_grid.json` | new, 2026-10-27 | `feat/ring-mask` | **new: stopped** (note 10) |
+| 10b | Same, +60 px: linked unexplained per exposure-minute baseline → filtered (ratio, 95% video bootstrap); link coverage; A/B person-frames on uncredited ids | 36.837 → 35.494 (0.96 [0.92, 1.13]); 69.1% → 62.4%; 24.3% → 26.5% | C17 | same | new, 2026-10-27 | `feat/ring-mask` | **new: design numbers, not evidence** (note 10) |
 
 **Suites:** all 18 green in a fresh `git clone` of main at `664a511` (no data present): analyse_clip
 113, blur 177, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99,
@@ -125,6 +127,20 @@ report 289, tracks 79, machine scripts 38.
    `results/punch_finder_v6.json` (the rule rows 7c/7d were made with: both reproduce exactly), not
    `results/repro/`; the identity files went to the gitignored `results/olympic_boxers/`.
 
+10. **Rows 10a–10b (ring-floor filter, 2026-10-27) are a stop on the development videos, not a held-out
+   result.** The gate (`docs/gates/ring-floor-filter.md`, committed before any floor or number) drops whole
+   track ids whose box bottom ("feet") lies outside a hand-clicked ring floor in most of their rows, and
+   chooses the margin on ADR-0013's four development videos: the largest removal among margins that drop at
+   most 0.5% of credited punches, else stop. None qualified (2.0% at the best), so `FROZEN_MARGIN_PX` was
+   never set and the held-out run refuses to start; nothing was tuned further. The lost credits are four
+   tracks whose box bottoms sit 70–150 px beyond the FAR edge of the floor (a boxer at the far ropes with
+   hidden feet, or a punch credited to a spectator behind; the labels cannot say which): the same depth
+   ambiguity that ruled out a pixel mask. The linked burst rate barely moves even when 50–80% of non-boxer
+   rows go (+0 to +30 px), and linking coverage falls. The evaluator's dev baseline equals
+   `olympic_completeness.py` on both paths (linked 36.837, credited 45.465 per exposure-minute). Floors:
+   27 videos clicked in 329 s; GH188416 and GH208416 left out (the camera moves). Floors and reports stay
+   in the gitignored `data/` and `results/`.
+
 ## Commands
 
 From the repo root, PowerShell, with the venv's `python`.
@@ -170,6 +186,10 @@ python olympic_completeness.py ...same, with --skips-measure in place of --skips
 python olympic_completeness.py ...same, --skips... --skipcheck results/repro/olympic_completeness_credited_min2_sample.csv --skipcheck-out results/repro/olympic_completeness_credited_min2_sample_skipcheck.csv
 # C16 per-boxer path on Olympic Boxing, linker identity (rows 9a-9d)
 python olympic_boxers.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --out results/repro/olympic_boxers.json --identity-dir results/repro/olympic_boxers
+# C17 ring-floor filter, development videos (rows 10a-10b): backgrounds + stillness, Brendan's clicks, the margin grid
+python olympic_ring.py prepare --data data/olympic
+python olympic_ring.py click --floors data/olympic_ring/floors.json
+python olympic_ring.py evaluate --split dev --data data/olympic --tracks T --floors data/olympic_ring/floors.json --rule results/repro/punch_finder_v6.json --out results/olympic_ring/dev_grid.json
 # C15 face blur, own footage only (row 8; not run here, note 6); CLIP = IMG_4406, IMG_4395
 python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
 ```
