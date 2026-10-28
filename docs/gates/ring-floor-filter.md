@@ -142,3 +142,13 @@ Three clarifications; no bar, threshold, metric or split changes.
 3. **A bar that cannot be measured fails.** No compared video, a baseline with zero unexplained bursts (no
    ratio), or a filtered arm that fails everywhere gives FAIL for the bars it touches, never a pass by default
    and never a crash.
+
+## Amendment 2026-10-28, after Astra review 3 (before any floor, margin or held-out number)
+Two clarifications of what "same code" and "chosen on the development videos" mean; no bar, threshold or metric
+changes.
+1. **The punch rule is pinned.** "The default rule" above is the tuned V6 rule rows 7c/7d were made with
+   (`results/punch_finder_v6.json`, `chosen`: relative, threshold 3.6238817996457016, min gap 0.4 s), now
+   `REGISTERED_RULE` in `olympic_ring.py`. The held-out run refuses any other rule, and every report records the
+   rule it used. The margin choice reads no burst, so it does not depend on the rule.
+2. **The margin is chosen over all four development videos.** A development run missing any of them is refused;
+   the stillness rule may still leave one out (then it is listed), but a missing table is never a smaller dev set.

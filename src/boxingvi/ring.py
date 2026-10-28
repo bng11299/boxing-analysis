@@ -40,6 +40,7 @@ MAX_FILE_BYTES = 1 << 20          # a 29-video file is about 10 KB
 MAX_VIDEOS = 64
 MIN_POINTS, MAX_POINTS = 3, 32
 MIN_AREA_SHARE = 0.01             # a floor under 1% of the frame is a slip of the mouse, not a ring
+MIN_EDGE_PX = 1.0                 # two clicks closer than a pixel are one point
 MAX_SIDE = 16384
 MAX_CLICK_S = 24 * 3600
 MIN_INSIDE_SHARE = 0.5            # an id is kept when at least half its rows stand inside
@@ -139,8 +140,9 @@ def check_floor(video: str, points, width, height, video_fp, click_s=None) -> Fl
         pts.append((x, y))
     k = len(pts)
     for i in range(k):
-        if pts[i] == pts[(i + 1) % k]:
-            raise ValueError(f"{video}: points {i} and {(i + 1) % k} are the same point")
+        (x0, y0), (x1, y1) = pts[i], pts[(i + 1) % k]
+        if math.hypot(x1 - x0, y1 - y0) < MIN_EDGE_PX:     # a sub-pixel edge underflows the distance (Astra, review 3)
+            raise ValueError(f"{video}: points {i} and {(i + 1) % k} are the same point (closer than {MIN_EDGE_PX:g} px)")
     for i in range(k):
         for j in range(i + 1, k):
             if j == i + 1 or (i == 0 and j == k - 1):
@@ -225,7 +227,10 @@ def signed_distance(xy: np.ndarray, poly: np.ndarray) -> np.ndarray:
     px, py = xy[:, :1], xy[:, 1:]
     ax, ay, bx, by = a[:, 0], a[:, 1], b[:, 0], b[:, 1]
     dx, dy = bx - ax, by - ay
-    t = np.clip(((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy), 0.0, 1.0)
+    len2 = dx * dx + dy * dy
+    with np.errstate(divide="ignore", invalid="ignore"):   # a zero-length edge projects onto its one point
+        t = np.where(len2 > 0, ((px - ax) * dx + (py - ay) * dy) / np.where(len2 > 0, len2, 1.0), 0.0)
+    t = np.clip(t, 0.0, 1.0)
     dist = np.hypot(px - (ax + t * dx), py - (ay + t * dy)).min(axis=1)
     crosses = ((ay > py) != (by > py)) & (px < ax + (py - ay) * dx / np.where(dy == 0, np.inf, dy))
     inside = crosses.sum(axis=1) % 2 == 1

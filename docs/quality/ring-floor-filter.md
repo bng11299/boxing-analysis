@@ -62,3 +62,18 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   | 6 | `+ringfloor` note can push `model` past the loader's 4096-character cap: written tables refused by the CLIs | `without_ids` refuses before writing; test |
 
   187 checks pass after the fixes.
+
+## Iteration 3
+- **Astra review 3** (on `c092a51`): **FIX FIRST**, 4 blocking + 3 should-fix; source-derived again.
+
+  | # | Finding | Resolution |
+  |---|---|---|
+  | 1 | A dev run missing dev tables still chooses a margin, from a subset | dev needs all four tables (amendment 2026-10-28); test |
+  | 2 | Held-out accepts any `--rule`: G1 and S3 could measure another experiment | `REGISTERED_RULE` pinned to the V6 rule; held-out refuses others; reports record the rule; tests |
+  | 3 | A 1e-200 px edge passes validation and makes distances NaN | edges under 1 px refused; zero-length edges handled in `signed_distance`; tests |
+  | 4 | G3c passes when every baseline failed (nothing compared) | G3c needs at least one compared video; test |
+  | 5 | A `None` rate crashes the dev printout | formatted through `_fmt`; covered by the zero-rate tests |
+  | 6 | A link planted at `docs/x.json` pointing outside passes the folder guard | the guard resolves the folder, not the name (the writer replaces links); test (symlinks need privilege here, so it checks the name path) |
+  | 7 | The duplicate-recording test could pass without its guard | duplicate checks run first over the whole dataset; tests assert each reason; synthetic dev set is now four distinct recordings |
+
+  193 checks pass after the fixes.

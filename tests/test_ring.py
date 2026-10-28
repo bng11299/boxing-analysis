@@ -222,6 +222,12 @@ sdd = ring.signed_distance([[2, 5], [-1, 5], [5, 5]], dia)
 check("a horizontal ray through two vertices (the even-odd edge case) still classifies correctly",
       sdd[0] > 0 and sdd[1] < 0 and sdd[2] > 0, str(sdd))
 check("no points in, no distances out", ring.signed_distance(np.zeros((0, 2)), sq).shape == (0,))
+raises("ASTRA 3.3: two clicks a sub-pixel apart (1e-200 px) are one point, refused",
+       lambda: ring.check_floor("GH1", [[0, 0], [1e-200, 0], [100, 0], [100, 100], [0, 100]], 100, 100, FP), "same point")
+zl = np.array([[0, 0], [0, 0], [10, 0], [10, 10], [0, 10]], float)
+sdz = ring.signed_distance([[0, 5], [5, 5]], zl)
+check("ASTRA 3.3: even a zero-length edge (bypassing the check) gives finite distances, 0 on the outline",
+      np.isfinite(sdz).all() and sdz[0] == 0 and sdz[1] == 5, str(sdz))
 
 
 def tbl(rows, w=100, h=100, fp=""):
@@ -353,6 +359,28 @@ for okp in (ROOT / "results" / "x.json", ROOT / "data" / "olympic_ring" / "floor
         check(f"allowed: {okp.relative_to(ROOT) if ROOT in okp.parents else 'outside the repo'}", True)
     except ValueError as e:
         check(f"allowed: {okp}", False, str(e))
+import os  # noqa: E402
+
+link_dir = ROOT / "docs" / ".ring-test-link"          # removed below, whatever happens
+link_name = link_dir / "leak.json"
+try:
+    link_dir.mkdir(exist_ok=True)
+    try:
+        os.symlink(tmp / "outside.json", link_name)
+        made = True
+    except OSError:                                    # Windows without developer mode cannot make links
+        made = False
+    if made:
+        raises("ASTRA 3.6: a link planted at docs/...json pointing outside the repo is still refused (the name is checked)",
+               lambda: olympic_ring._inside_repo_ok(link_name), "never elsewhere")
+    else:
+        raises("ASTRA 3.6 (no symlink privilege here): the guard checks the name's folder, not a resolved target",
+               lambda: olympic_ring._inside_repo_ok(link_name), "never elsewhere")
+finally:
+    if link_name.is_symlink() or link_name.exists():
+        link_name.unlink()
+    if link_dir.exists():
+        link_dir.rmdir()
 raises("write_png refuses a float image", lambda: olympic_ring.write_png(tmp / "x.png", np.zeros((4, 4, 3))), "uint8 RGB")
 raises("write_png refuses a grey image", lambda: olympic_ring.write_png(tmp / "x.png", np.zeros((4, 4), np.uint8)), "uint8 RGB")
 
@@ -423,7 +451,7 @@ check("a filtered arm with no exposure gives an infinite (failing) bound, not a 
 print("olympic_ring.py: the verdict needs every gate bar; secondary bars never change it")
 ARM = {"linked_unexplained_per_exposure_min": 40.0, "credited_path_unexplained_per_exposure_min": 45.0,
        "credited_share": 0.53, "link_coverage": 0.65, "ab_noncredited_share": 0.3, "median_both_identified": 0.57}
-PASS_S = {"videos": 23, "ratio": 0.8, "ratio_ci95": (0.7, 0.95), "noncredited_removed_share": 0.3, "credited_dropped_share": 0.005,
+PASS_S = {"videos": 23, "videos_compared": 23, "ratio": 0.8, "ratio_ci95": (0.7, 0.95), "noncredited_removed_share": 0.3, "credited_dropped_share": 0.005,
           "credited_dropped_share_worst_video": 0.02, "newly_failed": [], "baseline": dict(ARM),
           "filtered": ARM | {"linked_unexplained_per_exposure_min": 32.0, "ab_noncredited_share": 0.2}}
 check("all bars met: PASS", olympic_ring.verdict(PASS_S)["pass"] is True)
@@ -519,9 +547,9 @@ def cvat(evs):
     return [{"tracks": tracks}]
 
 
-def make_video(path, pan_from=None):
-    """A static random texture; with pan_from, the camera pans 60 px from that frame on."""
-    tex = np.repeat(np.random.default_rng(7).integers(0, 255, (Hv, Wv + 80, 1)).astype(np.uint8), 3, axis=2)
+def make_video(path, pan_from=None, seed=7):
+    """A static random texture (one per seed: distinct recordings); with pan_from, the camera pans 60 px from then on."""
+    tex = np.repeat(np.random.default_rng(seed).integers(0, 255, (Hv, Wv + 80, 1)).astype(np.uint8), 3, axis=2)
     from fractions import Fraction
     with VideoWriter(path, Wv, Hv, Fraction(50)) as vw:
         for f in range(N):
@@ -533,15 +561,18 @@ def make_video(path, pan_from=None):
 ds = tmp / "ds"
 trk = tmp / "tracks"
 trk.mkdir()
-for task_name, vid, pan in (("task_kam2_gh078416", "GH078416", None), ("task_kam4_gh069681", "GH069681", 500)):
+STILL_DEV = ["GH078416", "GH128416", "GH159681"]      # the panning one, GH069681, is the fourth development video
+for task_name, vid, pan, seed in (("task_kam2_gh078416", "GH078416", None, 7), ("task_kam4_gh069681", "GH069681", 500, 8),
+                                  ("task_kam2_gh128416", "GH128416", None, 9), ("task_kam4_gh159681", "GH159681", None, 10)):
     d = ds / task_name / "data"
     d.mkdir(parents=True)
-    v = make_video(d / f"{vid}.mp4", pan)
+    v = make_video(d / f"{vid}.mp4", pan, seed)
     tb = scene_table(f"{vid}.mp4", fingerprint(v))
     tb.save(trk / f"{vid}.tracks.npz")
     (ds / task_name / "annotations.json").write_text(json.dumps(cvat(punches(tb))), encoding="utf-8")
-check("setup: two synthetic tasks, each a whole decodable video of N frames",
-      all(probe(t.video).timing.n_frames == N for t in olympic.find_tasks(ds)))
+check("setup: the four development ids, each a whole decodable video of N frames and a distinct recording",
+      len(olympic.find_tasks(ds)) == 4 and all(probe(t.video).timing.n_frames == N for t in olympic.find_tasks(ds))
+      and len({fingerprint(t.video) for t in olympic.find_tasks(ds)}) == 4)
 
 prep = tmp / "prep"
 with contextlib.redirect_stdout(io.StringIO()) as out_prep:
@@ -591,10 +622,13 @@ root.destroy()
 # y 246-271; the spectators' at y 116 (4 px above the far edge).
 FLOOR_PTS = [[20, 120], [620, 120], [640, 360], [0, 360]]
 floors_p = tmp / "floors.json"
-ring.dump_floors({vid: ring.check_floor(vid, FLOOR_PTS, Wv, Hv, st[vid]["video_fp"], 30.0) for vid in ("GH078416", "GH069681")},
-                 floors_p)
+ring.dump_floors({vid: ring.check_floor(vid, FLOOR_PTS, Wv, Hv, st[vid]["video_fp"], 30.0) for vid in sorted(st)}, floors_p)
 rule_f = tmp / "rule.json"
 rule_f.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4}}), encoding="utf-8")
+rule_reg = tmp / "rule_registered.json"
+rule_reg.write_text(json.dumps({"chosen": olympic_ring.REGISTERED_RULE}), encoding="utf-8")
+check("the registered rule is the tuned V6 rule rows 7c/7d use, as load_rule returns it",
+      __import__("find_punches").load_rule(rule_reg) == {"variant": "relative", "threshold": 3.6238817996457016, "min_gap_s": 0.4})
 ev_args = ["evaluate", "--data", str(ds), "--tracks", str(trk), "--floors", str(floors_p), "--prep-dir", str(prep),
            "--rule", str(rule_f)]
 dev_out = tmp / "res" / "dev.json"
@@ -603,11 +637,12 @@ with contextlib.redirect_stdout(io.StringIO()) as o, contextlib.redirect_stderr(
 if rc_d != 0:
     print(o.getvalue(), e_.getvalue())
 dev = json.loads(dev_out.read_text(encoding="utf-8"))
-check("dev: exit 0; the panning video is LEFT OUT (both arms) and listed; only the still one is evaluated",
-      rc_d == 0 and dev["left_out_camera_moves"] == ["GH069681"] and dev["videos"] == ["GH078416"], o.getvalue())
+check("dev: exit 0; the panning video is LEFT OUT (both arms) and listed; the three still ones are evaluated",
+      rc_d == 0 and dev["left_out_camera_moves"] == ["GH069681"] and sorted(dev["videos"]) == STILL_DEV
+      and dev["rule"]["threshold"] == 3.62, o.getvalue())
 by_m = {s["margin_px"]: s for s in dev["margins"]}
 check("REAL FACT: at margin 0 the two spectators (and nobody else) are dropped: every non-boxer row of theirs is removed",
-      by_m[0.0]["credited_dropped"] == 0 and by_m[0.0]["noncredited_rows"] == 2 * N + 500 + 480     # 2 spectators + referee
+      by_m[0.0]["credited_dropped"] == 0 and by_m[0.0]["noncredited_rows"] == 3 * (2 * N + 500 + 480)  # 2 spectators + referee, x3
       and math.isclose(by_m[0.0]["noncredited_removed_share"], 2 * N / (2 * N + 980), rel_tol=1e-9), str(by_m[0.0]))
 check("REAL FACT: at margin +15 the spectators 4 px behind the edge count as on the floor: nothing removed",
       by_m[15.0]["noncredited_removed_share"] == 0.0)
@@ -616,9 +651,9 @@ check("the dev rule picks the most removal with no boxer lost: 0 px (ties betwee
 
 # The same code: the evaluator's baseline is what olympic_completeness.py says about the same files.
 with contextlib.redirect_stdout(io.StringIO()):
-    olympic_completeness.main(["--data", str(ds), "--tracks", str(trk), "--only", "GH078416", "--rule", str(rule_f),
+    olympic_completeness.main(["--data", str(ds), "--tracks", str(trk), "--only", *STILL_DEV, "--rule", str(rule_f),
                                "--out", str(tmp / "res" / "cl.json"), "--sample-out", str(tmp / "res" / "cl.csv")])
-    olympic_completeness.main(["--data", str(ds), "--tracks", str(trk), "--only", "GH078416", "--rule", str(rule_f), "--credited",
+    olympic_completeness.main(["--data", str(ds), "--tracks", str(trk), "--only", *STILL_DEV, "--rule", str(rule_f), "--credited",
                                "--out", str(tmp / "res" / "cc.json"), "--sample-out", str(tmp / "res" / "cc.csv")])
 cli_l = json.loads((tmp / "res" / "cl.json").read_text(encoding="utf-8"))["all"]
 cli_c = json.loads((tmp / "res" / "cc.json").read_text(encoding="utf-8"))["all"]
@@ -635,7 +670,7 @@ filt_dir = tmp / "filtered"
 with contextlib.redirect_stdout(io.StringIO()):
     rc_w = olympic_ring.main(ev_args + ["--split", "dev", "--margin", "0", "--out", str(tmp / "res" / "d0.json"),
                                         "--write-filtered", str(filt_dir)])
-    olympic_completeness.main(["--data", str(ds), "--tracks", str(filt_dir), "--only", "GH078416", "--rule", str(rule_f),
+    olympic_completeness.main(["--data", str(ds), "--tracks", str(filt_dir), "--only", *STILL_DEV, "--rule", str(rule_f),
                                "--out", str(tmp / "res" / "fl.json"), "--sample-out", str(tmp / "res" / "fl.csv")])
 fw = PoseTable.load(filt_dir / "GH078416.tracks.npz")
 cli_f = json.loads((tmp / "res" / "fl.json").read_text(encoding="utf-8"))["all"]
@@ -700,8 +735,9 @@ check("ASTRA 2.2: no video to compare is a FAIL on every gate bar, not an IndexE
       v_empty["pass"] is False and not any(v_empty["gate"].values()) and s_empty["credited_dropped_share"] is None, str(v_empty))
 all_base_fail = copy.deepcopy(broken)
 all_base_fail["video"] = "GH078416"
-check("ASTRA 2.3: with every baseline failed, G3a (nothing measured) FAILS instead of passing on 'None or 0'",
-      olympic_ring.verdict(olympic_ring.summarise_margin([all_base_fail], 0.0))["gate"]["G3a_boxers_kept"] is False)
+v_abf = olympic_ring.verdict(olympic_ring.summarise_margin([all_base_fail], 0.0))["gate"]
+check("ASTRA 2.3 / 3.4: with every baseline failed, G3a and G3c (nothing measured) FAIL instead of passing by default",
+      v_abf["G3a_boxers_kept"] is False and v_abf["G3c_no_new_failures"] is False, str(v_abf))
 check("the local report carries per-video counts, with the linked (unexplained, minutes) of both arms when both ran",
       set(sm["per_video"]) == {"GH078416", "GH128416"} and "linked_ue_filtered" in sm["per_video"]["GH078416"]
       and "linked_ue_baseline" not in sm["per_video"]["GH128416"])
@@ -724,6 +760,8 @@ try:
     rc, err = run_quiet(ev_args + ["--split", "heldout", "--margin", "0"])
     check("held-out at any margin but the frozen one is refused", rc == 1 and "frozen margin" in err, err)
     rc, err = run_quiet(ev_args + ["--split", "heldout"])
+    check("ASTRA 3.2: held-out with any punch rule but the registered one is refused", rc == 1 and "registered punch rule" in err, err)
+    rc, err = run_quiet(ev_args[:-1] + [str(rule_reg), "--split", "heldout"])
     check("held-out without all 25 held-out tables is refused (no partial verdict)", rc == 1 and "held-out tables" in err, err)
 finally:
     olympic_ring.FROZEN_MARGIN_PX = real_frozen
@@ -739,8 +777,7 @@ rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--flo
 check("a video without a floor is refused (click it first), never silently skipped", rc == 1 and "GH078416" in err, err)
 swapped = tmp / "floors_swapped.json"
 fs = ring.load_floors(floors_p)
-ring.dump_floors({"GH078416": ring.check_floor("GH078416", FLOOR_PTS, Wv, Hv, fs["GH069681"].video_fp),
-                  "GH069681": fs["GH069681"]}, swapped)
+ring.dump_floors(fs | {"GH078416": ring.check_floor("GH078416", FLOOR_PTS, Wv, Hv, fs["GH128416"].video_fp)}, swapped)
 rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--floors", str(swapped), "--prep-dir", str(prep), "--rule", str(rule_f)])
 check("a floor clicked on another recording (fingerprint) is refused", rc == 1 and "different recordings" in err, err)
 stale_prep = tmp / "prep_stale"
@@ -762,10 +799,18 @@ mv_out = tmp / "res" / "moving.json"
 rc, err = run_quiet(ev_args[:8] + [str(moving_prep), "--rule", str(rule_f), "--split", "dev", "--out", str(mv_out)])
 mv = json.loads(mv_out.read_text(encoding="utf-8")) if mv_out.is_file() else {}
 check("ASTRA 2.2: every video left out still writes a report (no video compared, no margin chosen), not an IndexError",
-      rc == 0 and mv.get("videos") == [] and mv.get("left_out_camera_moves") == ["GH069681", "GH078416"]
+      rc == 0 and mv.get("videos") == [] and mv.get("left_out_camera_moves") == sorted(st)
       and mv.get("selected_margin_px") is None, err)
 import shutil  # noqa: E402
 
+trk3 = tmp / "tracks_three"
+shutil.copytree(trk, trk3)
+(trk3 / "GH159681.tracks.npz").unlink()
+rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk3), "--floors", str(floors_p), "--prep-dir", str(prep),
+                     "--rule", str(rule_f)])
+check("ASTRA 3.1: a development run missing one of the four dev tables is refused (no margin from a subset)",
+      rc == 1 and "needs all" in err and "GH159681" in err, err)
+DUP_REASON = {"GH078416": "more than one task", "GH128416": "same recording"}
 for label, second_task, second_name in (("the same video id in two tasks", "task_kam4_gh078416", "GH078416"),
                                         ("the same recording under two ids", "task_kam2_gh128416", "GH128416")):
     dsd, trd = tmp / f"ds_dup_{second_name}", tmp / f"trk_dup_{second_name}"
@@ -778,7 +823,8 @@ for label, second_task, second_name in (("the same video id in two tasks", "task
         shutil.copy(trk / "GH078416.tracks.npz", trd / f"{nm}.tracks.npz")
     rc, err = run_quiet(["evaluate", "--data", str(dsd), "--tracks", str(trd), "--floors", str(floors_p), "--prep-dir", str(prep),
                          "--rule", str(rule_f)])
-    check(f"ASTRA 2.4: {label} is refused (it would be pooled twice), with a reason", rc == 1 and err.strip() != "", err)
+    check(f"ASTRA 2.4 / 3.7: {label} is refused FOR THAT REASON (it would be pooled twice)",
+          rc == 1 and DUP_REASON[second_name] in err, err)
 rc, err = run_quiet(["evaluate", "--data", str(ds), "--tracks", str(trk), "--floors", str(tmp / "bin.json"), "--prep-dir", str(prep), "--rule", str(rule_f)])
 check("a malformed floor file stops the run with a reason, not a traceback", rc == 1 and "UTF-8 JSON" in err, err)
 

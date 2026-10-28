@@ -54,6 +54,9 @@ STILL_MAX_PX = 20.0                      # camera motion above this: the video i
 MARGIN_GRID = (-30.0, -15.0, 0.0, 15.0, 30.0, 60.0)
 DEV_MAX_DROPPED_CREDITED = 0.005         # dev rule: the margin may drop at most 0.5% of credited punches
 FROZEN_MARGIN_PX: "float | None" = None  # set by the commit that freezes the dev choice; None = held-out refused
+# The punch-finder rule rows 7c/7d were made with (results/punch_finder_v6.json "chosen", as find_punches.load_rule
+# returns it). Held-out runs refuse any other: a different rule would be a different experiment (Astra, review 3).
+REGISTERED_RULE = {"variant": "relative", "threshold": 3.6238817996457016, "min_gap_s": 0.4}
 G1_MAX_RATIO = 0.90                      # linked unexplained bursts per exposure-minute, filtered / baseline
 G1_MAX_UPPER = 1.00                      # ... and the bootstrap 95% upper bound of that ratio stays below 1
 G2_MIN_REMOVED = 0.20                    # share of baseline non-boxer person-frames the filter removes
@@ -71,8 +74,10 @@ LINK_PARAMS = linking.LinkParams(reacquire_s=0.0)
 # ================================================================ small checks
 
 def _inside_repo_ok(path: Path) -> None:
-    """Derived Olympic files may live only in the gitignored data/ or results/ (or outside the repo)."""
-    p = path.resolve()
+    """Derived Olympic files may live only in the gitignored data/ or results/ (or outside the repo). The folder
+    is resolved, the file name is not: the writer replaces a link planted at the name instead of following it,
+    so the name's own location is what must be checked (Astra, review 3)."""
+    p = Path(path).parent.resolve() / Path(path).name
     try:
         rel = p.relative_to(ROOT)
     except ValueError:
@@ -463,7 +468,8 @@ def verdict(s: dict) -> dict:
         "G3a_boxers_kept": s["credited_dropped_share"] is not None and s["credited_dropped_share"] <= G3A_MAX_DROPPED
                            and s["credited_dropped_share_worst_video"] <= G3A_MAX_DROPPED_VIDEO,
         "G3b_credited_share": measured and _ge(f["credited_share"], b["credited_share"], G3B_MAX_FALL),
-        "G3c_no_new_failures": s.get("videos", 0) > 0 and not s.get("newly_failed", []),   # no video: unmeasured
+        # unmeasured (no video compared, e.g. every baseline failed) fails; a new failure fails
+        "G3c_no_new_failures": s.get("videos_compared", 0) > 0 and not s.get("newly_failed", []),
     }
     sec = {} if not measured else {
         "S1_link_coverage": _ge(f["link_coverage"], b["link_coverage"], S1_MAX_FALL),
@@ -503,27 +509,36 @@ def cmd_evaluate(a) -> int:
     floors = ring.load_floors(a.floors)
     still = load_stillness(a.prep_dir / "stillness.json")
     rule = find_punches.load_rule(a.rule)
-    tasks = [t for t in olympic.find_tasks(a.data) if (a.tracks / f"{t.video.stem}.tracks.npz").is_file()]
-    if a.split == "dev":
-        tasks = [t for t in tasks if t.video.stem in DEV_VIDEOS]
-        margins = tuple(MARGIN_GRID) if a.margin is None else (float(a.margin),)
-    else:
+    if a.split == "heldout":
         if FROZEN_MARGIN_PX is None:
             raise ValueError("the margin is not frozen yet: choose it on --split dev, commit FROZEN_MARGIN_PX, then run held-out")
         if a.margin is not None and float(a.margin) != FROZEN_MARGIN_PX:
             raise ValueError(f"held-out runs only at the frozen margin {FROZEN_MARGIN_PX} px")
+        if rule != REGISTERED_RULE:      # a different rule would be a different experiment (Astra, review 3)
+            raise ValueError(f"held-out runs only with the registered punch rule {REGISTERED_RULE}, got {rule}")
+    tasks = [t for t in olympic.find_tasks(a.data) if (a.tracks / f"{t.video.stem}.tracks.npz").is_file()]
+    # One video, one task, one recording, over the WHOLE dataset, before any split is taken: a copy under a
+    # second name would otherwise be pooled twice or stand in for a missing video (Astra, review 2).
+    stems = [t.video.stem for t in tasks]
+    if len(set(stems)) != len(stems):
+        raise ValueError(f"a video id appears in more than one task: {sorted({s for s in stems if stems.count(s) > 1})}")
+    all_fps = {t.video.stem: fingerprint(t.video) for t in tasks}
+    if len(set(all_fps.values())) != len(all_fps):
+        raise ValueError("two tasks hold the same recording (equal fingerprints): it would be pooled twice")
+    if a.split == "dev":
+        tasks = [t for t in tasks if t.video.stem in DEV_VIDEOS]
+        margins = tuple(MARGIN_GRID) if a.margin is None else (float(a.margin),)
+        have = {t.video.stem for t in tasks}
+        if have != DEV_VIDEOS:     # the margin is chosen over the fixed four, never a subset (Astra, review 3)
+            raise ValueError(f"the development split needs all of {sorted(DEV_VIDEOS)}; missing {sorted(DEV_VIDEOS - have)}")
+    else:
         tasks = [t for t in tasks if t.video.stem not in DEV_VIDEOS]
         margins = (FROZEN_MARGIN_PX,)
         if len(tasks) != 29 - len(DEV_VIDEOS):
             raise ValueError(f"held-out needs all {29 - len(DEV_VIDEOS)} held-out tables, found {len(tasks)}")
     # Every input is bound to the video it describes BEFORE anything is left out: a stale stillness entry from
     # another recording must stop the run, not quietly drop a video (Astra, review 1).
-    stems = [t.video.stem for t in tasks]
-    if len(set(stems)) != len(stems):
-        raise ValueError(f"a video id appears in more than one task: {sorted({s for s in stems if stems.count(s) > 1})}")
-    fps = {t.video.stem: fingerprint(t.video) for t in tasks}
-    if len(set(fps.values())) != len(fps):
-        raise ValueError("two tasks hold the same recording (equal fingerprints): it would be pooled twice")
+    fps = {t.video.stem: all_fps[t.video.stem] for t in tasks}
     no_still = [t.video.stem for t in tasks if t.video.stem not in still]
     if no_still:
         raise ValueError(f"no stillness entry for {no_still}: run prepare first")
@@ -556,7 +571,7 @@ def cmd_evaluate(a) -> int:
                     ft.save(fh)
             replace_file(a.write_filtered / f"{t.video.stem}.tracks.npz", save)
     summaries = [summarise_margin(rows, m) for m in margins]
-    report = {"split": a.split, "left_out_camera_moves": moving, "still_max_px": STILL_MAX_PX,
+    report = {"split": a.split, "rule": rule, "left_out_camera_moves": moving, "still_max_px": STILL_MAX_PX,
               "videos": [r["video"] for r in rows], "margins": summaries}
     if a.split == "dev":
         report["selected_margin_px"] = select_margin(summaries)
@@ -565,8 +580,8 @@ def cmd_evaluate(a) -> int:
                     f"(worst video {_fmt(s['credited_dropped_share_worst_video'], True)}), non-boxer person-frames "
                     f"removed {_fmt(s['noncredited_removed_share'], True)}")
             if "baseline" in s:
-                line += (f", linked unexplained/exp-min {s['baseline']['linked_unexplained_per_exposure_min']:.1f} -> "
-                         f"{s['filtered']['linked_unexplained_per_exposure_min']:.1f}")
+                line += (f", linked unexplained/exp-min {_fmt(s['baseline']['linked_unexplained_per_exposure_min'])} -> "
+                         f"{_fmt(s['filtered']['linked_unexplained_per_exposure_min'])}")
             print(line)
         print(f"selected margin (dev rule): {report['selected_margin_px']}")
         code = 0
