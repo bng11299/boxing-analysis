@@ -211,3 +211,38 @@ python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any check
    C2 takes about 70 min per seed and C3 about 35 min on this CPU when run alone; C13 about an hour.
    Everything else takes seconds to five minutes.
 5. Compare each printed value with "Value now".
+
+## Pre-registered negatives (identity and background, 2026-10-22 to 10-28)
+
+N1–N3 each had a gate committed before its rule or any number, and each result is reported as it came
+out: nothing was tuned on a held-out video afterwards, and none is iterated further. N4 had no gate,
+because nothing can score it. All four are Future Work, not adopted methods. They sit here, apart from
+the numbers table, so later re-runs of that table do not touch them. The sparring-video results (N2) are
+aggregate counts only, from the three consented 10-22 videos: no frame, file name or person is recorded.
+
+| # | Question | Gate (pre-registered) | Numbers | Source | Status |
+|---|---|---|---|---|---|
+| N1 | Headgear corner colour: do two co-present credited punchers read opposite corners? (Olympic Boxing) | G1: opposite ≥ 0.90 of decided pairs, ≥ 100 decided pairs, 95% video-cluster bootstrap lower bound ≥ 0.80, on the 23 held-out videos (`docs/gates/appearance-identity.md`, `c1b8b9c`; rule frozen `9d18ca6`, run once). G2 (linking) only if G1 passes | **277 of 333 decided pairs opposite, 83.2%**; Wilson [0.788, 0.868]; bootstrap [0.756, 0.880]. Share ✗, pairs ✓, lower bound ✗. kam4 87.6% (269/307), kam2 30.8% (8/26). Decided 35.8% of 931 co-present credited pairs. G2 not run | #29 (merged) | **negative (gate failed)** (note N1) |
+| N2 | Glove colour: who is who, moment by moment, in the sparring videos | Bars 1–3 on EACH of two TEST videos separately: (1) accuracy ≥ 0.90, Wilson lower bound ≥ 0.80, ≥ 30 decided moments; (2) unsure ≤ 0.30; (3) ≤ 1 swap per 3-min round and correct share above both baselines (ByteTrack alone; the #11 linker). Bar 4 (fails safe on a same-colour video) not testable: no such video exists (`docs/gates/glove-identity.md` on `feat/glove-identity`, `0e95deb`, addendum `60a3e29`; frozen `cc48822`, each TEST scored once) | TEST (v2): verdict "separable", **28 of 44 decided, 28 of 28 right**, 0 swaps, unsure **0.36**: bar 1 ✗ (28 < 30 decided), bar 2 ✗, bar 3 ✓ (0.64 vs best baseline 0.30). TEST2 (v1): "not separable", **0 of 50** decided: bars 1–3 ✗ (unsure 1.00; 0 vs 0.57). DEV (v3, design data): "not separable", 0 of 59 | #31 (draft; gate result posted on the PR 2026-10-28) | **negative (gate failed)** (note N2) |
+| N3 | Ring-floor filter: does dropping everyone outside the ring help two-boxer tracking? (Olympic Boxing) | Choose the margin on the 4 development videos: the largest removal among margins dropping ≤ 0.5% of credited punches, else stop before any held-out run (`docs/gates/ring-floor-filter.md`, `ddf6399`) | Best margin (+60 px) drops 2.0% of credited punches (8 of 392); no margin qualifies. **Stopped on the development videos; no held-out run**, by the gate's own rule. Pixel mask dropped earlier on dev: on kam4 even the most generous boxer-safe region blacks out 0% of bystanders. Full grid: rows 10a–10b | #36 (merged) | **negative (gate failed: stopped on dev)** (note 10, note N3) |
+| N4 | Olympic ID-swap rate of the #11 linker | None committed: no label can score it | **Not measurable.** The 29 annotation files (4,609 punch tracks) record target × the thrower's own hand only; every `attributes` list is empty and nothing names a corner or a boxer. #29's co-present pairs stay true under an A/B swap, so they cannot detect one. Decision (Brendan, 2026-10-24): option C, no held-out swap rate reported (`docs/quality/olympic-swap-rate.md`) | #32 (merged) | **not measurable (no gate run)** |
+
+N1. **Why headgear was tried, and where it fails.** An eye check of a development pair showed the torso
+   rule (ADR-0013) reading the vests correctly, but both boxers wore red vests; the corner colour is on the
+   headgear and gloves. The headgear read works on one
+   camera group (kam4, 87.6%) and not the other (kam2, 30.8% on only 26 decided pairs). On the Olympic
+   development videos, gloves scored only about 58–60% opposite in #29's design checks, so the evidence
+   was against gloves before the sparring test (N2) began.
+
+N2. **Why gloves failed, and what the one success shows.** On two of three videos the rule never found
+   a glove-colour split. On DEV its two clusters were grey/white against black, with every hue bin near
+   zero. About 51% of the pixels it read were skin, so the read disc is probably not landing on the
+   glove. Where it did split (TEST), it never named a
+   boxer wrong (28 of 28) and beat both baselines (ByteTrack 0 of 44, linker 13 of 43), but it spoke on
+   too few moments to pass. A pass would only have shown "it worked once", since there are just two TEST
+   videos. Ground-truth labels: Brendan, 10.5 min in all, not shown any method's output.
+
+N3. **Why masking stopped.** The cameras sit at a ring corner at head height, so a boxer at the far ropes
+   and the crowd behind them share pixels and floor depth. All 8 credits lost at +60 px are on tracks whose
+   box bottoms sit 70–150 px beyond the far edge of the floor. Removing most bystanders did not lower the
+   linked burst rate, and link coverage fell (69.1% → 62.4%). Details in note 10.
