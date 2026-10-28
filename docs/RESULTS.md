@@ -26,6 +26,10 @@ this file says whether it survives the merge.
   `reference_keep` (no old 0.3-rule filter); #22's `detect(eligible=)` drops ineligible peaks before the
   minimum gap; point labels are matched with `POINT_TOL_S`; #23's nearest-middle attribution now scores
   every matched detection's type. Only the last one moved a reported number (row 6a).
+- **Athlete-disjoint split (O55, 2026-10-27).** V2 and V3 show the same instructor, so the old
+  hold-out V2/V5/V9 was not athlete-disjoint. Rows 1f–1i are the headline now: held out V2/V3/V5/V9,
+  run on `fix/o55-athlete-disjoint-split` (`b65a043`). Rows 1a, 1d and 1e stay as the record of the
+  old split. Note 10 explains what changed and which other rows it touches.
 
 ## The numbers
 
@@ -33,16 +37,20 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 
 | # | Claim | Value now | Cmd | Output | Recorded | Source | Status |
 |---|---|---|---|---|---|---|---|
-| 0 | Extent rule gate: per-clip window minus old window, IoU, V6 second half at finder detections | +0.103 [+0.099, +0.108], verdict YES; ratios 1.33 / 1.83 peak-widths | C1 | `results/repro/punch_extent.json` | +0.103 [+0.099, +0.108], YES (was +0.101 before #23) | #23 | match |
-| 1a | ST-GCN++ pretrained, seed 0, held-out V2/V5/V9 (976 clips): accuracy / macro F1 | 0.8145 / 0.7207 | C2 | `results/repro/sweep/seed0.json` | 0.8145 / 0.7207 | #2, `results/sweep-2026-09-22/seed0.json` | match (every result field identical; note 7) |
-| 1b | Saved checkpoint re-evaluated on the same 976 clips | 0.8145 / 0.7207; manifest's pinned sha256 equals the `.pt` file's (`32c1982d…`) | C4 (gate 1) | printed by C4 | 0.8145491803 / 0.7207303869 (manifest `held_out`) | #14 | match |
+| 0 | Extent rule gate (ratios from the checkpoint's training side, which includes V1 = V6's instructor; note 10): per-clip window minus old window, IoU, V6 second half at finder detections | +0.103 [+0.099, +0.108], verdict YES; ratios 1.33 / 1.83 peak-widths | C1 | `results/repro/punch_extent.json` | +0.103 [+0.099, +0.108], YES (was +0.101 before #23) | #23 | match |
+| 1a | *Old split, superseded by 1g.* ST-GCN++ pretrained, seed 0, held-out V2/V5/V9 (976 clips; not athlete-disjoint, O55): accuracy / macro F1 | 0.8145 / 0.7207 | C2 at `8b25ebf` | `results/repro/sweep/seed0.json` | 0.8145 / 0.7207 | #2, `results/sweep-2026-09-22/seed0.json` | match (every result field identical; note 7); **superseded** (note 10) |
+| 1b | Saved checkpoint re-evaluated on the same 976 clips (its own split, `split_pipeline`; V2 not athlete-disjoint) | 0.8145 / 0.7207; manifest's pinned sha256 equals the `.pt` file's (`32c1982d…`) | C4 (gate 1) | printed by C4 | 0.8145491803 / 0.7207303869 (manifest `held_out`) | #14 | match |
 | 1c | Retrain seed 0 through `train_classifier.py`: reproduces and saves | 0.8145 / 0.7207; saved checkpoint byte-identical (sha256 `32c1982d…`), manifest identical | C3 | `results/repro/weights/stgcnpp-boxingvi-seed0.{pt,json}` | 0.8145 / 0.7207; sha256 `32c1982d…` | #14 | match |
-| 1d | ST-GCN++ pretrained, mean of seeds 0–2 | 0.8118 / 0.7082 (seeds 0.8145, 0.8094, 0.8115 / 0.7207, 0.6956, 0.7084) | C2 ×3 | `results/repro/sweep/seed{0,1,2}.json` | 0.812 / 0.708 | `results/sweep-2026-09-22/` | match (all three files identical in results; note 7) |
-| 1e | Random forest; floors: commonest type, static pose (accuracy / macro F1), seed 0 | RF 0.653 / 0.510; commonest 0.205 / 0.057; static pose 0.491 / 0.215 | C2 | `results/repro/sweep/seed0.json` | RF 0.653 / 0.510; commonest 0.205; static pose 0.491 | #2, README | match |
+| 1d | *Old split, superseded by 1f.* ST-GCN++ pretrained, mean of seeds 0–2, held-out V2/V5/V9 | 0.8118 / 0.7082 (seeds 0.8145, 0.8094, 0.8115 / 0.7207, 0.6956, 0.7084) | C2 ×3 at `8b25ebf` | `results/repro/sweep/seed{0,1,2}.json` | 0.812 / 0.708 | `results/sweep-2026-09-22/` | match (all three files identical in results; note 7); **superseded** (note 10) |
+| 1e | *Old split, superseded by 1h.* Random forest; floors: commonest type, static pose (accuracy / macro F1), seed 0, held-out V2/V5/V9 | RF 0.653 / 0.510; commonest 0.205 / 0.057; static pose 0.491 / 0.215 | C2 at `8b25ebf` | `results/repro/sweep/seed0.json` | RF 0.653 / 0.510; commonest 0.205; static pose 0.491 | #2, README | match; **superseded** (note 10) |
+| 1f | **Headline, athlete-disjoint (O55).** ST-GCN++ pretrained, mean of seeds 0–2, held-out V2/V3/V5/V9 (1,787 clips; trained on 2,970 from V1/V4/V7/V8/V10): accuracy / macro F1 | **0.7722 / 0.6331** (seeds 0.7795, 0.7851, 0.7521 / 0.6344, 0.6525, 0.6123) | C2 ×3 | `results/sweep-athlete-disjoint-2026-10-27/seed{0,1,2}.json` | new, 2026-10-27 | `fix/o55-athlete-disjoint-split` | **new: replaces 1d** (note 10) |
+| 1g | Same, seed 0 | 0.7795 / 0.6344; per-class F1 cross 0.906, jab 0.853, lead hook 0.634, lead uppercut 0.541, rear hook 0.210, rear uppercut 0.663 | C2 | `…/seed0.json` | new | same | **new: replaces 1a** |
+| 1h | Same split: random forest; floors (commonest type, static pose), accuracy / macro F1 | seed 0: RF 0.681 / 0.500; commonest 0.310 / 0.079; static pose 0.501 / 0.271. Mean of seeds 0–2: RF 0.674 / 0.494; static pose 0.488 / 0.264 (commonest is the same every seed) | C2 ×3 | same | new | same | **new: replaces 1e** |
+| 1i | Same split: interpretability gap, ST-GCN++ pretrained − random forest, macro F1 (95% CI), seeds 0 / 1 / 2 | +0.135 [+0.104, +0.164]; +0.159 [+0.128, +0.189]; +0.124 [+0.095, +0.155]: every interval excludes zero | C2 ×3 | same | new | same | **new** |
 | 2 | Pose switch on V5+V9, 742 punches: A, Y_all, A−Y_all | A 0.896, Y_all 0.889, +0.007 [−0.009, +0.024]; Y_clip 0.826 | C4 | `results/repro/pose_switch.json` | same | #16 | match |
 | 2v | Pose switch per video (A / Y_all on n) | V5 0.906 / 0.899 on 594; V9 0.858 / 0.851 on 148 | C4 | same | same | #16 | match |
 | 3 | Wrist-speed finder, V6 test half (406 punches): recall, F1, chance floor | 0.741; 0.571 [0.472, 0.654]; 0.353 | C0 | `results/repro/punch_finder_v6.json` | 0.741; 0.571 [0.472, 0.654]; 0.353 | #4 | match (see note 1) |
-| 4 | Classify at finder detections, V6: G−C accuracy (all; second half) | +0.071 [+0.045, +0.101] on 493; +0.080 [+0.043, +0.120] on 301 | C5 | `results/repro/classify_v6.json` | same | #23 | match |
+| 4 | Classify at finder detections, V6 (same person as training video V1: not athlete-disjoint; note 10): G−C accuracy (all; second half) | +0.071 [+0.045, +0.101] on 493; +0.080 [+0.043, +0.120] on 301 | C5 | `results/repro/classify_v6.json` | same | #23 | match |
 | 4r | Readings C / E / G (all V6; second half) | 0.613 / 0.688 / 0.684; 0.605 / 0.694 / 0.684; F−G +0.004, +0.003 | C5 | same | same | #23 | match |
 | 5a | End to end V5+V9, finder: precision (lower bound), recall, count ratio | 0.633 [0.552, 0.706]; 0.585 [0.530, 0.641]; 0.92 | C6 | `results/repro/e2e_v5v9/pipeline_v5v9.json` | same | #20 | match |
 | 5b | End to end: type accuracy on matched detections; jab recall | 0.811 [0.754, 0.868] on 434; 0.32 (84/264) | C6 | same | same | #20 | match |
@@ -125,6 +133,38 @@ report 289, tracks 79, machine scripts 38.
    `results/punch_finder_v6.json` (the rule rows 7c/7d were made with: both reproduce exactly), not
    `results/repro/`; the identity files went to the gitignored `results/olympic_boxers/`.
 
+10. **Why rows 1a/1d/1e changed (O55, 2026-10-27).** Brendan watched all ten videos. V2 (held out)
+    and V3 (training) show the same instructor, and so do V1 and V6. Every other video is a
+    different person. He chose the new hold-out before any number on it existed: the old set plus
+    V3, with nothing else chosen. `data.PERSON_OF_VIDEO` records the people, and `split_by_video`
+    now refuses any hold-out that puts one person on both sides. The old rows are kept as the record
+    and reproduce with C2 at `8b25ebf`, the last commit before the change.
+    - **The drop is not the size of the leak.** 0.812 → 0.772 accuracy (−0.040) and 0.708 → 0.633
+      macro F1 (−0.075) mix three effects that this run does not separate: V2's instructor no longer
+      trains; training lost V3's 811 clips (3,781 → 2,970, −21%); and the test set changed (976 →
+      1,787 clips, 20.5% → 37.6% of the corpus, with V3 making up 45% of it).
+    - **The floors moved because the test mix moved.** Cross is 31% of the new test set, so
+      commonest-type accuracy goes 0.205 → 0.310. Compare a model with its own split's floor, never
+      across splits. The random forest went up (0.653 → 0.681 accuracy, seed 0) while ST-GCN++ went
+      down, so the interpretability gap narrows from +0.211 to +0.135 macro F1 (seed 0). It still
+      excludes zero on all three seeds (row 1i).
+    - **The test set is 37.6% of the clips, not about 20%** like the old split and the paper's.
+      That is the price of holding out whole people without choosing anything new. Its intervals
+      are narrower for it, and its model is trained on less.
+    - **Rows unaffected:** 2, 2v and 5a–5d score V5 and V9, each a person seen in no other video,
+      with the checkpoint, which stays on its own split (`split_pipeline`). So they were already
+      athlete-disjoint. 1b and 1c still reproduce, but their 976 clips include V2, whose instructor
+      the checkpoint trained on (V3). The earlier `--cv 3` runs (`results/cv-2026-09-22/`) are
+      unaffected: their video folds [V1], [V2, V3, V8, V10] and [V4, V5, V7, V9] are exactly the
+      person folds `--cv` now builds.
+    - **Rows now known not to be athlete-disjoint:** 4 and 4r classify V6 with a checkpoint trained
+      on V1, the same person. Row 0's extent ratios come from that training side. Row 3 (the finder)
+      uses no trained model. Fixing these would mean retraining the checkpoint, which was declined
+      for now (it would move every pipeline row).
+    - **Run:** `b65a043`, the three seeds concurrently on the CPU above (6 torch threads each), about
+      3 h wall-clock. Each seed ran once on this split. Determinism was shown on the old split (note
+      7) with the same environment, and running concurrently does not change the thread count.
+
 ## Commands
 
 From the repo root, PowerShell, with the venv's `python`.
@@ -134,7 +174,7 @@ From the repo root, PowerShell, with the venv's `python`.
 python run_punch_finder.py --data data --video data/rgb/V6.mp4 --out results/repro/punch_finder_v6.json
 # C1  extent rule (row 0; needed by every classify step after #23)
 python run_punch_extent.py --data data --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --rule results/repro/punch_finder_v6.json --out results/repro/punch_extent.json
-# C2  full baseline sweep, one seed (rows 1a, 1d, 1e); SEED = 0, 1, 2
+# C2  full baseline sweep, one seed (rows 1f-1i; at 8b25ebf, rows 1a, 1d, 1e); SEED = 0, 1, 2
 python run_baseline.py --data data --stgcnpp both --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth --stgcnpp-epochs 20 --seed SEED --out results/repro/sweep/seedSEED.json
 # C3  retrain the pipeline's classifier; saves only if it equals the reference (row 1c)
 python train_classifier.py --data data --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth --out results/repro/weights/stgcnpp-boxingvi-seed0.pt --reference results/sweep-2026-09-22/seed0.json --rule results/repro/punch_finder_v6.json

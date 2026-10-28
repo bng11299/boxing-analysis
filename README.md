@@ -14,7 +14,7 @@ initial deliverable, and it depends on nothing else in the project succeeding.
 | Pipeline | Built, validated, and **run on the real corpus** (2026-09-02) |
 | Tests | 76 passing, weighted toward the loader and feature trust boundaries |
 | Real corpus | Obtained 2026-09-02. **It is not what the paper describes** — see below |
-| Reported results | First baselines below. Video-disjoint split, **not** the paper's official one |
+| Reported results | Current: athlete-disjoint split V2/V3/V5/V9 ([docs/RESULTS.md](docs/RESULTS.md), O55). **Not** the paper's official split |
 
 ## First baselines
 

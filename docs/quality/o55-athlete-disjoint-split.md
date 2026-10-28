@@ -54,3 +54,18 @@ leak, where an athlete straddles train and test and inflates the headline (this 
   does, plus two negative tests). A bare string hold-out is refused. The map is a
   `MappingProxyType`. Every `try/except` check has an `else` failure. The held-out pre-check test
   uses a corpus without V11. Project rules, README and docstrings are updated. RESULTS.md: see below.
+- **Test gate (re-entered):** pipeline 351, classify 299 (two new negative tests on the reference's
+  split), poseswitch 30, report 289, e2e 74, analyse_clip 113, boxers 167; all green. One test was
+  wrong on first run (it called `__setitem__` on the mappingproxy, which has no such attribute);
+  rewritten as a real item assignment, which raises `TypeError`.
+- **Review (self, on the iteration-2 diff):** one wording fix (learning_curve docstring order). No
+  logic change touched what `run_baseline.py` computes, so the sweep run at `b65a043` stands.
+- **Security:** unchanged; the new checks only narrow what is accepted.
+
+## Results (step 4 of the task)
+
+Three seeds at `b65a043`. Headline ST-GCN++ pretrained 0.7722 / 0.6331 (old split 0.8118 / 0.7082).
+Interpretability gap +0.135 / +0.159 / +0.124 macro F1, every CI excludes zero. Floors re-run with it.
+RESULTS.md rows 1f–1i and note 10 say why the old rows changed, and that the drop is not the leak's
+size (less training data, different test mix). Real-world check: the run's own `val_videos` /
+`train_videos` fields read V2/V3/V5/V9 and V1/V4/V7/V8/V10, and 1,787 + 2,970 = 4,757, the corpus.
