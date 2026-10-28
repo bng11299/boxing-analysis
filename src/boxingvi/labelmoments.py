@@ -475,6 +475,15 @@ def decode_frames(video: Path, fps: float, start_f: int, n_want: int, w: int, h:
     a frame early so a rounded timestamp never skips the first wanted frame, and -frames:v stops at the last.
     Passthrough timing keeps one output frame per stored frame. Fewer than `min_frames` is refused rather than
     shifting a frame onto another moment. `what` names the clip in messages."""
+    buf, n = decode_raw(video, fps, start_f, n_want, w, h, what, min_frames)
+    size = w * h * 3
+    return tuple(buf[i * size:(i + 1) * size] for i in range(n))
+
+
+def decode_raw(video: Path, fps: float, start_f: int, n_want: int, w: int, h: int, what: str,
+               min_frames: int = 1) -> "tuple[bytes, int]":
+    """decode_frames without splitting: (ffmpeg's whole RGB24 output, number of whole frames in it), so a
+    caller can view it as one array instead of copying every frame."""
     cmd = [_tool("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", "-protocol_whitelist", "file",
            "-ss", f"{max(0.0, (start_f - 0.5) / fps):.6f}", "-i", str(video),
            "-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v", str(n_want), "-fps_mode", "passthrough",
@@ -487,7 +496,7 @@ def decode_frames(video: Path, fps: float, start_f: int, n_want: int, w: int, h:
     n = min(len(done.stdout) // size, n_want)
     if done.returncode != 0 or n < min_frames:
         raise Refused(f"ffmpeg could not decode {what}")
-    return tuple(done.stdout[i * size:(i + 1) * size] for i in range(n))
+    return done.stdout, n
 
 
 # ---- one labelling session ------------------------------------------------------------------------

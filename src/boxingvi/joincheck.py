@@ -7,7 +7,8 @@ answer files, the clip with the two fragments' boxes, and the score against the 
 
 Blinding. Nothing the checker shows or reads may say which boxer (A or B) a chain is, what a link cost, or
 which stratum a join is in. `Join` therefore has no chain field; the sample file stores per join only the
-video, the two track ids and the two boundary frames; the stratum is stored apart, for the score only.
+video, the two track ids and the two boundary frames. The stratum is not stored at all: the score derives it
+from the join's gap and the frame's median, and the window shows no gap length.
 
 Everything derived from Olympic Boxing (the sample, the answers, the result) stays under the gitignored
 results/; it is research-use only and never redistributed. Messages never repeat a path or an input value.
@@ -18,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import re
 import statistics
@@ -182,7 +184,7 @@ def build_sample(per_video: dict, manifest, n: int = N_SAMPLE, seed: int = SEED)
     for j in joins:
         _check_join(j, per_video[j.video]["fps"], per_video[j.video]["n_frames"])
     positions = [p for v in sorted(per_video) for p in per_video[v]["positions"]]
-    shown, counts, strata = draw(joins, n, seed)
+    shown, counts, _ = draw(joins, n, seed)
     ps = p_star(positions)
     videos = {}
     for v in sorted(per_video):
@@ -196,8 +198,11 @@ def build_sample(per_video: dict, manifest, n: int = N_SAMPLE, seed: int = SEED)
                                "misattribution_at_p_star": misattribution(ps, positions)},
             "videos": videos,
             "joins": [{"video": j.video, "tid1": j.tid1, "tid2": j.tid2, "last1": j.last1, "first2": j.first2}
-                      for j in shown],
-            "strata": strata}
+                      for j in shown]}
+
+
+def stratum(j: Join, median_gap: float) -> str:
+    return "short" if j.gap <= median_gap else "long"
 
 
 def _int(x, name: str) -> int:
@@ -216,7 +221,7 @@ def _check_join(j: Join, fps: float, n_frames: int) -> None:
         raise Refused("a join must connect two different, non-negative track ids")
 
 
-SAMPLE_KEYS = {"format", "gate", "seed", "n", "frame", "videos", "joins", "strata"}
+SAMPLE_KEYS = {"format", "gate", "seed", "n", "frame", "videos", "joins"}
 FRAME_KEYS = {"joins", "short", "long", "median_gap", "n_short", "n_long", "p_star", "target_misattribution",
               "misattribution_at_p_star"}
 VIDEO_KEYS = {"camera", "fps", "n_frames", "tracks_sha256", "video_fp", "joins", "chain_minutes", "positions"}
@@ -228,16 +233,19 @@ class Sample:
     raw: dict
     sha256: str
     joins: tuple        # Join, in the order shown
-    strata: tuple
 
     @property
     def n(self) -> int:
         return len(self.joins)
 
 
+def _num(x, name: str, lo: float = 0.0, hi: float = math.inf) -> float:
+    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not lo <= x <= hi:
+        raise Refused(f"{name} is not a number in range")
+    return float(x)
+
+
 def load_sample(path, manifest) -> Sample:
-    """The sample file is checked whole before use: exact keys (so nothing extra, such as a chain name, can
-    ride along), every video in the manifest, every join inside its video and within the linker's gap."""
     p = Path(path)
     try:
         if p.stat().st_size > MAX_SAMPLE_BYTES:
@@ -245,6 +253,16 @@ def load_sample(path, manifest) -> Sample:
         raw_bytes = p.read_bytes()
     except OSError:
         raise Refused("the sample file cannot be read") from None
+    return parse_sample(raw_bytes, manifest)
+
+
+def parse_sample(raw_bytes: bytes, manifest) -> Sample:
+    """The sample is checked whole before use: exact keys (so nothing extra, such as a chain name, can ride
+    along), the gate's constants (format, seed, n, target), every video in the manifest, every join inside its
+    video and within the linker's gap, and every number the score relies on: p* is recomputed from the
+    positions, the frame's totals must add up, and the strata implied by the median must match n_short/n_long."""
+    if len(raw_bytes) > MAX_SAMPLE_BYTES:
+        raise Refused("the sample file is too large to be a sample")
     try:
         d = json.loads(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -253,10 +271,11 @@ def load_sample(path, manifest) -> Sample:
         raise Refused("the sample file is not a linker-join sample (unknown format or keys)")
     if not isinstance(d["frame"], dict) or set(d["frame"]) != FRAME_KEYS:
         raise Refused("the sample's frame summary has unexpected keys")
-    if not isinstance(d["videos"], dict) or not isinstance(d["joins"], list) or not isinstance(d["strata"], list):
+    if not isinstance(d["videos"], dict) or not isinstance(d["joins"], list):
         raise Refused("the sample file's sections have the wrong types")
-    n = _int(d["n"], "n")
-    if not 1 <= n <= MAX_JOINS or len(d["joins"]) != n or len(d["strata"]) != n:
+    if d["gate"] != GATE or d["seed"] != SEED or isinstance(d["seed"], bool) or _int(d["n"], "n") != N_SAMPLE:
+        raise Refused("the sample was not drawn with the gate's seed and n")
+    if len(d["joins"]) != N_SAMPLE:
         raise Refused("the sample's join count does not match n")
     man = set(manifest)
     for v, info in d["videos"].items():
@@ -271,6 +290,16 @@ def load_sample(path, manifest) -> Sample:
             raise Refused("a video entry's frame rate is out of range")
         if not 1 <= _int(info["n_frames"], "n_frames") <= 10_000_000:
             raise Refused("a video entry's frame count is out of range")
+        if not 0 <= _int(info["joins"], "joins") <= MAX_JOINS * 100:
+            raise Refused("a video entry's join count is out of range")
+        _num(info["chain_minutes"], "chain minutes", 0.0, 10_000.0)
+        if not isinstance(info["camera"], str) or not re.fullmatch(r"kam\d|unknown", info["camera"]):
+            raise Refused("a video entry's camera is not kamN")
+        pos = info["positions"]
+        if not isinstance(pos, list) or len(pos) > 1_000_000 or not all(
+                isinstance(x, list) and len(x) == 2 and _int(x[0], "position") >= 0 and _int(x[1], "punches") >= 1
+                for x in pos):
+            raise Refused("a video entry's positions are not [joins before, punches] pairs")
     if set(d["videos"]) != man:
         raise Refused("the sample does not cover exactly the manifest's videos")
     joins = []
@@ -286,9 +315,25 @@ def load_sample(path, manifest) -> Sample:
         joins.append(j)
     if len(set(joins)) != len(joins):
         raise Refused("the sample holds the same join twice")
-    if any(s not in ("short", "long") for s in d["strata"]):
-        raise Refused("a stratum is neither short nor long")
-    return Sample(d, hashlib.sha256(raw_bytes).hexdigest(), tuple(joins), tuple(d["strata"]))
+    fr = d["frame"]
+    total = _int(fr["joins"], "frame joins")
+    if total != sum(i["joins"] for i in d["videos"].values()) or total < N_SAMPLE \
+            or _int(fr["short"], "short") + _int(fr["long"], "long") != total:
+        raise Refused("the frame's join counts do not add up")
+    med = _num(fr["median_gap"], "median gap", 1.0, 240.0 * 2)
+    n_short = sum(stratum(j, med) == "short" for j in joins)
+    if (_int(fr["n_short"], "n_short"), _int(fr["n_long"], "n_long")) != (n_short, N_SAMPLE - n_short):
+        raise Refused("the sample's strata do not match its median gap")
+    positions = [x for v in sorted(d["videos"]) for x in d["videos"][v]["positions"]]
+    if _num(fr["target_misattribution"], "target") != TARGET_MISATTRIBUTION:
+        raise Refused("the sample's misattribution target is not the gate's")
+    try:
+        ps = p_star(positions)
+    except ValueError:
+        raise Refused("the sample's chains hold no credited punch") from None
+    if abs(_num(fr["p_star"], "p*", 0.0, 0.5) - ps) > 1e-9:
+        raise Refused("the sample's p* does not follow from its positions")
+    return Sample(d, hashlib.sha256(raw_bytes).hexdigest(), tuple(joins))
 
 
 def write_new(path: Path, data: bytes) -> None:
@@ -297,6 +342,7 @@ def write_new(path: Path, data: bytes) -> None:
         with open(path, "xb") as f:
             f.write(data)
             f.flush()
+            os.fsync(f.fileno())
     except FileExistsError:
         raise Refused("that file already exists: a sample or result is written once and never replaced") from None
 
@@ -406,6 +452,43 @@ class AnswerFile:
         self.on_disk = data
 
 
+class SessionLock:
+    """One check window per answers file. replace_file refuses a stale copy, but two windows that read the
+    same bytes could both pass that comparison and the second rename would drop the first's answer (Astra).
+    The OS lock on `<answers>.lock` is held for the whole session and released by the OS if the process dies,
+    so a crash never leaves the file locked."""
+
+    def __init__(self, answers_path):
+        p = Path(answers_path)
+        self.path = p.with_name(p.name + ".lock")
+        self._f = open(self.path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self._f.seek(0)
+                msvcrt.locking(self._f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._f.close()
+            self._f = None
+            raise Refused("another check window already has this answers file open") from None
+
+    def close(self) -> None:
+        if self._f is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self._f.seek(0)
+                msvcrt.locking(self._f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        self._f.close()
+        self._f = None
+
+
 class Session(lm.Session):
     """labelmoments.Session, unchanged except that there is no `# A:` to ask for, and it can say when a
     break is due (BREAK_MIN of active time in this sitting)."""
@@ -427,11 +510,11 @@ class JoinClip:
     k: int               # the join's index in the sample (0-based)
     width: int
     height: int
-    fps: float           # display rate (the video's rate / step)
+    fps: float           # the video's rate
     start_f: int
     frames: tuple        # RGB24 bytes with the boxes drawn
     part: tuple          # per frame: 1 (fragment 1), 0 (gap), 2 (fragment 2)
-    gap_frames: int      # frames between the two fragments (gap - 1)
+    ms: tuple            # per frame: how long it stays on screen (real time: the source frames it stands for)
     still: bytes         # fragment 1's last frame | fragment 2's first frame
     still_width: int
 
@@ -472,17 +555,20 @@ def draw_box(rgb: np.ndarray, box, scale: float, colour, px: int = BOX_PX) -> No
     rgb[y0:y1 + 1, max(x1 - px + 1, x0):x1 + 1] = c
 
 
-def build_clip(k: int, frames: tuple, start_f: int, join: Join, b1: dict, b2: dict, src_w: int, w: int, h: int,
-               fps: float, step: int) -> JoinClip:
-    """Draw the two boxes (cyan on fragment 1's frames, yellow on fragment 2's, none in the gap and no other
-    box ever), keep every `step`-th frame plus both boundary frames, and build the side-by-side still."""
+def build_clip(k: int, buf: bytes, n: int, start_f: int, join: Join, b1: dict, b2: dict, src_w: int, w: int,
+               h: int, fps: float, step: int) -> JoinClip:
+    """From ffmpeg's raw output (`buf`, n frames from start_f; viewed, not copied): draw the two boxes (cyan on
+    fragment 1's frames, yellow on fragment 2's, none in the gap and no other box ever), keep every `step`-th
+    frame plus both boundary frames, time each kept frame by the source frames it stands for (so playback is
+    real speed even where a boundary frame falls off the step grid), and build the side-by-side still."""
+    view = np.frombuffer(buf, np.uint8, count=n * h * w * 3).reshape(n, h, w, 3)
     scale = w / src_w
     keep_f, out, part = [], [], []
-    for i, raw in enumerate(frames):
+    for i in range(n):
         f = start_f + i
         if not ((f - start_f) % step == 0 or f in (join.last1, join.first2)):
             continue
-        a = np.frombuffer(raw, np.uint8).reshape(h, w, 3).copy()
+        a = view[i].copy()
         if f <= join.last1:
             if f in b1:
                 draw_box(a, b1[f], scale, CYAN)
@@ -499,8 +585,9 @@ def build_clip(k: int, frames: tuple, start_f: int, join: Join, b1: dict, b2: di
         raise Refused("the clip does not reach both boundary frames")
     sep = np.zeros((h, STILL_SEP, 3), np.uint8)
     still = np.concatenate([out[keep_f.index(join.last1)], sep, out[keep_f.index(join.first2)]], axis=1)
-    return JoinClip(k, w, h, fps / step, start_f, tuple(a.tobytes() for a in out), tuple(part),
-                    join.gap - 1, still.tobytes(), 2 * w + STILL_SEP)
+    ms = tuple(max(1, int(round((b - a) * 1000 / fps))) for a, b in zip(keep_f, keep_f[1:] + [start_f + n]))
+    return JoinClip(k, w, h, fps, start_f, tuple(a.tobytes() for a in out), tuple(part), ms,
+                    still.tobytes(), 2 * w + STILL_SEP)
 
 
 def clip_range(join: Join, fps: float, n_frames: int) -> "tuple[int, int]":
@@ -562,7 +649,8 @@ def score(sample: Sample, answers: AnswerFile, draws: int = BOOT_DRAWS, seed: in
         return r
 
     idx = range(sample.n)
-    out["by_stratum"] = {st: part([i for i in idx if sample.strata[i] == st]) for st in ("short", "long")}
+    med = float(sample.raw["frame"]["median_gap"])
+    out["by_stratum"] = {st: part([i for i in idx if stratum(sample.joins[i], med) == st]) for st in ("short", "long")}
     cams = sorted({videos[v]["camera"] for v in videos})
     out["by_camera"] = {}
     for cam in cams:

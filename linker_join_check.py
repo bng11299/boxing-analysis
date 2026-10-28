@@ -51,11 +51,16 @@ def manifest() -> frozenset:
     return HELD_OUT
 
 
+# Olympic-derived files may only go under one of these results/ folders (both gitignored): this checkout's, and
+# the main checkout's (a worktree is deleted when its session is archived; the answers must outlive it).
+RESULTS_ROOTS = [Path(__file__).resolve().parent / "results", Path.home() / "repos" / "boxing-comps" / "results"]
+
+
 def check_out_dir(d: Path) -> Path:
-    """Olympic-derived files stay under a results/ folder (gitignored)."""
     r = Path(d).resolve()
-    if "results" not in [p.name for p in r.parents] and r.name != "results":
-        raise lm.Refused("the output folder must be under results/ (gitignored): Olympic-derived files stay there")
+    if not any(r == root.resolve() or lm._under(r, root.resolve()) for root in RESULTS_ROOTS):
+        raise lm.Refused("the output folder must be under this repo's results/ (gitignored): Olympic-derived "
+                         "files stay there")
     return r
 
 
@@ -90,6 +95,7 @@ def cmd_sample(a) -> int:
     if (out / SAMPLE_NAME).exists():
         raise lm.Refused("a sample already exists: it is drawn once and never redrawn")
     man = manifest()
+    inside = data_path_check(a.data)
     tasks = {t.video.stem: t for t in olympic.find_tasks(a.data) if t.video.stem in man}
     per_video = {}
     for vid in sorted(man):
@@ -98,8 +104,13 @@ def cmd_sample(a) -> int:
         if t is None or not tracks.is_file():
             print(f"{vid}: missing")
             continue
-        table, info, events, attrs = olympic_link.load_video(t, a.tracks)
-        lk = linking.link_video(table, attrs)
+        inside(t.video)                 # a task folder linked elsewhere is refused before anything is read
+        try:
+            table, info, events, attrs = olympic_link.load_video(t, a.tracks)
+            lk = linking.link_video(table, attrs)
+        except (ValueError, OSError, RuntimeError) as e:
+            print(f"{vid}: did not link ({type(e).__name__})")
+            continue
         joins = jc.joins_of(lk, vid)
         per_video[vid] = {"joins": joins, "positions": jc.positions_of(lk, linking.credited_counts(attrs)),
                           "chain_minutes": jc.chain_minutes(lk), "camera": jc.camera_of(t.name),
@@ -107,13 +118,14 @@ def cmd_sample(a) -> int:
                           "video_fp": table.video_fp or fingerprint(t.video)}
         print(f"{vid}: {len(joins)} joins, solve {lk.solve_s:.1f} s")
     sample = jc.build_sample(per_video, man)
+    data = jc.sample_bytes(sample)
+    s = jc.parse_sample(data, man)          # checked before it is written: a bad sample never blocks a rerun
     out.mkdir(parents=True, exist_ok=True)
-    jc.write_new(out / SAMPLE_NAME, jc.sample_bytes(sample))
-    s = jc.load_sample(out / SAMPLE_NAME, man)
+    jc.write_new(out / SAMPLE_NAME, data)
     jc.AnswerFile.create(out / ANSWERS_NAME, s)
     f = sample["frame"]
-    print(f"frame: {f['joins']} joins in {len(per_video)} videos (short {f['short']}, long {f['long']}, median gap "
-          f"{f['median_gap']} frames); drew {s.n} ({f['n_short']} short, {f['n_long']} long); p* = {f['p_star']:.4f}; "
+    # No gap length is printed: with the median and a join's gap, its stratum could be worked out.
+    print(f"frame: {f['joins']} joins in {len(per_video)} videos; drew {s.n}; p* = {f['p_star']:.4f}; "
           f"sample sha256 {s.sha256[:12]}")
     return 0
 
@@ -174,10 +186,11 @@ class Videos:
         w0, h0, fps, n = self.meta[j.video]
         start, end = jc.clip_range(j, fps, n)
         w, h = jc.display_size(w0, h0)
-        frames = lm.decode_frames(self.guards[j.video].check(), fps, start, end - start + 1, w, h,
-                                  f"join {k + 1}", min_frames=j.first2 - start + 1)
+        n_want = end - start + 1
+        buf, got = lm.decode_raw(self.guards[j.video].check(), fps, start, n_want, w, h, f"join {k + 1}",
+                                 min_frames=n_want)      # the whole clip, or the U-only "cannot show" state
         b1, b2 = self.boxes[k]
-        return jc.build_clip(k, frames, start, j, b1, b2, w0, w, h, fps, jc.step_for(fps))
+        return jc.build_clip(k, buf, got, start, j, b1, b2, w0, w, h, fps, jc.step_for(fps))
 
 
 class JoinApp(label_moments.App):
@@ -188,6 +201,7 @@ class JoinApp(label_moments.App):
     VALUES = jc.VALUES
     CANT_TELL = "U"
     HOLD_MS = 2500
+    ITEM = "join"
     HELP = ("S = SAME person     D = DIFFERENT person (other boxer, referee, anyone)     U = can't tell\n"
             "<- / Backspace = previous     -> = next     Space = replay     E = first unanswered     "
             "Q / Esc = quit (saved)")
@@ -229,10 +243,14 @@ class JoinApp(label_moments.App):
             return CYAN_HEX, "end of fragment 1 (cyan box)"
         if part == 2:
             return YELLOW_HEX, "start of fragment 2 (yellow box)"
-        return label_moments.GREY, f"gap: {c.gap_frames} frames with neither fragment"
+        return label_moments.GREY, "gap: neither fragment is tracked"
 
-    def frame_ms(self, c):
-        return max(1, int(round(1000 / c.fps)))
+    def frame_ms(self, c, j):
+        return c.ms[j]
+
+    def first_view(self):
+        """The clip plays once before the still is held; answers count only from the still (the gate's order)."""
+        self._play(0)
 
     def status_text(self):
         s = self.s
@@ -256,8 +274,14 @@ def open_sample(d: Path):
 def cmd_check(a) -> int:
     d = check_out_dir(a.dir)
     sample, answers = open_sample(d)
+    lock = None if a.dry else jc.SessionLock(d / ANSWERS_NAME)
     print(f"checking {len({j.video for j in sample.joins})} videos and their tracks ...")
-    videos = Videos(sample, a.data, a.tracks)
+    try:
+        videos = Videos(sample, a.data, a.tracks)
+    except BaseException:
+        if lock:
+            lock.close()
+        raise
     try:
         if a.dry:
             k = answers.first_empty() or 0
@@ -271,8 +295,8 @@ def cmd_check(a) -> int:
         app = JoinApp(root, session, sample, videos)
         root.mainloop()
         if not app.closed:
-            print("NOT saved from this window: the answers file changed underneath it, so it was not overwritten. "
-                  "Run `verify`, then the same command again.", file=sys.stderr)
+            print("the window closed without its final save (answers given before then are saved). Run `verify`, "
+                  "then the same command again.", file=sys.stderr)
             return 3
         c = answers.counts()
         print(f"saved: {sample.n - c['empty']} of {sample.n} answered; minutes so far {session.minutes():.1f}")
@@ -280,6 +304,8 @@ def cmd_check(a) -> int:
         return 0
     finally:
         videos.close()
+        if lock:
+            lock.close()
 
 
 def cmd_verify(a) -> int:

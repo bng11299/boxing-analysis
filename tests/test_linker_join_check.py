@@ -78,6 +78,7 @@ REVEALING_KEYS = {"chain", "chains", "boxer", "identity", "identities", "cost", 
                   "membership", "objective"}
 
 tmp = Path(tempfile.mkdtemp(prefix="linker_join_check_test_"))
+cli.RESULTS_ROOTS = [tmp / "results"]          # the tests' own results/ folder stands in for the repo's
 MAN = frozenset({"V1", "V2", "V3"})
 H64 = "a" * 64
 
@@ -171,11 +172,11 @@ check("all gaps equal: everything is short, still 100", len(same) == 100 and cs[
 print("the sample file")
 
 
-def per_video(joins_by_vid, positions=None, fps=50.0, n_frames=40_000):
+def per_video(joins_by_vid, positions=None, fps=50.0, n_frames=40_000, minutes=10.0):
     pv = {}
     for v, js in joins_by_vid.items():
         pv[v] = {"joins": js, "positions": positions if positions is not None else [[k, 1] for k in range(24)],
-                 "chain_minutes": 10.0, "camera": "kam2" if v != "V3" else "kam4", "fps": fps,
+                 "chain_minutes": minutes, "camera": "kam2" if v != "V3" else "kam4", "fps": fps,
                  "n_frames": n_frames, "tracks_sha256": H64, "video_fp": "b" * 64}
     return pv
 
@@ -211,7 +212,8 @@ check("nothing in the sample file names a chain, a boxer, a cost or a jump", not
       str(keys & REVEALING_KEYS))
 check("each join stores only video, the two ids and the two boundary frames",
       all(set(e) == jc.JOIN_KEYS for e in smp["joins"]))
-check("the strata are stored apart from the joins", len(smp["strata"]) == 100 and "stratum" not in smp["joins"][0])
+check("the strata are not stored at all (the score derives them from the gaps)",
+      "strata" not in smp and "stratum" not in smp["joins"][0])
 
 d = tmp / "results" / "ljc"
 d.mkdir(parents=True)
@@ -219,6 +221,7 @@ sp = d / cli.SAMPLE_NAME
 jc.write_new(sp, jc.sample_bytes(smp))
 S = jc.load_sample(sp, MAN)
 check("the sample loads back whole", S.n == 100 and list(S.joins) == [jc.Join(**e) for e in smp["joins"]])
+check("the loaded sample offers no stratum to the window", not hasattr(S, "strata"))
 raises("a sample is written once (no redraw)", lambda: jc.write_new(sp, b"{}"), contains="already exists")
 
 
@@ -245,9 +248,30 @@ raises("a video outside the manifest is refused",
 raises("a join naming an unknown video is refused",
        tampered(lambda x: x["joins"][0].update(video="V9")), contains="manifest")
 raises("a duplicated join is refused", tampered(lambda x: x["joins"].__setitem__(1, x["joins"][0])), contains="twice")
-raises("n not matching the joins is refused", tampered(lambda x: x.update(n=99)), contains="match")
-raises("an unknown stratum is refused", tampered(lambda x: x["strata"].__setitem__(0, "mid")), contains="stratum")
+raises("n other than the gate's 100 is refused", tampered(lambda x: x.update(n=99)), contains="seed and n")
+raises("a seed other than the gate's is refused", tampered(lambda x: x.update(seed=7)), contains="seed and n")
+raises("a dropped join is refused", tampered(lambda x: x["joins"].pop()), contains="does not match")
+raises("an edited p* is refused (an inflated p* would make any answers 'acceptable')",
+       tampered(lambda x: x["frame"].update(p_star=0.5)), contains="p*")
+raises("positions edited to move p* are refused", tampered(lambda x: x["videos"]["V1"].update(positions=[[1, 1]])),
+       contains="p*")
+raises("a non-numeric position is refused",
+       tampered(lambda x: x["videos"]["V1"].update(positions=[["1", 1]])), contains="whole number")
+raises("frame totals that do not add up are refused", tampered(lambda x: x["frame"].update(joins=301)),
+       contains="add up")
+raises("strata counts that do not follow from the median are refused",
+       tampered(lambda x: x["frame"].update(n_short=x["frame"]["n_short"] + 1, n_long=x["frame"]["n_long"] - 1)),
+       contains="strata")
+raises("a moved median gap is refused", tampered(lambda x: x["frame"].update(median_gap=99)), contains="strata")
+raises("a changed misattribution target is refused",
+       tampered(lambda x: x["frame"].update(target_misattribution=0.5)), contains="target")
+raises("negative chain minutes are refused", tampered(lambda x: x["videos"]["V1"].update(chain_minutes=-1)),
+       contains="chain minutes")
+raises("an odd camera name is refused", tampered(lambda x: x["videos"]["V1"].update(camera="Brown")),
+       contains="camera")
 raises("a bad hash is refused", tampered(lambda x: x["videos"]["V1"].update(tracks_sha256="zz")), contains="sha256")
+raises("a sample is checked before it is written (parse_sample on bytes)",
+       lambda: jc.parse_sample(b'{"format": "x"}', MAN), contains="not a linker-join sample")
 (d / "nj.json").write_text("not json")
 raises("not JSON is refused", lambda: jc.load_sample(d / "nj.json", MAN), contains="JSON")
 (d / "big.json").write_bytes(b" " * (jc.MAX_SAMPLE_BYTES + 1))
@@ -273,7 +297,7 @@ ses2 = jc.Session(A2, clock=Clock())
 check("a new session resumes at the first unanswered join", ses2.i == 2 and A2.values[:2] == ["S", "D"])
 check("time spent so far is kept across sessions", 0.1 < A2.prior_minutes() < 0.2, str(A2.prior_minutes()))
 raises("an answer other than S / D / U is refused", lambda: A2.set_value(3, "L"), ValueError)
-other = jc.build_sample(per_video(byv), MAN, seed=7)
+other = jc.build_sample(per_video(byv, minutes=11.0), MAN)
 (d / "other.json").write_bytes(jc.sample_bytes(other))
 S_other = jc.load_sample(d / "other.json", MAN)
 raises("answers cannot be resumed into a different sample", lambda: jc.AnswerFile.load(ap_, S_other),
@@ -291,6 +315,13 @@ raises("an out-of-range minutes value is refused", lambda: jc.AnswerFile.load(d 
 stale = jc.Session(jc.AnswerFile.load(ap_, S), clock=Clock())
 ses2.label("U")
 raises("a stale session cannot overwrite newer answers", lambda: stale.label("S"), lm.FileChanged)
+lock = jc.SessionLock(ap_)
+raises("a second check window on the same answers file is refused (no lost-update race)",
+       lambda: jc.SessionLock(ap_), contains="already has")
+lock.close()
+lock2 = jc.SessionLock(ap_)
+check("once the first window lets go, a new one may open", lock2._f is not None)
+lock2.close()
 check("... and the newer answer is still there", jc.AnswerFile.load(ap_, S).values[2] == "U")
 bclk = Clock()
 bs = jc.Session(jc.AnswerFile.load(ap_, S), clock=bclk)
@@ -386,11 +417,16 @@ if have_ffmpeg:
     check("the clip runs from 1 s before fragment 1 ends to 1 s after fragment 2 starts",
           (start, end) == (51, 169), f"{start}, {end}")
     w, h = jc.display_size(W, H)
-    frames = lm.decode_frames(vid, FPS, start, end - start + 1, w, h, "join 1", min_frames=join.first2 - start + 1)
-    clip = jc.build_clip(0, frames, start, join, b1, b2, W, w, h, FPS, jc.step_for(FPS))
+    buf, got = lm.decode_raw(vid, FPS, start, end - start + 1, w, h, "join 1", min_frames=end - start + 1)
+    clip = jc.build_clip(0, buf, got, start, join, b1, b2, W, w, h, FPS, jc.step_for(FPS))
     arr = [np.frombuffer(f, np.uint8).reshape(h, w, 3) for f in clip.frames]
     idx = [read_index(a) for a in arr]
-    check("every other frame at 50 fps, played at 25 fps", clip.fps == 25.0 and len(arr) < 70, str(len(arr)))
+    check("every other frame at 50 fps", len(arr) < 70, str(len(arr)))
+    check("playback is real time: the frames' durations add up to the clip's length",
+          sum(clip.ms) == (end - start + 1) * 1000 // FPS, f"{sum(clip.ms)} ms")
+    b = idx.index(100)
+    check("a boundary frame off the step grid is not shown at half speed (Astra)",
+          clip.ms[b - 1] == 20 and clip.ms[b] == 20, str(clip.ms[b - 1:b + 2]))
     check("the last frame of fragment 1 and the first of fragment 2 are both in the clip",
           100 in idx and 120 in idx, str(idx[:5]))
     check("the frames are in order and are the frames asked for", idx == sorted(idx) and idx[0] == 51, str(idx[:3]))
@@ -410,8 +446,8 @@ if have_ffmpeg:
           read_index(left) == 100 and read_index(right) == 120)
     check("... cyan on the left, yellow on the right", has(left, CYAN) and not has(left, YELLOW)
           and has(right, YELLOW) and not has(right, CYAN))
-    raises("a decode that stops before fragment 2 is refused",
-           lambda: lm.decode_frames(vid, FPS, 250, 30, w, h, "join 1", min_frames=30), contains="could not decode")
+    raises("a decode that stops before the clip's end is refused (a truncated clip is U-only)",
+           lambda: lm.decode_raw(vid, FPS, 250, 30, w, h, "join 1", min_frames=30), contains="could not decode")
 else:
     skip("the clip tests", "ffmpeg not on PATH")
 
@@ -428,7 +464,9 @@ if have_ffmpeg:
            lambda: lm.VideoGuard(outside, data_root, path_check=cli.data_path_check(data_root)),
            contains="under the data folder")
 raises("the output folder must be under results/", lambda: cli.check_out_dir(tmp / "docs"), contains="results")
-check("a folder under results/ is accepted", cli.check_out_dir(d) == d.resolve())
+raises("a results/ folder somewhere else is not this repo's", lambda: cli.check_out_dir(tmp / "x" / "results" / "y"),
+       contains="results")
+check("a folder under this repo's results/ is accepted", cli.check_out_dir(d) == d.resolve())
 
 # ---- 8. the window --------------------------------------------------------------------------------
 print("the window")
@@ -452,7 +490,7 @@ class FakeVideos:
         if k == 2:
             raise lm.Refused("ffmpeg could not decode join 3")
         return jc.JoinClip(k, clip.width, clip.height, clip.fps, clip.start_f, clip.frames, clip.part,
-                           clip.gap_frames, clip.still, clip.still_width)
+                           clip.ms, clip.still, clip.still_width)
 
     def max_display(self):
         return clip.width, clip.height
@@ -491,9 +529,11 @@ if root is not None and clip is not None:
 
     check("the first join loads", pump(app, lambda: app.clip is not None))
     grab()
-    check("it opens on the side-by-side still", app.photos.get("still") is not None
-          and str(app.image.cget("image")) == str(app.photos["still"]))
-    check("answers are ignored until the join has been on screen", app.handle("S") == "too-soon")
+    check("it opens by playing the clip, not on the still", "still" not in app.photos and app.shown_at is None)
+    check("answers are ignored while the clip plays the first time", app.handle("S") == "too-soon")
+    check("the still is held after one full play", pump(app, lambda: app.photos.get("still") is not None)
+          and str(app.image.cget("image")) == str(app.photos["still"]) and app.shown_at is not None)
+    grab()
     wclk.t += 1.0
     check("#35's L key answers nothing here", app.on_key(Ev("l")) is None and A3.values[0] == "")
     check("? is not an answer here either", app.on_key(Ev("question")) is None)
@@ -503,8 +543,11 @@ if root is not None and clip is not None:
     check("the clip's captions name the fragments and the gap only",
           {app.play_view(app.clip, j)[1].split(" (")[0].split(":")[0] for j in range(len(app.clip.frames))}
           == {"end of fragment 1", "gap", "start of fragment 2"})
+    check("no caption gives the gap's length (it would reveal the stratum)",
+          not any(re.search(r"\d", app.play_view(app.clip, j)[1].replace("fragment 1", "").replace("fragment 2", ""))
+                  for j in range(len(app.clip.frames))))
     app.on_release(Ev("s"))
-    pump(app, lambda: app.armed)
+    pump(app, lambda: app.armed and app.shown_at is not None)
     wclk.t += 1.0
     check("D answers 'different'", app.on_key(Ev("d")) == "D" and A3.values[1] == "D")
     app.on_release(Ev("d"))
@@ -512,11 +555,13 @@ if root is not None and clip is not None:
     pump(app, lambda: app.shown_at is not None)
     wclk.t += 1.0
     grab()
-    check("a join that cannot be decoded shows nothing", app.clip is None and "cannot show" in app.caption.cget("text"))
+    check("a join that cannot be decoded shows nothing, and says Space retries",
+          app.clip is None and "cannot show this join" in app.caption.cget("text")
+          and "Space retries" in app.caption.cget("text"))
     check("... and only U can be given for it", app.handle("S") == "not-shown" and app.handle("U") == "U"
           and A3.values[2] == "U")
     app.on_release(Ev("u"))
-    pump(app, lambda: app.armed and app.clip is not None)
+    pump(app, lambda: app.armed and app.shown_at is not None)
     for _ in range(26):
         wclk.t += 119.0
         ses3.tick()

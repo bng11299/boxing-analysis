@@ -72,6 +72,7 @@ class App:
     VALUES = lm.VALUES              # the answers a key can give
     CANT_TELL = "?"                 # the only answer allowed when nothing could be shown
     HOLD_MS = HOLD_MS               # how long the held picture stays, before and after the clip
+    ITEM = "moment"                 # what one row is called in messages
     HELP = ("L = A on the LEFT of the picture     R = A on the RIGHT of the picture     ? = can't tell\n"
             "<- / Backspace = previous     -> = next     Space = replay     E = first empty     Q / Esc = quit (saved)")
 
@@ -137,8 +138,12 @@ class App:
         a, b = c.start_f / c.fps, (c.start_f + len(c.frames) - 1) / c.fps
         return RED if j == c.centre else GREY, f"playing {a:.1f} s to {b:.1f} s  (red = t {c.t} s)"
 
-    def frame_ms(self, c):
+    def frame_ms(self, c, j):
         return max(1, int(1000 / c.fps))
+
+    def first_view(self):
+        """What a newly loaded item starts with: here the held red frame; answers count from the first hold."""
+        self._hold()
 
     def status_text(self):
         s = self.s
@@ -191,14 +196,15 @@ class App:
                 self.cache[t] = self.pending.pop(t).result()
             except Exception as e:     # noqa: BLE001 -- Refused, or ffmpeg failing to start: never stall
                 why = str(e) if isinstance(e, lm.Refused) else "the video could not be decoded"
-                self.caption.config(text=f"cannot show this moment ({why}). Press {self.CANT_TELL} (can't tell) "
-                                         "or move on.", fg="white")
+                self.caption.config(text=f"cannot show this {self.ITEM} ({why}). Space retries; "
+                                         f"{self.CANT_TELL} (can't tell) if it keeps failing, or move on.",
+                                    fg="white")
                 self.shown_at = self.clock()           # only CANT_TELL and moves are accepted: see handle()
                 return
         self.clip = self.cache[t]
         if self.s.i + 1 < self.s.n:
             self._request(self.key(self.s.i + 1))      # decode the next moment while this one is judged
-        self._hold()
+        self.first_view()
 
     def _hold(self):
         photo, border, text, fg = self.hold_view(self.clip)
@@ -218,7 +224,7 @@ class App:
         self.frame.config(bg=border)
         self.image.config(image=self._photo(j))
         self.caption.config(text=text, fg="white")
-        self.after_id = self.root.after(self.frame_ms(c), lambda: self._play(j + 1))
+        self.after_id = self.root.after(self.frame_ms(c, j), lambda: self._play(j + 1))
 
     def _update_status(self):
         self.status.config(text=self.status_text() + (f"\n{self.message}" if self.message else ""))
@@ -271,7 +277,7 @@ class App:
             self.armed = False
             self.answer_code = self._press_code
             if self.s.done():
-                self.message = f"All {self.s.n} moments answered and saved. Q to finish, or <- to review."
+                self.message = f"All {self.s.n} {self.ITEM}s answered and saved. Q to finish, or <- to review."
         elif action == "quit":
             return self.quit()
         else:
