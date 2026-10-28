@@ -59,6 +59,46 @@ number reaches tuning, or a second held-out run is made after seeing the first.
 - **Housekeeping:** a `git add -A` swept the untracked local Codex config (`.codex/`, `AGENTS.md`) into
   an unpushed commit; removed before anything left this machine.
 
+## Iteration 2
+- **Review (Astra, round 2): FIX FIRST**, 1 blocking, 1 non-blocking; round-1 fixes confirmed.
+  1. (blocking) The held-out run validated the arm's rule file, then later passed the FILE NAME to the
+     end-to-end stage, which re-read it: a retune finishing in between could make the finder numbers and
+     the end-to-end numbers describe different arms. Now the held-out run reads each rule file once,
+     checks its sha256 and writes a frozen byte copy; every later stage reads only the copy, and the
+     classified rows are checked against the in-memory rule. Tuning re-checks the started marker just
+     before it writes anything.
+  2. (non-blocking) A NaN baseline threshold escaped the pin (`abs(NaN - x) > 1e-9` is False). Now refused.
+- **Test gap found while fixing:** neither script's `main()` success path had ever run in a test. Added
+  stubbed whole-path runs: tuning on synthetic cross-then-shorter-jab combinations (492 grid points written,
+  an unaligned video excluded and listed, V6 kept out of F1, both arms find more jabs than the pooled rule)
+  and the held-out run to a written verdict, with the order baseline-reproduced -> marker -> arm asserted.
+- **Tests:** fast_combinations 78/78, fastcombo_eval 91/91. **Mutation:** 5 more (the arm's end-to-end
+  stage reads the original file; no late marker check; NaN accepted; freeze skips its sha256 check;
+  freeze returns the original path): 5 of 5 caught.
+
+## Iteration 3
+- **Fresh clone at `a849e21`:** 14 suites, all exit 0 (fast_combinations 78, fastcombo_eval 91, hands 99,
+  report 289, classify 297, e2e 74, analyse_clip 113, pipeline 314, boxers 167, completeness_credited 95,
+  frame_skips 222, linking 266, render_punches 66, ring 219).
+- **Review (Astra, round 3): FIX FIRST**, 2 blocking:
+  1. Two concurrent held-out invocations shared one frozen-copy folder, so the second could overwrite the
+     first's copy before the first claimed the marker. Now each invocation writes into its own folder
+     (`tempfile.mkdtemp` under `--e2e-dir`), recorded as `run_dir` in the result.
+  2. **The tests touched real experiment state**: one section restored the real marker path, then created
+     and deleted the marker there, and one call wrote a frozen copy under the checkout's `results/`.
+     Confirmed: a `results/fast_combinations_e2e/frozen/baseline_rule.json` (the test's own fixture) was
+     in the worktree; removed. Now the marker points at a temp folder from the first line of the test
+     file to the last, the tests run from a temp working directory, every call passes temp outputs, and
+     a final check asserts the checkout's `results/` is unchanged and no real marker exists.
+- **Tests:** fastcombo_eval 93/93. **Mutation:** shared run folder: caught. **Total 25 of 25.**
+- **Fresh clone at `614b947` (final):** fast_combinations 78, fastcombo_eval 93, hands 99, report 289,
+  classify 297, e2e 74, analyse_clip 113, pipeline 314; the same numbers as the working tree; no
+  `results/` folder created in the clone.
+- **Cap reached (3 iterations).** Round 3's two fixes are verified by tests, a mutant and the fresh clone,
+  but have NOT had a fourth Astra review. Astra could never run the tests itself ("Access is denied" in its
+  sandbox, all three rounds) and could not independently confirm scipy tie-equivalence at runtime; the
+  300-signal randomized test (ties and plateaus included) covers it here.
+
 ## Residuals (accepted)
 - Results files are gitignored (`results/`), so the tune JSON lives on disk only: copy its chosen point
   and the arm into the PR when tuning runs, before the held-out run.
