@@ -40,7 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi.classify import training_geometry, write_manifest  # noqa: E402
-from boxingvi.data import HELD_OUT_VIDEOS, load_corpus, split_by_video, to_arrays  # noqa: E402
+from boxingvi.data import PIPELINE_HELD_OUT_VIDEOS, load_corpus, split_pipeline, to_arrays  # noqa: E402
 from boxingvi.stgcnpp import PRETRAINED  # noqa: E402
 from run_baseline import run_stgcnpp  # noqa: E402
 
@@ -98,7 +98,8 @@ def main(argv=None) -> int:
     seed, t_out = 0, 50
     variant = json.loads(a.rule.read_text(encoding="utf-8"))["chosen"]["variant"]
     clips = load_corpus(a.data)
-    train, val = split_by_video(clips)
+    # The checkpoint's own split, kept so it reproduces; NOT athlete-disjoint (O55).
+    train, val = split_pipeline(clips)
     geom = training_geometry(train, variant)
     print(f"window geometry from {geom.n_clips} training clips: {geom}")
     print(f"  -> {geom.n_frames} frames per window at {geom.fps:.3f} fps")
@@ -114,7 +115,7 @@ def main(argv=None) -> int:
     tmp = a.out.with_name(a.out.name + ".partial")
     r = run_stgcnpp(xtr, ytr, xva, yva, epochs=epochs, seed=seed, t_out=t_out,
                     pretrained=a.pretrained, spec=PRETRAINED[SPEC], save_to=tmp)
-    print(f"held out {'/'.join(HELD_OUT_VIDEOS)}: accuracy {r['accuracy']:.4f}, macro F1 {r['macro_f1']:.4f} "
+    print(f"held out {'/'.join(PIPELINE_HELD_OUT_VIDEOS)}: accuracy {r['accuracy']:.4f}, macro F1 {r['macro_f1']:.4f} "
           f"(reported {ref['accuracy']:.4f} / {ref['macro_f1']:.4f})")
     if abs(r["accuracy"] - ref["accuracy"]) > TOL or abs(r["macro_f1"] - ref["macro_f1"]) > TOL:
         tmp.unlink(missing_ok=True)
@@ -122,7 +123,7 @@ def main(argv=None) -> int:
         return 1
     tmp.replace(a.out)
     m = write_manifest(a.out.with_suffix(".json"), a.out, geom, t_out, {
-        "trained_on": "BoxingVI video-disjoint training side; held out " + "/".join(HELD_OUT_VIDEOS),
+        "trained_on": "BoxingVI video-disjoint training side; held out " + "/".join(PIPELINE_HELD_OUT_VIDEOS),
         "seed": seed, "epochs": epochs,
         "held_out": held_out_block(r),
         "reproduces": str(a.reference.as_posix()),

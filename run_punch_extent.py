@@ -46,7 +46,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi import classify, punchfind  # noqa: E402
-from boxingvi.data import HELD_OUT_VIDEOS, load_corpus, load_v6_spans, load_v6_track, split_by_video  # noqa: E402
+from boxingvi.data import PIPELINE_HELD_OUT_VIDEOS, load_corpus, load_v6_spans, load_v6_track, split_pipeline  # noqa: E402
 from classify_punches import span_peak  # noqa: E402
 
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
     if rule["variant"] != geom.variant:
         raise SystemExit("the finder's rule and the classifier's window use different wrist-speed variants")
 
-    train, _ = split_by_video(load_corpus(a.data))
+    train, _ = split_pipeline(load_corpus(a.data))   # the classifier checkpoint's training side
     ratios = classify.training_extent_ratios(train, geom.variant, punchfind.WIDTH_FRAC)
     print(f"from {ratios['n_clips']} training clips with a whole speed peak ({ratios['n_censored']} cut by the "
           f"clip's edge, left out): a punch runs {ratios['lead_widths']:.2f} peak-widths before its peak "
@@ -135,7 +135,7 @@ def main(argv=None) -> int:
 
     out = {"rule": "extent = [peak - lead_widths * width, peak + tail_widths * width]; width = time the punching "
                    "wrist holds >= frac of its peak speed",
-           **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(HELD_OUT_VIDEOS),
+           **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(PIPELINE_HELD_OUT_VIDEOS),
            "tested_on": "V6", "fps": track.fps, "v6": {}, "v6_clip_cut": clip._asdict(),
            "pipeline_cut": "per clip: every punch read over the median of the clip's own punch extents"}
     for name, w in (("first_half", tuple(r["tune_window"])), ("second_half", tuple(r["test_window"]))):

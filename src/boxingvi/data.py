@@ -271,13 +271,37 @@ _LABEL_ALIASES = {
 
 VIDEOS = tuple(f"V{i}" for i in range(1, 11))
 
-# Held out for validation. Chosen ONCE, on label distribution alone and before
-# any model was fit: 979 clips (20.5%, against the paper's 20.3% train/val
-# ratio) with every one of the six classes represented at least 51 times. It is
-# a video-disjoint split standing in for a subject-disjoint one, which is the
-# closest approximation the release permits. It is NOT the official split and
+# Who is on screen in each video. The release carries no subject ids (vault
+# ISSUES-LOG O10), so this is the stand-in: Brendan watched all ten videos on
+# 2026-10-27 (ISSUES-LOG O55) and found one instructor per video, with two
+# people appearing twice -- V1/V6 (one coach) and V2/V3 (another). A person's
+# id is the videos they appear in, so every results file says which videos
+# were grouped without a lookup. This map is the ONLY place that knowledge
+# lives; every split that claims to be athlete-disjoint goes through it.
+PERSON_OF_VIDEO = {
+    "V1": "V1+V6", "V6": "V1+V6",
+    "V2": "V2+V3", "V3": "V2+V3",
+    "V4": "V4", "V5": "V5", "V7": "V7", "V8": "V8", "V9": "V9", "V10": "V10",
+}
+if set(PERSON_OF_VIDEO) != set(VIDEOS):   # a new video must be watched before it is split
+    raise RuntimeError("PERSON_OF_VIDEO does not cover exactly the corpus videos")
+
+# Held out for the headline: athlete-disjoint (O55). It is the original
+# V2/V5/V9 hold-out with V3 added, because V3 shows the same instructor as V2;
+# nothing else was chosen, and no test result was looked at to choose it.
+# 1,787 of 4,757 clips (37.6%). It stands in for the paper's subject-disjoint
+# split, which the release cannot reproduce: it is NOT the official split and
 # no number computed on it should be described as one.
-HELD_OUT_VIDEOS = ("V2", "V5", "V9")
+HELD_OUT_VIDEOS = ("V2", "V3", "V5", "V9")
+
+# The split the pipeline's classifier checkpoint (weights/classifier, seed 0)
+# was trained and gated on, kept so that checkpoint and every row derived from
+# it (extent rule, pose switch, V6, end to end, own footage) still reproduce.
+# Chosen once, on label distribution alone, before any model was fit. It is
+# video-disjoint but NOT athlete-disjoint: V2 is held out while V3, the same
+# instructor, trains (O55). Its V5 and V9 scores are unaffected -- each is one
+# person seen nowhere else. Use `split_pipeline`, never `split_by_video`.
+PIPELINE_HELD_OUT_VIDEOS = ("V2", "V5", "V9")
 
 
 def _normalise_label(raw: object) -> "str | None":
@@ -566,34 +590,86 @@ def load_corpus(root: Path, include_v6: bool = False) -> "list[Clip]":
     return clips
 
 
-def split_by_video(clips, held_out: tuple = HELD_OUT_VIDEOS):
-    """Video-disjoint split, the stand-in for the unavailable official one.
+def person_of(video: str) -> str:
+    """The person on screen in `video` (PERSON_OF_VIDEO). An unknown id is
+    refused: guessing it is a person of its own is exactly how a repeat
+    athlete would slip across a split unnoticed."""
+    p = PERSON_OF_VIDEO.get(video) if isinstance(video, str) else None
+    if p is None:
+        raise ValueError(f"unknown video id {video!r}: not in PERSON_OF_VIDEO, so "
+                         "who is in it is unknown and it cannot be split by person")
+    return p
 
-    No clip from a held-out video appears in training. This is weaker than
-    subject-disjoint -- if one athlete appears in two videos they straddle the
-    fold -- but it is the strongest guarantee the release supports, and it is
-    strictly better than a clip-level split, which leaks by construction.
-    """
+
+def person_key(clip) -> str:
+    """Group key for leave-persons-out CV (`group_folds`, `cv_splits`)."""
+    return person_of(clip.source)
+
+
+def _split_videos(clips, held_out: tuple):
+    held = set(held_out)
     present = {c.source for c in clips}
-    missing = sorted(set(held_out) - present)
+    missing = sorted(held - present)
     if missing:
         raise ValueError(f"held-out videos absent from the corpus: {missing}")
-    train = [c for c in clips if c.source not in set(held_out)]
-    val = [c for c in clips if c.source in set(held_out)]
+    train = [c for c in clips if c.source not in held]
+    val = [c for c in clips if c.source in held]
     if not train or not val:
         raise ValueError("split produced an empty side")
     return train, val
 
 
+def split_by_video(clips, held_out: tuple = HELD_OUT_VIDEOS):
+    """Athlete-disjoint, video-level split: the stand-in for the unavailable
+    official subject-disjoint one.
+
+    No clip from a held-out video appears in training, and -- checked on the
+    split actually returned, not assumed from the constants -- no person
+    (PERSON_OF_VIDEO) appears on both sides. A held-out set that takes one of
+    a person's videos and leaves another in training is refused, as is any
+    video id the person map does not know. Strictly better than a clip-level
+    split, which leaks by construction.
+    """
+    for v in held_out:
+        person_of(v)
+    train, val = _split_videos(clips, held_out)
+    tr_people = {person_of(c.source) for c in train}
+    va_people = {person_of(c.source) for c in val}
+    both = sorted(tr_people & va_people)
+    if both:
+        where = "; ".join(
+            f"{p}: " + "/".join(sorted({c.source for c in train if person_of(c.source) == p}))
+            + " in training, " + "/".join(sorted({c.source for c in val if person_of(c.source) == p}))
+            + " held out" for p in both)
+        raise ValueError("held-out set splits a person across train and test "
+                         f"({where}); hold out all of a person's videos (O55)")
+    return train, val
+
+
+def split_pipeline(clips):
+    """The pipeline checkpoint's split (PIPELINE_HELD_OUT_VIDEOS): video-disjoint
+    but NOT athlete-disjoint (V2 held out, V3 trains; O55). Only for code that
+    must reproduce or gate that checkpoint. No headline number comes from it."""
+    for v in PIPELINE_HELD_OUT_VIDEOS:
+        person_of(v)
+    return _split_videos(clips, PIPELINE_HELD_OUT_VIDEOS)
+
+
 def _group_order(g: str) -> tuple:
-    # V2 before V10: numeric where the id has a number, so the tie-break is the
-    # order a person reading the corpus would expect, not string order.
-    digits = "".join(ch for ch in g if ch.isdigit())
+    # V2 before V10: numeric on the id's first number, so the tie-break is the
+    # order a person reading the corpus would expect, not string order. The
+    # first number, not all digits joined: a person id "V2+V3" sorts as 2.
+    digits = ""
+    for ch in g:
+        if ch.isdigit():
+            digits += ch
+        elif digits:
+            break
     return (int(digits) if digits else -1, g)
 
 
 def group_folds(clips, k: int = 3, key=lambda c: c.source) -> list[tuple[str, ...]]:
-    """Partition the groups (videos) into k folds for leave-groups-out CV.
+    """Partition the groups (videos, or persons via person_key) into k folds for leave-groups-out CV.
 
     The assignment is LABEL-BLIND by construction: it reads only how many clips
     each group has. Groups go largest first to whichever fold currently holds
