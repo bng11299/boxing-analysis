@@ -108,3 +108,14 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   (backgrounds, stillness, floors, evaluation reports, self-check) is ignored; nothing derived is tracked.
 - Inputs bound to their video by content fingerprint before anything is left out; duplicate ids and recordings refused.
 - No secrets, no network, no pickles, no participant footage touched.
+
+## Iteration 6 (click window only; 2026-10-27)
+- Brendan could not see where to click. Measured on his screen (1920x1080, Tk scaling 1.33): the window showed the
+  frame at 1/2 (960x540), so the posts' feet were a few pixels wide, and a Tk window started from a terminal can
+  open behind it.
+- Fix: the picture is the largest of 1, 3/4, 2/3, 1/2, 1/3, 1/4 that fits the screen with the window's lines
+  (`display_fit`; 3/4 = 1440x810 here, window 1440x913 measured); the window opens at the top-left and is pulled
+  to the front once; crosshair cursor; numbered points; a counter ("at least 3 needed" / "Enter saves"); plainer
+  instructions (posts' feet, and where the floor leaves the picture). Nothing about the floor rule, the file, the
+  gate or the evaluator changed. Tests: 212 (the size rule on his screen, a 150% laptop screen, the fallback, the
+  click mapping and edge snap at 3/4, the counter).

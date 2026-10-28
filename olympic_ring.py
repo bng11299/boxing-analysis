@@ -176,11 +176,26 @@ def cmd_prepare(a) -> int:
 # ================================================================ click
 
 SNAP_DISPLAY_PX = 10
+# Display sizes tried, largest first, as (zoom, subsample): Tk resizes photos only by whole numbers, so 3/4 is
+# zoom 3 then subsample 4. On a 1920x1080 screen a 1920x1080 frame shows at 3/4 (1440x810); at 1/2 (the old
+# rule) the corner posts were too small to click on.
+DISPLAY_RATIOS = ((1, 1), (3, 4), (2, 3), (1, 2), (1, 3), (1, 4))
+WINDOW_CHROME_PX = 180  # title bar, the instruction lines above the picture, and the taskbar
 
 
-def display_to_frame(x: float, y: float, scale: int, width: int, height: int) -> "tuple[float, float]":
-    """A click on the shrunken image -> frame pixels, held inside the frame; within SNAP_DISPLAY_PX of an
-    edge it snaps onto the edge (that is how a floor that runs off the frame is closed)."""
+def display_fit(width: int, height: int, screen_w: int, screen_h: int) -> "tuple[int, int]":
+    """The largest (zoom, subsample) whose picture fits the screen with the window's own lines around it."""
+    avail_w, avail_h = screen_w * 0.95, max(screen_h - WINDOW_CHROME_PX, 1)
+    for z, s in DISPLAY_RATIOS:
+        if width * z / s <= avail_w and height * z / s <= avail_h:
+            return z, s
+    return 1, max(1, math.ceil(max(width / avail_w, height / avail_h)))
+
+
+def display_to_frame(x: float, y: float, scale: float, width: int, height: int) -> "tuple[float, float]":
+    """A click on the resized picture (`scale` frame pixels per screen pixel) -> frame pixels, held inside the
+    frame; within SNAP_DISPLAY_PX of an edge it snaps onto the edge (that is how a floor that runs off the frame
+    is closed)."""
     dw, dh = width / scale, height / scale
     x = 0.0 if x <= SNAP_DISPLAY_PX else float(width) if x >= dw - SNAP_DISPLAY_PX else x * scale
     y = 0.0 if y <= SNAP_DISPLAY_PX else float(height) if y >= dh - SNAP_DISPLAY_PX else y * scale
@@ -192,9 +207,13 @@ def click_order(vids) -> "list[str]":
     return sorted(vids, key=lambda v: (v not in DEV_VIDEOS, v))
 
 
-INSTRUCTIONS = ("Click around the RING FLOOR (the canvas inside the ropes), at floor level, corner to corner. "
-                "Where the floor runs off the picture, click on the picture's edge (clicks near an edge snap to it). "
-                "Left click: add  |  Right click or Backspace: undo  |  Enter: save  |  Esc: skip video  |  q: quit")
+INSTRUCTIONS = ("Outline the RING FLOOR (the canvas inside the ropes) at floor level, going round it in order. "
+                "Click where each corner post stands on the floor (estimate it when the post hides it). The corner "
+                "nearest the camera is usually below the picture: there, click where each floor edge leaves the "
+                "picture, on the picture's edge (a click within 10 px of an edge snaps onto it, and near a corner of "
+                "the picture onto that corner). Usually 4 to 6 points.\n"
+                "Left click: add point   |   Right click or Backspace: undo   |   Enter: save and next video   |   "
+                "Esc: skip video   |   q: quit (run the command again to resume)")
 
 
 class FloorClicker:
@@ -206,10 +225,13 @@ class FloorClicker:
         self.tk, self.root, self.todo, self.still = tk, root, list(todo), still
         self.floors, self.floors_path, self.prep_dir, self.clock = floors, floors_path, prep_dir, clock
         self.i, self.pts, self.t0, self.img, self.scale, self.done = 0, [], 0.0, None, 1, False
-        tk.Label(root, text=INSTRUCTIONS, wraplength=1200, justify="left").pack()
-        self.status = tk.Label(root, text="", fg="red")
-        self.status.pack()
-        self.canvas = tk.Canvas(root)
+        self.help = tk.Label(root, text=INSTRUCTIONS, wraplength=1200, justify="left", font=("Segoe UI", 10))
+        self.help.pack(anchor="w", padx=6)
+        self.count = tk.Label(root, text="", font=("Segoe UI", 10, "bold"))
+        self.count.pack(anchor="w", padx=6)
+        self.status = tk.Label(root, text="", fg="red", font=("Segoe UI", 10, "bold"))
+        self.status.pack(anchor="w", padx=6)
+        self.canvas = tk.Canvas(root, cursor="crosshair", highlightthickness=0)
         self.canvas.pack()
         self.show()
 
@@ -225,8 +247,11 @@ class FloorClicker:
         img = self.tk.PhotoImage(file=str(self.prep_dir / f"{self.video}.background.png"))
         if (img.width(), img.height()) != (e["width"], e["height"]):
             raise ValueError(f"{self.video}: background image is not {e['width']}x{e['height']}: run prepare again")
-        self.scale = max(1, math.ceil(e["width"] / (self.root.winfo_screenwidth() * 0.9)))
-        self.img = img.subsample(self.scale) if self.scale > 1 else img
+        z, s = display_fit(e["width"], e["height"], self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        self.scale = s / z
+        big = img.zoom(z) if z > 1 else img
+        self.img = big.subsample(s) if s > 1 else big
+        self.help.config(wraplength=max(self.img.width() - 12, 400))
         self.pts, self.t0 = [], self.clock()
         self.canvas.config(width=self.img.width(), height=self.img.height())
         self.canvas.delete("all")
@@ -234,16 +259,23 @@ class FloorClicker:
         split = "development" if self.video in DEV_VIDEOS else "held-out"
         self.root.title(f"Ring floor: {self.video} ({split}), {self.i + 1} of {len(self.todo)}")
         self.status.config(text="")
+        self.redraw()
 
     def redraw(self) -> None:
         self.canvas.delete("poly")
         d = [(x / self.scale, y / self.scale) for x, y in self.pts]
         for k, (x, y) in enumerate(d):
-            self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, outline="yellow", width=2, tags="poly")
             if k:
                 self.canvas.create_line(*d[k - 1], x, y, fill="yellow", width=2, tags="poly")
         if len(d) > 2:
             self.canvas.create_line(*d[-1], *d[0], fill="yellow", dash=(4, 4), tags="poly")
+        for k, (x, y) in enumerate(d):
+            self.canvas.create_oval(x - 5, y - 5, x + 5, y + 5, outline="black", fill="yellow", width=1, tags="poly")
+            self.canvas.create_text(x + 9, y - 9, text=str(k + 1), fill="yellow", anchor="sw",
+                                    font=("Segoe UI", 11, "bold"), tags="poly")
+        n = len(d)
+        self.count.config(text=f"{n} point{'s' if n != 1 else ''}" + (" - Enter saves" if n >= ring.MIN_POINTS else
+                                                                      f" - at least {ring.MIN_POINTS} needed"))
 
     def add(self, x: float, y: float) -> None:
         if self.video is None:
@@ -300,6 +332,14 @@ def cmd_click(a) -> int:
         return 0
     root = tk.Tk()
     fc = FloorClicker(root, todo, still, floors, a.floors, a.prep_dir)
+    # Started from a terminal, a Tk window can open BEHIND it: pull it to the front once, then let it behave
+    # like any other window.
+    root.geometry("+0+0")
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(800, lambda: root.attributes("-topmost", False))
+    root.focus_force()
+    print(f"the click window is open ('Ring floor: {todo[0]} ...'; if you cannot see it, look in the taskbar)")
 
     def after(action):
         def handler(ev=None):

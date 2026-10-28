@@ -357,6 +357,18 @@ check("a click maps back to frame pixels by the shrink factor", olympic_ring.dis
 check("a click within 10 px of the left/top edge snaps onto it", olympic_ring.display_to_frame(8, 3, 2, 1920, 1080) == (0.0, 0.0))
 check("a click within 10 px of the right/bottom edge snaps onto it", olympic_ring.display_to_frame(955, 535, 2, 1920, 1080) == (1920.0, 1080.0))
 check("a click past the image is held inside the frame", olympic_ring.display_to_frame(2000, -50, 1, 1920, 1080) == (1920.0, 0.0))
+check("REAL FACT: an Olympic frame on Brendan's 1920x1080 screen shows at 3/4 (1440x810), not 1/2, and the window "
+      "(picture + its lines) still fits the screen's height",
+      olympic_ring.display_fit(1920, 1080, 1920, 1080) == (3, 4) and 810 + olympic_ring.WINDOW_CHROME_PX <= 1080)
+check("a small frame shows at full size", olympic_ring.display_fit(640, 360, 1920, 1080) == (1, 1))
+check("a 150%-scaled laptop screen (1280x720 logical) gets the largest size that fits: 1/2",
+      olympic_ring.display_fit(1920, 1080, 1280, 720) == (1, 2))
+check("a frame too big for every listed size falls back to a whole-number shrink that fits",
+      olympic_ring.display_fit(4000, 4000, 1920, 1080) == (1, 5))
+check("a click at 3/4 size maps back to frame pixels (720, 405 -> 960, 540)",
+      olympic_ring.display_to_frame(720, 405, 4 / 3, 1920, 1080) == (960.0, 540.0))
+check("... and at 3/4 size the right/bottom edges still snap (1435, 805 -> 1920, 1080)",
+      olympic_ring.display_to_frame(1435, 805, 4 / 3, 1920, 1080) == (1920.0, 1080.0))
 check("development videos are clicked first", olympic_ring.click_order(["GH088416", "GH159681", "GH078416", "GH199681"])[:2]
       == ["GH078416", "GH159681"])
 
@@ -636,8 +648,10 @@ gui_floors = tmp / "gui" / "floors.json"
 ticks = iter([100.0, 107.25, 200.0, 260.0, 300.0])
 fc = olympic_ring.FloorClicker(root, ["GH078416", "GH069681"], st, {}, gui_floors, prep, clock=lambda: next(ticks))
 check("the first video is shown at full size on a wide screen (640 px image, scale 1)", fc.video == "GH078416" and fc.scale == 1)
+check("the counter says how many points are still needed before Enter can save", "at least 3 needed" in fc.count.cget("text"))
 for x, y in [(100, 100), (500, 100), (500, 300), (5, 300)]:
     fc.add(x, y)
+check("... and once there are enough, that Enter saves", fc.count.cget("text") == "4 points - Enter saves")
 check("a click near the left edge snaps onto it", fc.pts[-1] == (0.0, 300.0))
 fc.undo()
 fc.add(100, 300)
