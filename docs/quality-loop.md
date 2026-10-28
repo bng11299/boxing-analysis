@@ -36,4 +36,5 @@ Records are in log order (some iterations live inside another feature's record).
 - 2026-10-19 — [`feat/analyse-clip`](quality/analyse-clip.md)
 - 2026-10-24 — [`olympic-swap-rate`](quality/olympic-swap-rate.md)
 - 2026-10-25 — [`feat/per-boxer-report`](quality/per-boxer-report.md)
+- 2026-10-23 — [`feat/glove-identity`](quality/glove-identity.md)
 - 2026-10-26 — [`feat/pose-watcher`](quality/pose-watcher.md)

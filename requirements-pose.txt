@@ -5,3 +5,6 @@
 # which requires torch>=2.14 and replaces the CUDA torch with a CPU-only one.
 ultralytics==8.4.171
 torchvision==0.28.0
+# ByteTrack (`run_ingest.py --track`) imports lap. ultralytics installs it on first use when online, but
+# never with YOLO_OFFLINE=1 (set for participant footage), so pin it here (2026-10-26, desktop blur venv).
+lap==0.5.13
