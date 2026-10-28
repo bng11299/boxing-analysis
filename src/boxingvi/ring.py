@@ -52,6 +52,7 @@ ENTRY_KEYS = frozenset({"points", "width", "height", "video_fp", "click_s"})
 STILL_SAMPLES = 24                # frames sampled evenly across the video
 STILL_QUANTILE = 90               # one bad frame (a body filling the view) must not condemn a video
 STILL_REF_SAMPLES = 3             # the camera's starting position: the median of the first 3 samples
+MIN_TEXTURE = 2.0                 # grey-level standard deviation below which an image has nothing to correlate
 SHIFT_SCALE = 2                   # phase correlation on a half-size grey image
 SAMPLE_TIMEOUT_S = 120
 
@@ -348,6 +349,15 @@ def camera_motion(frames: "list[np.ndarray]") -> dict:
     if len(frames) < STILL_REF_SAMPLES:
         raise ValueError(f"need at least {STILL_REF_SAMPLES} frames")
     ref = _grey_small(background(frames[:STILL_REF_SAMPLES]))
-    shifts = [math.hypot(*phase_shift(ref, _grey_small(f))) * SHIFT_SCALE for f in frames]
+    # A textureless image has no phase to correlate: every shift would read 0 px (Astra, review 4: a white square
+    # moving over black). Such a comparison is UNMEASURABLE and counts as the largest possible move, so the video
+    # is left out rather than passed as still.
+    worst = math.hypot(*frames[0].shape[:2])
+    if ref.std() < MIN_TEXTURE:
+        return {"motion_px": worst, "max_px": worst, "samples": len(frames)}
+    shifts = []
+    for f in frames:
+        g = _grey_small(f)
+        shifts.append(worst if g.std() < MIN_TEXTURE else math.hypot(*phase_shift(ref, g)) * SHIFT_SCALE)
     return {"motion_px": float(np.percentile(shifts, STILL_QUANTILE)), "max_px": float(max(shifts)),
             "samples": len(shifts)}

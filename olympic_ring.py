@@ -50,7 +50,13 @@ STILLNESS_FORMAT = "boxing-comps camera stillness v1"
 STILL_KEYS = frozenset({"video_fp", "width", "height", "motion_px", "max_px", "samples"})
 
 # ---- pre-registered (docs/gates/ring-floor-filter.md); changing any of these after a held-out number is a new gate
-STILL_MAX_PX = 20.0                      # camera motion above this: the video is left out of BOTH arms
+# ADR-0013's held-out manifest: the 29 Olympic videos minus DEV_VIDEOS. A held-out run needs EXACTLY these ids
+# (Astra, review 4: a count of 25 would let a substitute stand in for a missing video).
+HELD_OUT_VIDEOS = frozenset({
+    "GH088416", "GH098416", "GH108416", "GH118416", "GH138416", "GH148416", "GH158416", "GH168416", "GH178416",
+    "GH188416", "GH198416", "GH208416", "GH218416", "GH079681", "GH089681", "GH099681", "GH109681", "GH119681",
+    "GH129681", "GH139681", "GH149681", "GH169681", "GH179681", "GH189681", "GH199681"})
+STILL_MAX_PX = 20.0                     # camera motion above this: the video is left out of BOTH arms
 MARGIN_GRID = (-30.0, -15.0, 0.0, 15.0, 30.0, 60.0)
 DEV_MAX_DROPPED_CREDITED = 0.005         # dev rule: the margin may drop at most 0.5% of credited punches
 FROZEN_MARGIN_PX: "float | None" = None  # set by the commit that freezes the dev choice; None = held-out refused
@@ -76,14 +82,18 @@ LINK_PARAMS = linking.LinkParams(reacquire_s=0.0)
 def _inside_repo_ok(path: Path) -> None:
     """Derived Olympic files may live only in the gitignored data/ or results/ (or outside the repo). The folder
     is resolved, the file name is not: the writer replaces a link planted at the name instead of following it,
-    so the name's own location is what must be checked (Astra, review 3)."""
-    p = Path(path).parent.resolve() / Path(path).name
-    try:
-        rel = p.relative_to(ROOT)
-    except ValueError:
-        return
-    if not rel.parts or rel.parts[0] not in ("data", "results"):
-        raise ValueError(f"{path}: derived Olympic files go under data/ or results/, never elsewhere in the repo")
+    so the name's own location is what must be checked (Astra, review 3). The fully resolved path is checked too:
+    a folder output (`results/..`) or a junction under results/ pointing into docs/ must not pass (review 4)."""
+    path = Path(path)
+    if path.name in ("", ".", ".."):
+        raise ValueError(f"{path}: name a file or folder, not '{path.name or path}'")
+    for p in (path.parent.resolve() / path.name, path.resolve()):
+        try:
+            rel = p.relative_to(ROOT)
+        except ValueError:
+            continue
+        if not rel.parts or rel.parts[0] not in ("data", "results"):
+            raise ValueError(f"{path}: derived Olympic files go under data/ or results/, never elsewhere in the repo")
 
 
 def load_stillness(path) -> dict:
@@ -417,6 +427,7 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
                                              "linked_ue_filtered": list(_linked_ue(f["linked"]))}
     ok = [i for i, r in enumerate(rows) if r["video"] not in out["baseline_failed"] and r["video"] not in out["newly_failed"]]
     out["videos_compared"] = len(ok)
+    g3 = [i for i, r in enumerate(rows) if r["video"] not in out["baseline_failed"]]
     if not ok:
         return out
     for name, arm in (("baseline", base), ("filtered", filt)):
@@ -432,7 +443,9 @@ def summarise_margin(rows: "list[dict]", m: float) -> dict:
             "linked_unexplained_per_exposure_min": lt["unexplained_per_exposure_min"],
             "linked_unexplained": lt["unexplained"], "linked_exposure_boxer_min": lt["exposure_boxer_min"],
             "credited_path_unexplained_per_exposure_min": ct["unexplained_per_exposure_min"],
-            "credited_share": _share(sum(arm[i]["credited"] for i in ok), sum(arm[i]["events"] for i in ok)),
+            # attribution runs before linking, so a video that fails only when filtered still has its credited
+            # share: G3b pools over every video whose baseline ran, as G2 and G3a do (Astra, review 4)
+            "credited_share": _share(sum(arm[i]["credited"] for i in g3), sum(arm[i]["events"] for i in g3)),
             "rows": sum(arm[i]["rows"] for i in ok),
             "link_coverage": _share(sum(l["credited_in_a"] + l["credited_in_b"] for l in links), cp),
             "ab_noncredited_share": _share(sum(l["ab_noncredited_person_frames"] for l in links),
@@ -534,8 +547,10 @@ def cmd_evaluate(a) -> int:
     else:
         tasks = [t for t in tasks if t.video.stem not in DEV_VIDEOS]
         margins = (FROZEN_MARGIN_PX,)
-        if len(tasks) != 29 - len(DEV_VIDEOS):
-            raise ValueError(f"held-out needs all {29 - len(DEV_VIDEOS)} held-out tables, found {len(tasks)}")
+        have = {t.video.stem for t in tasks}
+        if have != HELD_OUT_VIDEOS:      # membership, not a count
+            raise ValueError(f"held-out needs exactly the {len(HELD_OUT_VIDEOS)} held-out tables: missing "
+                             f"{sorted(HELD_OUT_VIDEOS - have)}, not in the manifest {sorted(have - HELD_OUT_VIDEOS)}")
     # Every input is bound to the video it describes BEFORE anything is left out: a stale stillness entry from
     # another recording must stop the run, not quietly drop a video (Astra, review 1).
     fps = {t.video.stem: all_fps[t.video.stem] for t in tasks}

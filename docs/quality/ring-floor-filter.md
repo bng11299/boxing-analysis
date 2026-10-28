@@ -77,3 +77,16 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   | 7 | The duplicate-recording test could pass without its guard | duplicate checks run first over the whole dataset; tests assert each reason; synthetic dev set is now four distinct recordings |
 
   193 checks pass after the fixes.
+## Iteration 4
+- Fresh clone at `ac91dfb`: all 21 Python suites green (3,313 checks; `test_ring` 193).
+- **Astra review 4** (on `ac91dfb`): **FIX FIRST**, 4 blocking + 1 should-fix; source-derived.
+
+  | # | Finding | Resolution |
+  |---|---|---|
+  | 1 | G3b pooled only videos that linked in both arms: a video whose credited people were all removed (linker fails) left G3b's denominator | G3b pools every video whose baseline ran (attribution precedes linking); test: the lost credits halve the share and G3b fails |
+  | 2 | Iteration 3's guard regressed folders: `--out-dir results/..` reaches the repo root; a junction under results/ into docs/ passes | both the folder-resolved name and the fully resolved path are checked; `.`/`..` names refused; tests (links simulated: no symlink privilege here) |
+  | 3 | Held-out checks a count of 25, not membership: a substitute recording can stand in for a missing video | `HELD_OUT_VIDEOS`, ADR-0013's 25 ids, required exactly; test with a substitute |
+  | 4 | A textureless starting reference reads any motion as 0 px | a reference or frame under 2 grey levels of texture is unmeasurable and counts as the largest move; tests |
+  | 5 | The no-symlink fallback test passed with or without the fix | replaced by a simulated link through `Path.resolve`, which the old check fails |
+
+  201 checks pass after the fixes.

@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import math
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -309,6 +310,18 @@ mh = ring.camera_motion(halves)
 check("REGRESSION (GH208416): a camera in two positions for half the video each is caught, not averaged to 0 px",
       mh["motion_px"] == 30, str(mh))
 raises("fewer frames than the starting reference needs is refused", lambda: ring.camera_motion(still[:2]), "at least 3")
+sq_frames = []
+for k in range(24):
+    f = np.zeros((120, 160, 3), np.uint8)
+    x = (20, 60, 100)[k % 3]
+    f[50:70, x:x + 20] = 255
+    sq_frames.append(f)
+msq = ring.camera_motion(sq_frames)
+check("ASTRA 4.4: a textureless starting reference (a white square moving over black) is UNMEASURABLE and reads as the "
+      "largest move, never as 0 px", msq["motion_px"] > olympic_ring.STILL_MAX_PX and msq["motion_px"] == math.hypot(120, 160), str(msq))
+flat_one = still[:23] + [np.zeros_like(rgb)]
+check("one black frame among 23 textured ones is one unmeasurable sample, which the 90th percentile tolerates",
+      ring.camera_motion(flat_one)["motion_px"] == 0 and ring.camera_motion(flat_one)["max_px"] == math.hypot(120, 160))
 moved = np.roll(rgb, 25, axis=1)
 early2 = [rgb, rgb] + [moved] * 22
 check("a camera that moves after the second sample (the first ~8% elsewhere) is caught: 22 of 24 frames off the start",
@@ -371,16 +384,42 @@ try:
     except OSError:                                    # Windows without developer mode cannot make links
         made = False
     if made:
-        raises("ASTRA 3.6: a link planted at docs/...json pointing outside the repo is still refused (the name is checked)",
+        raises("ASTRA 3.6: a real link planted at docs/...json pointing outside the repo is refused (the name is checked)",
                lambda: olympic_ring._inside_repo_ok(link_name), "never elsewhere")
     else:
-        raises("ASTRA 3.6 (no symlink privilege here): the guard checks the name's folder, not a resolved target",
-               lambda: olympic_ring._inside_repo_ok(link_name), "never elsewhere")
+        print("  note  no symlink privilege here: the link cases below are simulated through Path.resolve")
 finally:
     if link_name.is_symlink() or link_name.exists():
         link_name.unlink()
     if link_dir.exists():
         link_dir.rmdir()
+
+# Links simulated without privilege (ASTRA 4.5): a Path whose resolve() follows a planted link.
+LINKS = {}
+
+
+class _LinkedPath(type(Path())):
+    def resolve(self, strict=False):
+        return LINKS.get(str(self), super().resolve(strict))
+
+
+real_path = olympic_ring.Path
+olympic_ring.Path = _LinkedPath
+try:
+    LINKS.clear()
+    LINKS[str(ROOT / "docs" / "leak.json")] = tmp / "outside.json"            # a file link: docs -> outside
+    raises("ASTRA 3.6 / 4.5: a FILE link at docs/leak.json pointing outside is refused (the old full-resolve-only check passed it)",
+           lambda: olympic_ring._inside_repo_ok(_LinkedPath(ROOT / "docs" / "leak.json")), "never elsewhere")
+    LINKS.clear()
+    LINKS[str(ROOT / "results" / "jn" / "leak.json")] = ROOT / "docs" / "leak.json"   # a folder junction: results/jn -> docs
+    raises("ASTRA 4.2: a path under results/ that resolves into docs/ (a junction) is refused",
+           lambda: olympic_ring._inside_repo_ok(_LinkedPath(ROOT / "results" / "jn" / "leak.json")), "never elsewhere")
+finally:
+    olympic_ring.Path = real_path
+    LINKS.clear()
+raises("ASTRA 4.2: an output folder 'results/..' (the repo root) is refused",
+       lambda: olympic_ring._inside_repo_ok(Path("results") / ".."), "not '..'")
+raises("... and so is a bare '.'", lambda: olympic_ring._inside_repo_ok(Path(".")), "")
 raises("write_png refuses a float image", lambda: olympic_ring.write_png(tmp / "x.png", np.zeros((4, 4, 3))), "uint8 RGB")
 raises("write_png refuses a grey image", lambda: olympic_ring.write_png(tmp / "x.png", np.zeros((4, 4), np.uint8)), "uint8 RGB")
 
@@ -706,6 +745,16 @@ newly["video"] = "GH138416"
 newly["margins"][0.0]["arm"]["linked_error"] = "planted"
 newly["margins"][0.0].update(credited_dropped=3)
 sn = olympic_ring.summarise_margin([real, newly], 0.0)
+killed = copy.deepcopy(real)
+killed["video"] = "GH159681"
+killed["margins"][0.0]["arm"]["credited"] = 0                      # every credited person removed ...
+killed["margins"][0.0]["arm"]["linked_error"] = "no fragment has a usable body"   # ... so its linker fails
+sk = olympic_ring.summarise_margin([real, killed], 0.0)
+want = real["margins"][0.0]["arm"]["credited"] / (2 * real["margins"][0.0]["arm"]["events"])
+check("ASTRA 4.1: G3b counts a video that fails only when filtered: its lost credits halve the filtered share and G3b FAILS",
+      sk["newly_failed"] == ["GH159681"] and math.isclose(sk["filtered"]["credited_share"], want)
+      and math.isclose(sk["baseline"]["credited_share"], real["base"]["credited"] / real["base"]["events"])
+      and olympic_ring.verdict(sk)["gate"]["G3b_credited_share"] is False, str(sk["filtered"]["credited_share"]))
 check("a video that fails only when filtered is G3c's failure AND stays in the filter's cost (G3a)",
       sn["newly_failed"] == ["GH138416"] and sn["credited_dropped"] == 3 and sn["videos_compared"] == 1
       and olympic_ring.verdict(sn)["gate"]["G3c_no_new_failures"] is False)
@@ -762,9 +811,31 @@ try:
     rc, err = run_quiet(ev_args + ["--split", "heldout"])
     check("ASTRA 3.2: held-out with any punch rule but the registered one is refused", rc == 1 and "registered punch rule" in err, err)
     rc, err = run_quiet(ev_args[:-1] + [str(rule_reg), "--split", "heldout"])
-    check("held-out without all 25 held-out tables is refused (no partial verdict)", rc == 1 and "held-out tables" in err, err)
+    check("held-out without the 25 held-out tables is refused (no partial verdict)", rc == 1 and "held-out tables" in err, err)
+    # ASTRA 4.3: membership, not a count. The manifest names GH999998; the data offers GH999999 instead.
+    ds_sub, trk_sub = tmp / "ds_sub", tmp / "trk_sub"
+    shutil.copytree(ds, ds_sub)
+    shutil.copytree(trk, trk_sub)
+    (ds_sub / "task_kam2_gh999999" / "data").mkdir(parents=True)
+    v_sub = make_video(ds_sub / "task_kam2_gh999999" / "data" / "GH999999.mp4", None, 11)
+    scene_table("GH999999.mp4", fingerprint(v_sub)).save(trk_sub / "GH999999.tracks.npz")
+    shutil.copy(ds / "task_kam2_gh078416" / "annotations.json", ds_sub / "task_kam2_gh999999" / "annotations.json")
+    real_manifest = olympic_ring.HELD_OUT_VIDEOS
+    olympic_ring.HELD_OUT_VIDEOS = frozenset({"GH999998"})
+    try:
+        rc, err = run_quiet(["evaluate", "--data", str(ds_sub), "--tracks", str(trk_sub), "--floors", str(floors_p),
+                             "--prep-dir", str(prep), "--rule", str(rule_reg), "--split", "heldout"])
+    finally:
+        olympic_ring.HELD_OUT_VIDEOS = real_manifest
+    check("ASTRA 4.3: a substitute recording cannot stand in for a missing held-out video (the manifest, not a count)",
+          rc == 1 and "GH999998" in err and "GH999999" in err, err)
 finally:
     olympic_ring.FROZEN_MARGIN_PX = real_frozen
+check("the held-out manifest is ADR-0013's: the 29 Olympic ids minus the 4 development ones, 25 ids",
+      len(olympic_ring.HELD_OUT_VIDEOS) == 25 and not (olympic_ring.HELD_OUT_VIDEOS & olympic_ring.DEV_VIDEOS)
+      and olympic_ring.HELD_OUT_VIDEOS == olympic_ring.DEV_VIDEOS.__class__(
+          {"GH0%d8416" % c if c < 10 else "GH%d8416" % c for c in range(7, 22)}
+          | {"GH0%d9681" % c if c < 10 else "GH%d9681" % c for c in range(6, 20)}) - olympic_ring.DEV_VIDEOS)
 rc, err = run_quiet(ev_args + ["--split", "dev", "--margin", "0", "--write-filtered", str(trk)])
 check("--write-filtered onto the baseline tables is refused", rc == 1 and "overwrite the baseline" in err, err)
 rc, err = run_quiet(ev_args + ["--split", "dev", "--write-filtered", str(tmp / "wf")])
@@ -801,8 +872,6 @@ mv = json.loads(mv_out.read_text(encoding="utf-8")) if mv_out.is_file() else {}
 check("ASTRA 2.2: every video left out still writes a report (no video compared, no margin chosen), not an IndexError",
       rc == 0 and mv.get("videos") == [] and mv.get("left_out_camera_moves") == sorted(st)
       and mv.get("selected_margin_px") is None, err)
-import shutil  # noqa: E402
-
 trk3 = tmp / "tracks_three"
 shutil.copytree(trk, trk3)
 (trk3 / "GH159681.tracks.npz").unlink()
