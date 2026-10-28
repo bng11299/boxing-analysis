@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -113,7 +114,7 @@ def sha256(p: Path) -> str:
 def baseline_rule(path: Path) -> dict:
     r = find_punches.load_rule(path)
     if ("finder" in r or r["variant"] != fc.VARIANT or r["min_gap_s"] != fc.MIN_GAP_S
-            or abs(r["threshold"] - fc.BASELINE_THRESHOLD) > 1e-9):
+            or not math.isfinite(r["threshold"]) or abs(r["threshold"] - fc.BASELINE_THRESHOLD) > 1e-9):
         raise SystemExit(f"{path} is not the pooled V6 rule the gate compares against")
     return r
 
@@ -183,6 +184,9 @@ def main(argv=None) -> int:
     print(f"control (pooled, threshold re-tuned {control['threshold']}): training F1 {_f(control['f1'])}")
     print(f"CHOSEN: {arm}")
 
+    # Checked again just before anything is written: a held-out run that started while this ran must
+    # not have its rule file replaced under it (it also reads only a frozen copy).
+    refuse_if_started()
     a.rule_out.parent.mkdir(parents=True, exist_ok=True)
     a.rule_out.write_text(json.dumps({
         "chosen": {**{k: r[k] for k in ("variant", "threshold", "min_gap_s")}, "finder": r["finder"],

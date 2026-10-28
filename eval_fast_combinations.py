@@ -23,6 +23,7 @@ blocks within each video, the same blocks for both finders.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -47,18 +48,32 @@ E2E_VIDEOS = e2e.VIDEOS        # ("V5", "V9")
 NAMED, NLAB = 0, 1             # columns of a named-right count row
 
 
-def read_tune(tune_path: Path, rule_path: Path) -> "tuple[dict, dict]":
+def freeze(path: Path, want_sha256: "str | None", dest: Path) -> Path:
+    """Read `path` ONCE, check its sha256, and write exactly those bytes to `dest`, which every
+    later stage reads instead. A file replaced on disk mid-run (a retune, an edit) cannot change
+    what is scored after it was checked."""
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != want_sha256:
+        raise SystemExit(f"REFUSED: {path} is not the file tuning recorded (sha256 differs)")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+    return dest
+
+
+def read_tune(tune_path: Path, rule_path: Path, frozen: Path) -> "tuple[dict, str, dict, Path]":
+    """(tune record, its sha256, the chosen rule, the frozen copy of the rule file). The tune file
+    is read once; the rule file is frozen into `frozen` and loaded from there."""
     if not tune_path.is_file():
         raise SystemExit(f"REFUSED: no {tune_path}; run tune_fast_combinations.py on the training videos first")
-    t = json.loads(tune_path.read_text(encoding="utf-8"))
+    raw = tune_path.read_bytes()
+    t = json.loads(raw.decode("utf-8"))
     if not isinstance(t, dict) or t.get("chosen_arm") not in fc.ARMS:
         raise SystemExit(f"REFUSED: {tune_path} names no chosen arm")
-    if tune.sha256(rule_path) != t.get("rule_file_sha256"):
-        raise SystemExit(f"REFUSED: {rule_path} is not the rule file tuning wrote (sha256 differs)")
-    rule = find_punches.load_rule(rule_path)
+    rule_copy = freeze(rule_path, t.get("rule_file_sha256"), frozen / "arm_rule.json")
+    rule = find_punches.load_rule(rule_copy)
     if rule.get("finder", {}).get("mode") != t["chosen_arm"] or rule != t.get("chosen_rule"):
         raise SystemExit(f"REFUSED: {rule_path} does not hold the arm {tune_path.name} chose")
-    return t, rule
+    return t, hashlib.sha256(raw).hexdigest(), rule, rule_copy
 
 
 def named_counts(v: fc.Video, rows: "list[dict]") -> np.ndarray:
@@ -114,21 +129,23 @@ def check_named_reproduction(nb: "dict[str, np.ndarray]") -> int:
     return named
 
 
-def mark_started(t: dict, tune_path: Path) -> None:
+def mark_started(t: dict, tune_sha256: str) -> None:
     """Create the started marker, atomically and only if absent: a second run, a run with another
     --out, a retune, and a run that crashed half way are all refused from now on."""
     tune.STARTED.parent.mkdir(parents=True, exist_ok=True)
     try:
         with tune.STARTED.open("x", encoding="utf-8") as f:
-            json.dump({"tune_file_sha256": tune.sha256(tune_path), "arm": t["chosen_arm"],
+            json.dump({"tune_file_sha256": tune_sha256, "arm": t["chosen_arm"],
                        "head": tune._git("rev-parse", "HEAD")}, f)
     except FileExistsError:
         raise SystemExit(f"REFUSED: {tune.STARTED} exists; the held-out run has already started") from None
 
 
-def run_e2e(a, rule_path: Path, out_dir: Path, sha: str, videos: "dict[str, fc.Video]") -> "dict[str, list[dict]]":
+def run_e2e(a, rule_path: Path, out_dir: Path, sha: str, videos: "dict[str, fc.Video]",
+            rule: dict) -> "dict[str, list[dict]]":
     """The pipeline end to end on V5+V9 through eval_pipeline_v5v9.main (finder, then the
-    classifier), with this rule; returns each video's classified rows, read back checked."""
+    classifier), with the FROZEN rule file; the classified rows are read back checked against
+    `rule`, the rule validated at the start, not a fresh read of any file."""
     if e2e.main(["--data", str(a.data), "--poses", str(a.poses), "--classifier", str(a.classifier),
                  "--stance", a.stance, "--rule", str(rule_path), "--out-dir", str(out_dir)]):
         raise SystemExit(f"eval_pipeline_v5v9.py failed with {rule_path.name}")
@@ -136,7 +153,7 @@ def run_e2e(a, rule_path: Path, out_dir: Path, sha: str, videos: "dict[str, fc.V
     for v in E2E_VIDEOS:
         rows[v] = e2e.read_classified(out_dir / "punches" / f"{v}.classified.csv",
                                       out_dir / "punches" / f"{v}.classified.json", v, videos[v].n_frames, videos[v].fps, a.stance,
-                                      sha, find_punches.load_rule(rule_path))
+                                      sha, rule)
     return rows
 
 
@@ -158,15 +175,15 @@ def main(argv=None) -> int:
     if a.out.exists():
         raise SystemExit(f"REFUSED: {a.out} exists. The held-out run is done once; a second run with other "
                          "settings is not allowed by the gate")
-    t, arm_rule = read_tune(a.tune, a.rule)
+    frozen = a.e2e_dir / "frozen"
+    t, tune_sha, arm_rule, arm_path = read_tune(a.tune, a.rule, frozen)
     commit = tune.gate_commit()
     if commit != t.get("gate_commit"):
         raise SystemExit(f"REFUSED: the gate changed since tuning ({t.get('gate_commit')} -> {commit})")
     if list(bdata.HELD_OUT_VIDEOS) != t.get("held_out_videos_at_tuning"):
         raise SystemExit("REFUSED: the held-out list differs from the one recorded at tuning")
-    base_rule = tune.baseline_rule(a.baseline)
-    if tune.sha256(a.baseline) != t.get("baseline_rule_sha256"):
-        raise SystemExit(f"REFUSED: {a.baseline} is not the baseline tuning compared against")
+    base_path = freeze(a.baseline, t.get("baseline_rule_sha256"), frozen / "baseline_rule.json")
+    base_rule = tune.baseline_rule(base_path)
     held = sorted(bdata.HELD_OUT_VIDEOS, key=tune.video_order)
     if set(held) & set(t.get("tuned_on", [])):
         raise AssertionError("a held-out video was tuned on")
@@ -190,12 +207,12 @@ def main(argv=None) -> int:
     base_c = {v: fc.counts(vd, fc.detections(vd, base_rule)) for v, vd in loaded.items()}
     check_finder_reproduction(fc.total(base_c, E2E_VIDEOS))
     sha = classify.read_manifest(a.classifier)["sha256"]
-    rows_b = run_e2e(a, a.baseline, a.e2e_dir / "baseline", sha, loaded)
+    rows_b = run_e2e(a, base_path, a.e2e_dir / "baseline", sha, loaded, base_rule)
     nb = {v: named_counts(loaded[v], rows_b[v]) for v in E2E_VIDEOS}
     named_b = check_named_reproduction(nb)
 
     # From here the arm is scored: mark the one held-out run as started, at a path no option moves.
-    mark_started(t, a.tune)
+    mark_started(t, tune_sha)
     ctl = t["control"]
     ctl_rule = fc.rule(ctl["threshold"], None)
     arm_c = {v: fc.counts(vd, fc.detections(vd, arm_rule)) for v, vd in loaded.items()}
@@ -209,7 +226,7 @@ def main(argv=None) -> int:
     ver = fc.verdict(arm_t, base_t, diffs["f1"])
 
     # End to end on V5+V9 (the classifier checkpoint's own held-out videos).
-    rows_a = run_e2e(a, a.rule, a.e2e_dir / "arm", sha, loaded)
+    rows_a = run_e2e(a, arm_path, a.e2e_dir / "arm", sha, loaded, arm_rule)
     na = {v: named_counts(loaded[v], rows_a[v]) for v in E2E_VIDEOS}
     labels_e2e = int(sum(c[:, NLAB].sum() for c in nb.values()))
     end_to_end = {"videos": list(E2E_VIDEOS), "labelled": labels_e2e,
@@ -217,7 +234,7 @@ def main(argv=None) -> int:
                   "difference_share": paired_named_ci(na, nb)}
 
     out = {"gate": str(tune.GATE), "gate_commit": commit, "head": tune._git("rev-parse", "HEAD"),
-           "tune_file_sha256": tune.sha256(a.tune), "arm": t["chosen_arm"], "arm_rule": arm_rule,
+           "tune_file_sha256": tune_sha, "arm": t["chosen_arm"], "arm_rule": arm_rule,
            "baseline_rule": base_rule, "control_rule": ctl_rule, "held_out": held, "videos": checks,
            "excluded": excluded, "reproduction": {"reference": {k: list(v) if isinstance(v, tuple) else v
                                                                 for k, v in REFERENCE.items()}, "ok": True},
