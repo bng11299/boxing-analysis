@@ -119,3 +119,31 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   instructions (posts' feet, and where the floor leaves the picture). Nothing about the floor rule, the file, the
   gate or the evaluator changed. Tests: 212 (the size rule on his screen, a 150% laptop screen, the fallback, the
   click mapping and edge snap at 3/4, the counter).
+
+## Development run: floors, self-check, margin grid -> STOP (2026-10-27)
+- **Floors.** Brendan clicked all 27 still videos in 329 s (dev four: 129 s); 5-6 points each, every polygon 31-33%
+  of its frame, and each camera's floors agree within ~30 px. GH188416 and GH208416 left out (camera moves).
+- **Self-check (gate, "Baseline").** The evaluator's dev baseline equals `olympic_completeness.py --only <dev>`:
+  linked 652 unexplained, 36.837 per exposure-minute; credited path 45.465. Equal at the reported precision.
+- **Margin grid** (`results/olympic_ring/dev_grid.json`, rule = REGISTERED_RULE), pooled over the four dev videos:
+
+  | margin | credited punches dropped (worst video) | non-boxer person-frames removed | linked unexplained / exp-min |
+  |---|---|---|---|
+  | -30 | 10.2% (13.7%) | 80.0% | 36.837 -> 41.875 |
+  | -15 | 7.9% (9.5%) | 79.5% | 36.837 -> 41.875 |
+  | 0 | 4.6% (6.8%) | 75.4% | 36.837 -> 42.595 |
+  | +15 | 4.3% (6.1%) | 60.1% | 36.837 -> 34.969 |
+  | +30 | 3.3% (4.1%) | 52.0% | 36.837 -> 36.193 |
+  | +60 | 2.0% (3.4%) | 28.2% | 36.837 -> 35.494 (0.96 [0.92, 1.13]) |
+
+- **Selection: none.** The gate's bar is at most 0.5% of dev credited punches dropped; the best margin drops 2.0%.
+  Per the gate ("If no margin qualifies, the experiment stops there"), the experiment stops: `FROZEN_MARGIN_PX`
+  stays unset, so the held-out run refuses to start, and no held-out video was evaluated. No margin outside the
+  grid was tried.
+- **Why credits are lost (+60 px, 8 punches on 4 tracks):** every one is a track whose box bottom sits 70-150 px
+  beyond the FAR edge of the floor (GH069681 one track, 288 rows, 5 punches; GH159681 three tracks, 3-436 rows). A
+  boxer at the far ropes with hidden feet, or a punch credited to a spectator just behind: the labels cannot tell.
+  Either way the feet cue fails at the far ropes, the same place the pixel mask failed.
+- **Also on dev:** where the filter removes most bystanders (0 to +30 px) the linked burst rate does not fall
+  (34.969-42.595 against 36.837), and at +60 linking coverage falls (69.1% -> 62.4%) while the A/B share on
+  uncredited ids rises (24.3% -> 26.5%). Design numbers only; not evidence.
