@@ -771,18 +771,21 @@ _DEFAULT = object()
 
 def check_output_location(out, *, input_path=None, overwrite: bool = False,
                           allowed_root=_DEFAULT, forbidden_roots=None,
-                          syncthing_configs=None) -> Path:
+                          syncthing_configs=None, suffixes=(".mp4",)) -> Path:
     """Return the canonical output path, or raise UnsafeOutput (with a `reason` code).
 
     Deny by default: the output must be under `allowed_root` (PARTICIPANT_ROOT unless
     given; None lifts this rule, and only this rule -- the caller records that). Then
     the denylist, which no override lifts. Checked on both the path as given and its
     resolved form (links and junctions followed), so a link out of, or into, a
-    forbidden folder is refused either way."""
+    forbidden folder is refused either way. `suffixes` are the allowed file types
+    (lower case; the blur writes .mp4 only, other participant-data tools pass theirs)."""
     raw = Path(os.path.abspath(Path(out).expanduser()))
     resolved = raw.resolve()
-    if resolved.suffix.lower() != ".mp4":
-        raise UnsafeOutput("not_mp4", "output must be an .mp4 file")
+    if resolved.suffix.lower() not in suffixes:
+        if tuple(suffixes) == (".mp4",):
+            raise UnsafeOutput("not_mp4", "output must be an .mp4 file")
+        raise UnsafeOutput("bad_suffix", f"output must be one of {', '.join(suffixes)}")
     if _is_network(raw) or _is_network(resolved):
         raise UnsafeOutput("network_path", "output on a network path")
     resolved = _strip_verbatim(resolved)
