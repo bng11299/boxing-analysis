@@ -163,5 +163,6 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
 
 - **Effect on the reported stop: none.** The real dev run used the full grid (finding 1 needs `--margin`); no real
   video's motion is near 20 px (nearest 15.9 and 26.3; finding 2); every real entry is within its diagonal
-  (finding 3). Tests: 219.- **Fresh clone at `8c2e02e`** (the final code): all 21 Python suites green, 3,139 checks (`test_ring` 219; every
+  (finding 3). Tests: 219.
+- **Fresh clone at `8c2e02e`** (the final code): all 21 Python suites green, 3,139 checks (`test_ring` 219; every
   other suite unchanged from `e787657`). The machine scripts were not touched by this branch and were not re-run.
