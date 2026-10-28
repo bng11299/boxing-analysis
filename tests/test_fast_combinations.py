@@ -164,6 +164,13 @@ check("control: per hand alone, a jab that returns faster than it went out is de
       len(pfb[0]) == 1 and pfb[0][0] > (3.0 + 0.25) * FPS, str(pfb))
 check("arm 1: the same jab is detected on its way OUT (the taller retraction is removed before the gap)",
       len(afb[0]) == 1 and 3.0 * FPS <= afb[0][0] <= (3.0 + 0.25) * FPS, str(afb))
+rfb = punchfind.detect_rule(fast_back, fsig, {"variant": "relative", "threshold": THR, "min_gap_s": GAP,
+                                              "finder": {"mode": "per_hand_extension", "extension_window_s": 0.1}})
+check("detect_rule applies the gate for arm 1: the rule file's arm, not plain per hand",
+      np.array_equal(rfb[0], afb[0]) and not np.array_equal(rfb[0], pfb[0]), f"{rfb} {pfb}")
+rrt = punchfind.detect_rule(rt, rsig, {"variant": "relative", "threshold": THR, "min_gap_s": GAP,
+                                       "finder": {"mode": "per_hand_extension", "extension_window_s": 0.1}})
+check("detect_rule, arm 1, on the retraction-only clip: nothing", len(rrt[0]) == 0, str(rrt))
 
 print("a one-handed clip: the hidden hand never fires, the seen hand still does")
 one = np.ones((300, N_JOINTS)); one[:, 10] = 0.05   # right wrist never trustworthy

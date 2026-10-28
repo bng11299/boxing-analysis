@@ -9,8 +9,10 @@ videos only. Refused, with nothing scored, when:
 - the athlete-disjoint split (#38, O55) is not merged, or the held-out list differs from
   the one recorded at tuning;
 - the gate changed since tuning, or the rule file is not the one tuning wrote (sha256);
-- results/fast_combinations_heldout.json already exists (one run);
-- the pooled baseline on V5+V9 does not reproduce RESULTS rows 5a-5c exactly.
+- the held-out run has started before (results/fast_combinations_heldout.started, a fixed
+  path created before the arm is scored) or the --out file exists: one run;
+- the pooled baseline on V5+V9 does not reproduce RESULTS rows 5a-5c exactly (checked
+  before the arm is touched).
 
 Finder metrics on every held-out video that passes the alignment gate (V2 and V3 on each
 other's pose, O61). Found-and-named-right on V5+V9 only, through eval_pipeline_v5v9.py,
@@ -90,6 +92,40 @@ def paired_named_ci(arm: "dict[str, np.ndarray]", base: "dict[str, np.ndarray]")
             "n_boot": fc.N_BOOT, "n_undefined_dropped": fc.N_BOOT - len(vals)}
 
 
+def check_finder_reproduction(ref: np.ndarray) -> dict:
+    """The pooled baseline's V5+V9 counts must be RESULTS 5a-5b exactly, or the run stops."""
+    jab = CLASSES.index("jab")
+    got = {"detections_scored": int(ref[fc.DET]), "labelled": int(ref[fc.LAB]), "hits": int(ref[fc.HIT_S]),
+           "jab": (int(ref[fc.HIT_T + jab]), int(ref[fc.LAB_T + jab]))}
+    if any(got[k] != REFERENCE[k] for k in got):
+        raise SystemExit(f"REPRODUCTION FAILED: the baseline on V5+V9 gives {got}, RESULTS 5a-5b say "
+                         f"{ {k: REFERENCE[k] for k in got} }; the arm is not scored")
+    print(f"reproduction: the baseline finder on V5+V9 matches RESULTS 5a-5b ({got})")
+    return got
+
+
+def check_named_reproduction(nb: "dict[str, np.ndarray]") -> int:
+    """The pooled baseline's found-and-named-right on V5+V9 must be RESULTS 5c exactly."""
+    named = int(sum(c[:, NAMED].sum() for c in nb.values()))
+    if named != REFERENCE["named_right"]:
+        raise SystemExit(f"REPRODUCTION FAILED: the baseline finds and names right {named}, RESULTS 5c says "
+                         f"{REFERENCE['named_right']}; the arm is not scored")
+    print(f"reproduction: the baseline end to end on V5+V9 matches RESULTS 5c ({named})")
+    return named
+
+
+def mark_started(t: dict, tune_path: Path) -> None:
+    """Create the started marker, atomically and only if absent: a second run, a run with another
+    --out, a retune, and a run that crashed half way are all refused from now on."""
+    tune.STARTED.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tune.STARTED.open("x", encoding="utf-8") as f:
+            json.dump({"tune_file_sha256": tune.sha256(tune_path), "arm": t["chosen_arm"],
+                       "head": tune._git("rev-parse", "HEAD")}, f)
+    except FileExistsError:
+        raise SystemExit(f"REFUSED: {tune.STARTED} exists; the held-out run has already started") from None
+
+
 def run_e2e(a, rule_path: Path, out_dir: Path, sha: str, videos: "dict[str, fc.Video]") -> "dict[str, list[dict]]":
     """The pipeline end to end on V5+V9 through eval_pipeline_v5v9.main (finder, then the
     classifier), with this rule; returns each video's classified rows, read back checked."""
@@ -118,6 +154,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     tune.split_ready()
+    tune.refuse_if_started()
     if a.out.exists():
         raise SystemExit(f"REFUSED: {a.out} exists. The held-out run is done once; a second run with other "
                          "settings is not allowed by the gate")
@@ -148,17 +185,17 @@ def main(argv=None) -> int:
     if not set(E2E_VIDEOS) <= set(loaded):
         raise SystemExit("REFUSED: V5 or V9 fails the alignment gate; the reproduction check cannot run")
 
-    # Gate before anything is scored: the baseline reproduces RESULTS 5a-5b on V5+V9.
+    # Gates before the arm is touched: the BASELINE reproduces RESULTS 5a-5c on V5+V9, finder and
+    # end to end. Only the baseline has run when either fails; the arm is never scored.
     base_c = {v: fc.counts(vd, fc.detections(vd, base_rule)) for v, vd in loaded.items()}
-    ref = fc.total(base_c, E2E_VIDEOS)
-    jab = CLASSES.index("jab")
-    got = {"detections_scored": int(ref[fc.DET]), "labelled": int(ref[fc.LAB]), "hits": int(ref[fc.HIT_S]),
-           "jab": (int(ref[fc.HIT_T + jab]), int(ref[fc.LAB_T + jab]))}
-    if any(got[k] != REFERENCE[k] for k in got):
-        raise SystemExit(f"REPRODUCTION FAILED: the baseline on V5+V9 gives {got}, RESULTS 5a-5b say "
-                         f"{ {k: REFERENCE[k] for k in got} }; nothing is scored")
-    print(f"reproduction: the baseline on V5+V9 matches RESULTS 5a-5b ({got})")
+    check_finder_reproduction(fc.total(base_c, E2E_VIDEOS))
+    sha = classify.read_manifest(a.classifier)["sha256"]
+    rows_b = run_e2e(a, a.baseline, a.e2e_dir / "baseline", sha, loaded)
+    nb = {v: named_counts(loaded[v], rows_b[v]) for v in E2E_VIDEOS}
+    named_b = check_named_reproduction(nb)
 
+    # From here the arm is scored: mark the one held-out run as started, at a path no option moves.
+    mark_started(t, a.tune)
     ctl = t["control"]
     ctl_rule = fc.rule(ctl["threshold"], None)
     arm_c = {v: fc.counts(vd, fc.detections(vd, arm_rule)) for v, vd in loaded.items()}
@@ -172,15 +209,8 @@ def main(argv=None) -> int:
     ver = fc.verdict(arm_t, base_t, diffs["f1"])
 
     # End to end on V5+V9 (the classifier checkpoint's own held-out videos).
-    sha = classify.read_manifest(a.classifier)["sha256"]
-    rows_b = run_e2e(a, a.baseline, a.e2e_dir / "baseline", sha, loaded)
     rows_a = run_e2e(a, a.rule, a.e2e_dir / "arm", sha, loaded)
-    nb = {v: named_counts(loaded[v], rows_b[v]) for v in E2E_VIDEOS}
     na = {v: named_counts(loaded[v], rows_a[v]) for v in E2E_VIDEOS}
-    named_b = int(sum(c[:, NAMED].sum() for c in nb.values()))
-    if named_b != REFERENCE["named_right"]:
-        raise SystemExit(f"REPRODUCTION FAILED: found and named right {named_b}, RESULTS 5c says "
-                         f"{REFERENCE['named_right']}; nothing is written")
     labels_e2e = int(sum(c[:, NLAB].sum() for c in nb.values()))
     end_to_end = {"videos": list(E2E_VIDEOS), "labelled": labels_e2e,
                   "baseline_named_right": named_b, "arm_named_right": int(sum(c[:, NAMED].sum() for c in na.values())),

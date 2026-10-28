@@ -189,9 +189,19 @@ held_saved = bdata.HELD_OUT_VIDEOS
 bdata.HELD_OUT_VIDEOS = ("V2", "V3", "V5", "V9")
 check("training videos are every source not held out, in order",
       tune.training_videos() == ["V1", "V4", "V6", "V7", "V8", "V10"], str(tune.training_videos()))
-(tmp / "held.json").write_text("{}", encoding="utf-8")
-raises("tuning again after the held-out result exists is refused",
-       lambda: tune.main(["--data", "x", "--poses", str(tmp), "--heldout", str(tmp / "held.json")]), SystemExit)
+started_saved = tune.STARTED
+tune.STARTED = tmp / "results" / "fast_combinations_heldout.started"
+check("the started marker is a fixed path under the repo, not an option",
+      started_saved == ROOT / "results" / "fast_combinations_heldout.started"
+      and "--heldout" not in tune.main.__code__.co_consts)
+tune.STARTED.parent.mkdir(parents=True)
+tune.STARTED.write_text("{}", encoding="utf-8")
+raises("tuning again after the held-out run started is refused",
+       lambda: tune.main(["--data", "x", "--poses", str(tmp)]), SystemExit)
+raises("a second held-out run is refused whatever --out says",
+       lambda: ev.main(["--data", "x", "--poses", "x", "--classifier", "x", "--stance", "orthodox",
+                        "--out", str(tmp / "a-fresh-name.json")]), SystemExit)
+tune.STARTED.unlink()
 orig_git = tune._git
 tune._git = lambda *a: " M docs/gates/fast-combinations.md" if a[0] == "status" else "abc"
 raises("an uncommitted change to the gate is refused", tune.gate_commit, SystemExit)
@@ -200,10 +210,17 @@ raises("a gate that was never committed is refused", tune.gate_commit, SystemExi
 tune._git = orig_git
 check("on this checkout the gate is committed and its commit is found", len(tune.gate_commit()) == 40)
 v6rule = tmp / "v6.json"
-v6rule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4}}), encoding="utf-8")
+v6rule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": fc.BASELINE_THRESHOLD,
+                                         "min_gap_s": 0.4}}), encoding="utf-8")
+check("control: the registered baseline (threshold 3.6239) is accepted", tune.baseline_rule(v6rule)["threshold"]
+      == fc.BASELINE_THRESHOLD)
+for thr_ in (3.62, 6.0, 2.0):
+    alt = tmp / f"alt{thr_}.json"
+    alt.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": thr_, "min_gap_s": 0.4}}), encoding="utf-8")
+    raises(f"a pooled baseline with threshold {thr_} (not the registered one) is refused",
+           lambda a_=alt: tune.baseline_rule(a_), SystemExit)
 raises("no pose for a tuning video: refused, naming it",
-       lambda: tune.main(["--data", "x", "--poses", str(tmp), "--baseline", str(v6rule),
-                          "--heldout", str(tmp / "none.json")]), SystemExit)
+       lambda: tune.main(["--data", "x", "--poses", str(tmp), "--baseline", str(v6rule)]), SystemExit)
 armrule = tmp / "arm.json"
 armrule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 3.62, "min_gap_s": 0.4,
                                           "finder": {"mode": "cross_hand_gap", "cross_gap_s": 0.15}}}), encoding="utf-8")
@@ -229,9 +246,49 @@ raises("a rule file holding the OTHER arm: refused", lambda: ev.read_tune(tf, ar
 tf.write_text(json.dumps({**good, "chosen_rule": {**good["chosen_rule"], "threshold": 3.0}}), encoding="utf-8")
 raises("a rule file whose threshold is not the chosen one: refused", lambda: ev.read_tune(tf, armrule), SystemExit)
 (tmp / "out.json").write_text("{}", encoding="utf-8")
-raises("a second held-out run (the result exists): refused",
+raises("an existing --out file: refused",
        lambda: ev.main(["--data", "x", "--poses", "x", "--classifier", "x", "--stance", "orthodox",
                         "--out", str(tmp / "out.json")]), SystemExit)
+raises("a baseline that does not reproduce RESULTS 5a-5b stops the run",
+       lambda: ev.check_finder_reproduction(np.zeros(fc.N_COLS, np.int64)), SystemExit)
+raises("a baseline that does not reproduce RESULTS 5c stops the run",
+       lambda: ev.check_named_reproduction({"V5": np.array([[351, 742]])}), SystemExit)
+check("control: 352 named right reproduces", ev.check_named_reproduction({"V5": np.array([[300, 500]]),
+                                                                          "V9": np.array([[52, 242]])}) == 352)
+ev.mark_started({"chosen_arm": "cross_hand_gap"}, tf)
+check("mark_started creates the marker", tune.STARTED.is_file())
+raises("mark_started a second time is refused (atomic create)", lambda: ev.mark_started({"chosen_arm": "x"}, tf), SystemExit)
+tune.STARTED.unlink()
+
+print("held-out script: when the baseline fails to reproduce, the arm is never scored")
+calls = []
+saved_fns = (ev.read_tune, tune.gate_commit, tune.load_video, ev.run_e2e, fc.detections, ev.check_finder_reproduction)
+bdata.HELD_OUT_VIDEOS = ("V5", "V9")
+pose_dir = tmp / "poses"; pose_dir.mkdir()
+for v_ in ("V5", "V9"):
+    (pose_dir / f"{v_}.pose.npz").write_bytes(b"")
+tf.write_text(json.dumps({**good, "gate_commit": "c" * 40, "held_out_videos_at_tuning": ["V5", "V9"],
+                          "baseline_rule_sha256": tune.sha256(v6rule), "tuned_on": ["V4"],
+                          "control": {"threshold": 3.0}}), encoding="utf-8")
+ev.read_tune = lambda tp, rp: (json.loads(tf.read_text(encoding="utf-8")), json.loads(tf.read_text(encoding="utf-8"))["chosen_rule"])
+tune.gate_commit = lambda: "c" * 40
+tune.load_video = lambda d, p, v_: (video([Span(100, 110, J)]), {"aligned": True})
+ev.check_finder_reproduction = lambda ref: calls.append("finder-reproduced")
+ev.run_e2e = lambda a_, rp, od, sha, vids: (calls.append(("e2e", Path(rp).name)), {v_: [] for v_ in ("V5", "V9")})[1]
+fc.detections = lambda vd, r, masks=None: (calls.append(("detect", "finder" in r)), np.array([], np.int64))[1]
+classify_saved = ev.classify.read_manifest
+ev.classify.read_manifest = lambda p: {"sha256": "s"}
+raises("named-right 0 instead of 352: the run stops",
+       lambda: ev.main(["--data", "x", "--poses", str(pose_dir), "--classifier", "x", "--stance", "orthodox",
+                        "--tune", str(tf), "--rule", str(armrule), "--baseline", str(v6rule),
+                        "--out", str(tmp / "never.json")]), SystemExit)
+check("... after the baseline only: no arm detection, no arm end-to-end run",
+      ("detect", True) not in calls and ("e2e", armrule.name) not in calls and ("e2e", v6rule.name) in calls, str(calls))
+check("... and no started marker and no output were written", not tune.STARTED.exists() and not (tmp / "never.json").exists())
+(ev.read_tune, tune.gate_commit, tune.load_video, ev.run_e2e, fc.detections, ev.check_finder_reproduction) = saved_fns
+ev.classify.read_manifest = classify_saved
+tune.STARTED = started_saved
+
 check("the reference is RESULTS rows 5a-5c", ev.REFERENCE == {"detections_scored": 686, "labelled": 742, "hits": 434,
                                                              "jab": (84, 264), "named_right": 352})
 

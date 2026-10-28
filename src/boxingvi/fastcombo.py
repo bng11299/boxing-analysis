@@ -24,6 +24,7 @@ THRESHOLDS = tuple(round(2.0 + 0.1 * i, 1) for i in range(41))      # 2.0 .. 6.0
 WINDOWS_S = (0.05, 0.10, 0.15, 0.20, 0.30)                          # arm 1: extension window
 CROSS_GAPS_S = (0.10, 0.12, 0.15, 0.20, 0.25, 0.30)                 # arm 2: gap between hands
 VARIANT, MIN_GAP_S = "relative", 0.4                                 # fixed, the V6 rule's
+BASELINE_THRESHOLD = 3.6238817996457016   # results/punch_finder_v6.json, the registered baseline (3.62)
 TOL_S, BLOCK_S = 0.1, 30.0
 N_BOOT, SEED, ALPHA = 2000, 0, 0.05
 MARGIN = 0.05            # no type group's recall may fall by more than this

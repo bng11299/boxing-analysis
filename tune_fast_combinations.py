@@ -40,6 +40,9 @@ GATE = Path("docs/gates/fast-combinations.md")
 DEFAULT_TUNE = Path("results/fast_combinations_tune.json")
 DEFAULT_RULE_OUT = Path("results/fast_combinations_rule.json")
 DEFAULT_HELDOUT = Path("results/fast_combinations_heldout.json")
+# Created by eval_fast_combinations.py, atomically, before it scores the arm. Fixed under the repo,
+# never an option, so no choice of output path lets a second held-out run or a retune through.
+STARTED = ROOT / "results" / "fast_combinations_heldout.started"
 
 
 def split_ready() -> None:
@@ -61,6 +64,12 @@ def gate_commit() -> str:
     if not c:
         raise SystemExit(f"REFUSED: {GATE} is not committed")
     return c
+
+
+def refuse_if_started() -> None:
+    if STARTED.exists():
+        raise SystemExit(f"REFUSED: {STARTED} exists: the held-out run has started (or finished). Tuning again, "
+                         "or a second held-out run, would choose with the held-out result known")
 
 
 def video_order(v: str) -> int:
@@ -103,7 +112,8 @@ def sha256(p: Path) -> str:
 
 def baseline_rule(path: Path) -> dict:
     r = find_punches.load_rule(path)
-    if "finder" in r or r["variant"] != fc.VARIANT or r["min_gap_s"] != fc.MIN_GAP_S:
+    if ("finder" in r or r["variant"] != fc.VARIANT or r["min_gap_s"] != fc.MIN_GAP_S
+            or abs(r["threshold"] - fc.BASELINE_THRESHOLD) > 1e-9):
         raise SystemExit(f"{path} is not the pooled V6 rule the gate compares against")
     return r
 
@@ -119,14 +129,10 @@ def main(argv=None) -> int:
     ap.add_argument("--baseline", type=Path, default=find_punches.DEFAULT_RULE)
     ap.add_argument("--out", type=Path, default=DEFAULT_TUNE)
     ap.add_argument("--rule-out", type=Path, default=DEFAULT_RULE_OUT)
-    ap.add_argument("--heldout", type=Path, default=DEFAULT_HELDOUT,
-                    help="the held-out result; tuning again after it exists is refused")
     a = ap.parse_args(argv)
 
     split_ready()
-    if a.heldout.exists():
-        raise SystemExit(f"REFUSED: {a.heldout} exists; the arm was tested, and tuning again after that "
-                         "would choose with the held-out result known")
+    refuse_if_started()
     commit = gate_commit()
     base = baseline_rule(a.baseline)
     videos = training_videos()
