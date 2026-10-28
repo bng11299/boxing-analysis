@@ -78,3 +78,9 @@ memory; no clip is written to disk.
 what decodes (whole-clip rule; constant-rate GoPro footage, unlikely). The checker knows every pair is a linker join
 (no foils), which may lean answers towards "same" -- stated in the PR, not designed out (time). No real-footage run
 of the window yet: the first `check --dry` on the 23 videos is the real-data smoke test, before Brendan's session.
+
+### Exit
+- Gate reproduce: fresh clone of `origin/feat/linker-join-check` at `2f5d0a5`, same interpreter: test_linker_join_check
+  151 passed / 0 failed / 0 skipped, test_label_moments 169 / 0 / 1 -- the same numbers as the working tree.
+- All gates green: tests (151 + 169), review (Astra FIX FIRST -> fixed; code-reviewer SHIP twice), security (own
+  pass; the lock-open and Refused-reason leaks fixed).
