@@ -85,3 +85,11 @@ Review: `codex-companion task`, read-only, effort medium (brief and output in th
    count, ties kept), and lower counts follow as "followed by ..." (test).
 - **Gate test.** `test_combos.py` 158/158. Result re-scored with the new format: identical numbers, FAIL,
   `results/combinations_gate.json` sha256 `36cd434090e8...`; both own reports re-rendered and read.
+- **Gate reproduce.** Fresh `git clone` of the repo, branch tip `ad9bed5` checked out, no `data/` or `results/`:
+  all 24 Python suites and the machine-script suite green, 3,685 checks (analyse_clip 113, appearance 171,
+  blur 177, boxers 167, classify 297, combos 158, completeness_credited 95, e2e 74, env 36, frame_skips 222,
+  gloves 273, hands 99, headgear 140, ingest 185, labels 50, linking 266, olympic 29, pipeline 314, pose_watcher
+  68, poseswitch 30, render_punches 66, report 291, ring 219, tracks 100, machine scripts 45). The working-tree
+  run at `87b23b4` (before the review fixes) was green on the same suites.
+- **Exit: all gates green.** Residuals: the gate FAILS (reported, not hidden); the result is void after a finder
+  change (PR #40) and must be re-scored under a new dated gate section; ADR-0019 is uncommitted in the vault.
