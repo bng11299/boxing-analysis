@@ -372,8 +372,9 @@ def test_config():
     assert [e.attrib for e in solo.iter("Label")] == [e.attrib for e in sparring.iter("Label")]
     assert sparring.find("Video").get("frameRate") == "30"
     choice = sparring.find("Choices")
-    assert choice.get("perRegion") == choice.get("required") == "true"
-    assert choice.get("whenLabelValue").split(",") == [e.get("value") for e in solo.iter("Label") if e.get("value") != "frame-check"]
+    assert choice.get("perRegion") == "true"
+    # These hid the box in LS 1.23.2 (10-28); the importer enforces the boxer rule instead.
+    assert all(choice.get(k) is None for k in ("required", "visibleWhen", "whenLabelValue"))
     assert [e.get("value") for e in choice] == ["A", "B", "?"]
 
 
