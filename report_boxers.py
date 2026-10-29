@@ -40,7 +40,7 @@ def boxer_text(boxer: str, identity, stats: dict, facts: dict, n_unsure: int, n_
                fps: float, bench: dict, finder: dict) -> "tuple[str, list[str]]":
     """The header, then the solo summary of this boxer's punches; every number through the templates."""
     identified_s = stats["identified_frames"] / fps
-    head, n_head = boxers.header(boxer, identity.method, identity.verdict, n_unsure, n_all, identified_s, duration_s)
+    head, n_head = boxers.header(boxer, identity.method, identity.verdict, n_unsure, n_all, identified_s, duration_s, identity.measured)
     body, n_body = report.summary(facts, bench, finder, None, who="this boxer's",
                                   identified=(f"boxer {boxer}", identified_s / 60))
     text, numbers = head + " " + body, n_head + n_body

@@ -52,7 +52,16 @@ def _ratio(a, b):
     return None if not b else a / b
 
 
-def video_result(task, tracks_dir: Path, id_dir: Path, rule: dict) -> dict:
+def linker_gate(join_result) -> "tuple[dict, Path | None]":
+    """The linker identity's gate block: "ungated" without the join check, else the verdict its checked result
+    gives (ADR-0018), with that file's hash, so a report read with --gate-result quotes the measured error."""
+    if join_result is None:
+        return {"verdict": "ungated"}, None
+    verdict, _measured, sha = boxers.read_join_result(join_result)
+    return {"verdict": verdict, "document": boxers.GATES["linker"]["document"], "result_sha256": sha}, Path(join_result)
+
+
+def video_result(task, tracks_dir: Path, id_dir: Path, rule: dict, gate=None) -> dict:
     table, _, events, attrs = olympic_link.load_video(task, tracks_dir)
     vid = task.video.stem
     tracks = tracks_dir / f"{vid}.tracks.npz"
@@ -61,9 +70,9 @@ def video_result(task, tracks_dir: Path, id_dir: Path, rule: dict) -> dict:
     credited = {a.track_id for a in attrs if a.track_id is not None}
     names = boxers.row_names_from_linking(table, lk, unsure_tracks=credited - chains)
     idp = id_dir / f"{vid}.identity.csv"
-    boxers.write_identity(idp, table, tracks, boxers.segments_from_row_names(table, names), "linker",
-                          {"verdict": "ungated"})
-    ident = boxers.read_identity(idp, table, tracks)
+    gate_block, gate_file = gate or ({"verdict": "ungated"}, None)
+    boxers.write_identity(idp, table, tracks, boxers.segments_from_row_names(table, names), "linker", gate_block)
+    ident = boxers.read_identity(idp, table, tracks, gate_file)
     found = boxers.find(table, ident, rule)
 
     def punches(who):
@@ -137,8 +146,11 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--identity-dir", type=Path, default=DEFAULT_IDENTITY_DIR)
     ap.add_argument("--only", nargs="+", metavar="ID")
+    ap.add_argument("--join-result", type=Path,
+                    help="linker_join_check.py's result.json: record the linker's measured verdict, not 'ungated'")
     a = ap.parse_args(argv)
     rule = find_punches.load_rule(a.rule)
+    gate = linker_gate(a.join_result)
     only = {olympic_link._check_video_id(v) for v in a.only} if a.only else None
     a.identity_dir.mkdir(parents=True, exist_ok=True)
     videos, failed = {}, []
@@ -147,7 +159,7 @@ def main(argv=None) -> int:
         if (only is not None and vid not in only) or not (a.tracks / f"{vid}.tracks.npz").is_file():
             continue
         try:
-            r = video_result(t, a.tracks, a.identity_dir, rule)
+            r = video_result(t, a.tracks, a.identity_dir, rule, gate)
         except (ValueError, FileNotFoundError, RuntimeError) as e:
             videos[t.name] = {"error": str(e)}
             failed.append(t.name)
