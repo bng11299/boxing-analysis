@@ -13,10 +13,11 @@
      jab = lead straight, cross = rear straight; unclear is an unnameable punch.
   4. Submit before exporting the single task in full JSON format (not JSON-MIN).
 
-  1.23.2: TimelineRegion uses AreaMixin; per-region Choices share the timeline
-  region id. Required.js filters by whenLabelValue. Do not add whenTagName:
-  its implementation looks for a control name, not the Video object's name.
-  validate_label_config checks schema; also exercise selection/Submit in the UI.
+  The boxer box shows for the SELECTED region (click it on the timeline after
+  drawing). No required/visibleWhen/whenLabelValue: with them the box did not
+  appear in 1.23.2 (10-28), and `required` would also demand a boxer on the
+  frame checks. The importer enforces the rule instead: every punch needs
+  exactly one boxer, and a frame-check must have none.
 -->
 <View>
   <Header value="Mark frame-check at burned-in frames 100 and 2000 first. One region per punch; select its boxer A, B or ?."/>
@@ -31,9 +32,7 @@
     <Label value="unclear" hotkey="u" background="#7f7f7f"/>
     <Label value="frame-check" hotkey="f" background="#000000"/>
   </TimelineLabels>
-  <Choices name="boxer" toName="video" choice="single-radio" perRegion="true"
-           required="true" visibleWhen="region-selected"
-           whenLabelValue="jab,cross,lead_hook,rear_hook,lead_uppercut,rear_uppercut,unclear">
+  <Choices name="boxer" toName="video" choice="single-radio" perRegion="true">
     <Choice value="A"/>
     <Choice value="B"/>
     <Choice value="?"/>
