@@ -234,8 +234,9 @@ def say_facts(w, cf: dict, per_boxer: bool = False) -> None:
         w.say(f"{w.count(u)} {'combination includes' if u == 1 else 'combinations include'} a punch it could not "
               f"name, shown as {UNKNOWN}, and {'is' if u == 1 else 'are'} left out of the commonest.")
     if per_boxer:
-        w.say("A combination never spans a change of tracked person or a round, so each is one person's punches; "
-              "which boxer threw it is only as certain as the split between the boxers.")
+        w.say("A combination never spans a change of tracked person or a round, so a wrong join between tracks "
+              "cannot merge two people's punches into one; which boxer threw it is only as certain as the split "
+              "between the boxers.")
 
 
 _BAR_WORDS = {"1_better_than_chance": "exact recovery was not above chance",
@@ -259,7 +260,8 @@ def say_reliability(w, cf: dict, gate: "dict | None", per_boxer: bool = False) -
               "it does not apply here.")
     else:
         nums = (f"it recovered {w.count(gate['recovered'])} of {w.count(gate['n_label'])} labelled combinations "
-                f"exactly, against {w.pct(gate['floor'])} by chance with the punch types shuffled "
+                f"exactly ({w.pct(gate['recall'])}), against {w.pct(gate['floor'])} by chance with the punch types "
+                f"shuffled "
                 f"({w.num(f'{GATE_PERCENTILE:.1f}')}th percentile)")
         if gate["status"] == "pass":
             w.say(f"On {where} the combinations passed their pre-registered check: {nums}, and the commonest "

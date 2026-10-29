@@ -197,7 +197,7 @@ GOOD = {"status": "pass", "bars": {b: True for b in combos._BARS}, "recovered": 
         "floor": 0.1}
 tp, np_ = text_of(combos.say_reliability, cf, GOOD)
 check("pass: the numbers and that the headline matched", "passed their pre-registered check: it recovered 7 of 20 "
-      "labelled combinations exactly, against 10% by chance with the punch types shuffled (97.5th percentile)" in tp
+      "labelled combinations exactly (35%), against 10% by chance with the punch types shuffled (97.5th percentile)" in tp
       and numbers_ok(tp, np_), tp)
 check("pass, per boxer: says it was measured on solo footage",
       "solo own footage (not two boxers)" in text_of(combos.say_reliability, cf, GOOD, per_boxer=True)[0])
