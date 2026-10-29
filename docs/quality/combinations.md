@@ -36,7 +36,7 @@ memory blow-up or a traceback instead of a refusal.
   same rule values as `results/repro/`); they reproduce RESULTS 6a/6b exactly (35/47, 35/41; 35/40, 35/42; type
   0.857 and 0.600 of 35, floors 0.314 and 0.371). Score: exact recall 2 of 19 (0.105) vs floor 97.5th percentile
   0.105 (bar 1 FAIL by the strict inequality), favourite fails on IMG_4395 (bar 2 FAIL), starter jab in both (bar 3
-  pass): **FAIL**, `results/combinations_gate.json` sha256 `9bc0a69f4543...`. RESULTS rows 12a-12c, note 12.
+  pass): **FAIL**, `results/combinations_gate.json` (first format; re-scored in iteration 2). RESULTS rows 12a-12c, note 12.
 - **Rendered and read** (both own clips' solo summaries, and the per-boxer sentences with the real result): the
   recall was printed only as "2 of 19" beside "11% by chance", hiding that they are equal: now "2 of 19 labelled
   combinations exactly (11%)". The per-boxer sentence said each combination "is one person's punches", stronger
@@ -59,3 +59,29 @@ memory blow-up or a traceback instead of a refusal.
   formula lead. No finding open. Residual: if PR #40 merges, `_rule_of` returns a parsed finder block, which
   `score_combinations.py` would then try to write into the result JSON; re-check when #40 lands (the result is
   void after a finder change anyway).
+
+### Iteration 2 (Astra review 1: FIX FIRST, 6 findings; 4 fixed, 2 rejected with reasons)
+Review: `codex-companion task`, read-only, effort medium (brief and output in the session scratchpad).
+1. **Fixed — a forged PASS was accepted** (per-clip evidence never reconciled). `read_gate` now requires each
+   clip block's exact keys, counts that are counts and do not contradict each other, lists of punch-type names,
+   `favourite_matches` / `starter_matches` exactly what the lists say, bars 2 / 3 exactly the clips', and the
+   pooled counts exactly the clips' sums (zero labels then force recall 0). 11 new refusal tests.
+2. **Fixed — an exploratory run passed as the gate.** A result applies only if its clips are the registered
+   IMG_4395 + IMG_4406, with 2,000 permutations and seed 20261028; otherwise `not_applicable` (tests for each).
+   `score_combinations.py` still runs other clips (for tests and exploration); reports never use those runs.
+3. **Fixed — finder mode not bound.** The result records `finder_per_hand: false`; `read_gate` takes the punches'
+   mode and applies the result only when both are explicitly false (an old sidecar without the field gets
+   `not_applicable`); the blind-spot sentence says "from each hand" for per-hand punches; the scorer refuses a
+   sidecar whose `finder_per_hand` is anything but `false` (was: only truthy values). Tests for each.
+4. **Rejected — rounds from `time_s`.** The report assigns every punch to a round with `report.round_of(time_s)`
+   (per-round counts, rates, outside-rounds count); `summary` checks the combination punches equal the round
+   facts' punches. Assigning combination rounds from frame/fps instead would make the two disagree at a boundary,
+   which is worse; a combination never crosses a round edge as the report itself defines it. The gate spec's
+   frame/fps time is for gaps, which do use frames.
+5. **Rejected — the 1e-9 epsilons.** They guard float noise only: gaps are whole frames (>= 1/60 s apart) and
+   recalls are k/19 against a percentile of the same quotients, so no real value lies within 1e-9 of a boundary;
+   boundary tests at whole frames on both sides exist. Today's tie (2/19 vs 2/19) is unaffected either way.
+6. **Fixed — "commonest" also printed lower counts.** Now "commonest" is exactly the gate's favourite (the highest
+   count, ties kept), and lower counts follow as "followed by ..." (test).
+- **Gate test.** `test_combos.py` 158/158. Result re-scored with the new format: identical numbers, FAIL,
+  `results/combinations_gate.json` sha256 `36cd434090e8...`; both own reports re-rendered and read.

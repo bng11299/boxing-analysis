@@ -44,8 +44,9 @@ def score_one(clip: str, punches_dir: Path, labels_dir: Path, pose_dir: Path, cl
         raise ValueError(f"no {side_p.name} beside {csv_p.name}: re-run classify_punches.py")
     man = report.verify_provenance(csv_p, side_p, classifier, clip)
     side = man["_sidecar"]
-    if side.get("finder_per_hand"):
-        raise ValueError(f"{csv_p.name} was found with the per-hand finder; the gate scores the pooled rule")
+    if side.get("finder_per_hand") is not False:   # missing, null or anything but false is not the pooled rule
+        raise ValueError(f"{csv_p.name} was not found with the pooled finder (finder_per_hand must be false); "
+                         "the gate scores the pooled rule")
     report.check_pose(side, len(pose), pose.fps)
     rows = report.read_classified(csv_p, len(pose) / pose.fps, fps=pose.fps)
     lab_p = labels_dir / f"{clip}.labels.json"

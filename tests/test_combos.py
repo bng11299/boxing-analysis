@@ -168,6 +168,10 @@ check("facts: the per-boxer sentence only in the per-boxer report", "tracked per
       and "tracked person" in text_of(combos.say_facts, cf, per_boxer=True)[0])
 t2, n2 = text_of(combos.say_facts, st2)
 check("tied starters read 'or', with 'each'", "2 each (50% each) started with the cross or the jab." in t2, t2)
+tc_, nc_ = text_of(combos.say_facts, cfd)
+check("commonest is only the highest count (the gate's favourite); lower counts follow it",
+      "The commonest combination was jab-cross (3), followed by cross-jab (2) and jab-jab (2)." in tc_
+      and numbers_ok(tc_, nc_), tc_)
 t4, n4 = text_of(combos.say_facts, cf4)
 check("a tie too wide to list is stated with its numbers", "4 different combinations tie as the commonest, seen 2 times "
       "each." in t4 and numbers_ok(t4, n4), t4)
@@ -188,6 +192,9 @@ tr, nr = text_of(combos.say_reliability, cf, None)
 check("unmeasured: the blind spot with the finder's own minimum gap, and 'not checked'",
       "at most one punch per 0.4 s" in tr and "have not been checked against labelled footage" in tr
       and numbers_ok(tr, nr), tr)
+check("per-hand punches: the blind spot is per hand",
+      "one punch per 0.4 s from each hand" in text_of(combos.say_reliability, combos.compute(runs, 0.4, True), None)[0])
+raises("a finder mode that is not true/false is refused", lambda: combos.compute(runs, 0.4, None), match="minimum gap")
 check("the minimum gap comes from the rule, not a constant",
       "one punch per 0.3 s" in text_of(combos.say_reliability, combos.compute(runs, 0.3), None)[0])
 ta = text_of(combos.say_reliability, cf, {"status": "not_applicable"})[0]
@@ -292,7 +299,8 @@ raises("one centre per span", lambda: combos.score_clip(DET, SPANS, CEN[:3], PAI
 print("== the gate result ==")
 RULE = {"variant": "relative", "threshold": 3.6238817996457016, "min_gap_s": 0.4}
 SHA = "a" * 64
-res = combos.gate_result({"C1": (sc, {"x": 1})}, RULE, SHA, {"C1": FPS}, n_perm=200)
+PROV = {"classified_csv_sha256": "c" * 64, "labels_sha256": "d" * 64, "fps": FPS, "tolerance_frames": 3, "point_tolerance_frames": 6}
+res = combos.gate_result({"C1": (sc, PROV)}, RULE, SHA, {"C1": FPS}, n_perm=200)
 d = res["clips"]["C1"]
 check("per clip: label combinations 3, named 3, recovered 1, structure 2",
       (d["label_combinations"], d["named_label_combinations"], d["recovered_exactly"], d["structure_recovered"])
@@ -304,7 +312,7 @@ check("no name is seen twice in labels or detections: favourite empty, bar 2 fai
 check("starter: found jab (both found combinations start with a jab), labels jab -> matches",
       d["starter_found"] == ["jab"] and d["starter_labels"] == ["jab"] and d["starter_matches"])
 check("the floor is reproducible from its seed",
-      combos.gate_result({"C1": (sc, {})}, RULE, SHA, {"C1": FPS}, n_perm=200)["pooled"]["floor_p975"]
+      combos.gate_result({"C1": (sc, PROV)}, RULE, SHA, {"C1": FPS}, n_perm=200)["pooled"]["floor_p975"]
       == res["pooled"]["floor_p975"])
 check("PASS is exactly all three bars", res["PASS"] == all(res["bars"].values()))
 # A classifier that names every punch "jab" on jab-only labels: shuffling changes nothing, so the floor equals the
@@ -312,7 +320,7 @@ check("PASS is exactly all three bars", res["PASS"] == all(res["bars"].values())
 JS = [Span(0, 0, J_), Span(10, 10, J_), Span(200, 200, J_), Span(210, 210, J_)]
 JD = [p(0, "jab"), p(10, "jab"), p(200, "jab"), p(210, "jab")]
 scj = combos.score_clip(JD, JS, np.array([0.0, 10.0, 200.0, 210.0]), [(i, i) for i in range(4)], FPS)
-rj = combos.gate_result({"J": (scj, {})}, RULE, SHA, {"J": FPS}, n_perm=50)
+rj = combos.gate_result({"J": (scj, PROV)}, RULE, SHA, {"J": FPS}, n_perm=50)
 check("all one type: recall 1.0 equals its floor, bar 1 fails (strictly greater)",
       rj["pooled"]["exact_recall"] == 1.0 and rj["pooled"]["floor_p975"] == 1.0
       and rj["bars"]["1_better_than_chance"] is False)
@@ -323,7 +331,8 @@ check("... while favourite (jab-jab twice) and starter (jab) match", rj["bars"][
 AS = [Span(f, f, (J_, X_)[k % 2]) for k, f in enumerate((0, 10, 100, 110, 200, 210, 300, 310))]
 AD = [p(s.start, CLASSES[s.label]) for s in AS]
 sca = combos.score_clip(AD, AS, np.array([float(s.start) for s in AS]), [(i, i) for i in range(8)], FPS)
-ra = combos.gate_result({"A1": (sca, {}), "A2": (sca, {})}, RULE, SHA, {"A1": FPS, "A2": FPS}, n_perm=400)
+REG = {c: FPS for c in combos.GATE_CLIPS}
+ra = combos.gate_result({c: (sca, PROV) for c in combos.GATE_CLIPS}, RULE, SHA, REG)
 check("a clean pair of clips passes all three bars", ra["PASS"] and ra["pooled"]["exact_recall"] == 1.0
       and ra["pooled"]["floor_p975"] < 1.0, str(ra["pooled"]))
 
@@ -340,7 +349,22 @@ def write(d_, name="gate.json"):
 g = combos.read_gate(write(ra), RULE, SHA)
 check("round trip: a passing result reads as pass with its numbers",
       g["status"] == "pass" and (g["recovered"], g["n_label"]) == (8, 8) and g["floor"] == ra["pooled"]["floor_p975"])
-check("round trip: a failing result reads as fail", combos.read_gate(write(res), RULE, SHA)["status"] == "fail")
+rf = combos.gate_result({c: (sc, PROV) for c in combos.GATE_CLIPS}, RULE, SHA, REG)
+check("round trip: a failing result reads as fail", combos.read_gate(write(rf), RULE, SHA)["status"] == "fail"
+      and rf["PASS"] is False)
+check("exploratory run, other clips: does not apply (never the gate)",
+      combos.read_gate(write(res), RULE, SHA)["status"] == "not_applicable")
+check("exploratory run, other permutation count: does not apply",
+      combos.read_gate(write({**ra, "pooled": {**ra["pooled"], "permutations": 200}}), RULE, SHA)["status"]
+      == "not_applicable")
+check("exploratory run, other seed: does not apply",
+      combos.read_gate(write({**ra, "pooled": {**ra["pooled"], "seed": 1}}), RULE, SHA)["status"] == "not_applicable")
+check("punches from the per-hand finder: the pooled gate does not apply",
+      combos.read_gate(write(ra), RULE, SHA, per_hand=True)["status"] == "not_applicable")
+check("punches whose finder mode is unknown (old sidecar): does not apply",
+      combos.read_gate(write(ra), RULE, SHA, per_hand=None)["status"] == "not_applicable")
+check("a result recorded for the per-hand finder: does not apply to pooled punches",
+      combos.read_gate(write({**ra, "finder_per_hand": True}), RULE, SHA)["status"] == "not_applicable")
 check("another classifier: does not apply", combos.read_gate(write(ra), RULE, "b" * 64)["status"] == "not_applicable")
 check("another threshold: does not apply",
       combos.read_gate(write(ra), {**RULE, "threshold": 3.0}, SHA)["status"] == "not_applicable")
@@ -355,13 +379,38 @@ def bad(name, d_, match):
 
 
 bad("an extra key", {**ra, "note": "x"}, "not a boxingvi-combo-gate-1")
+C0 = combos.GATE_CLIPS[0]
+
+
+def with_clip(**kw):
+    return {**ra, "clips": {**ra["clips"], C0: {**ra["clips"][C0], **kw}}}
+
+
+bad("no finder mode", {k: v for k, v in ra.items() if k != "finder_per_hand"}, "not a boxingvi-combo-gate-1")
+bad("a finder mode that is not true/false", {**ra, "finder_per_hand": "no"}, "finder_per_hand")
+bad("clip evidence emptied", {**ra, "clips": {}}, "no clips")
+bad("a clip block emptied", {**ra, "clips": {**ra["clips"], C0: {}}}, "not a gate clip block")
+bad("bar 2 true while a clip's favourite did not match",
+    with_clip(favourite_matches=False, favourite_found=["cross-jab"]), "bars 2 and 3")
+bad("a clip's favourite match that contradicts its lists", with_clip(favourite_found=["cross-jab"]),
+    "is not what its lists say")
+bad("a clip's starter match that contradicts its lists", with_clip(starter_labels=["cross"]),
+    "is not what its lists say")
+bad("a list naming something that is not a punch type", with_clip(favourite_found=["jab-haymaker"],
+                                                                  favourite_labels=["jab-haymaker"]),
+    "not a punch type")
+bad("clip counts that contradict each other", with_clip(recovered_exactly=99), "contradict")
+bad("pooled counts that are not the sums of the clips'",
+    {**ra, "pooled": {**ra["pooled"], "recovered_exactly": 7, "exact_recall": 7 / 8}}, "not the sums")
+bad("a pooled block with a key missing", {**ra, "pooled": {k: v for k, v in ra["pooled"].items() if k != "seed"}},
+    "no pooled result")
 bad("a missing key", {k: v for k, v in ra.items() if k != "pooled"}, "not a boxingvi-combo-gate-1")
 bad("another format", {**ra, "format": "boxingvi-combo-gate-0"}, "not a boxingvi-combo-gate-1")
 bad("another gate document", {**ra, "document": "docs/gates/other.md"}, "not a boxingvi-combo-gate-1")
 bad("PASS true over a failed bar", {**res, "PASS": True}, "PASS is not what its bars say")
 bad("a bar that is not true/false", {**ra, "bars": {**ra["bars"], "2_favourite_matches": 1}}, "true or false")
 bad("a bar missing", {**ra, "bars": {k: v for k, v in ra["bars"].items() if k != "3_starter_matches"}}, "true or false")
-bad("more recovered than labelled", {**ra, "pooled": {**ra["pooled"], "recovered_exactly": 9}}, "more combinations")
+bad("more recovered than labelled", {**ra, "pooled": {**ra["pooled"], "recovered_exactly": 9}}, "not the sums")
 bad("a recall that is not recovered / labelled", {**ra, "pooled": {**ra["pooled"], "exact_recall": 0.5}},
     "not recovered / labelled")
 bad("bar 1 true while recall does not beat the floor", {**ra, "pooled": {**ra["pooled"], "floor_p975": 1.0}},
@@ -448,8 +497,8 @@ import io  # noqa: E402
 with contextlib.redirect_stdout(io.StringIO()):
     rc = score_combinations.main(ARGS)
 r = json.loads(out.read_text(encoding="utf-8"))
-check("CLI: runs and writes a result the reports accept",
-      rc == 0 and combos.read_gate(out, RULE, MSHA)["status"] in ("pass", "fail"))
+check("CLI: runs and writes a well-formed result; with other clips and 200 permutations it is exploratory, so a "
+      "report does not apply it", rc == 0 and combos.read_gate(out, RULE, MSHA)["status"] == "not_applicable")
 check("CLI: 4 of 4 named label combinations recovered across the two clips, favourite and starter match",
       r["pooled"]["recovered_exactly"] == 4 and r["pooled"]["named_label_combinations"] == 4
       and r["bars"]["2_favourite_matches"] and r["bars"]["3_starter_matches"], str(r["pooled"]))
@@ -474,7 +523,9 @@ cli_refused("a clip name with a path in it", ["--clip", "../E1"] + ARGS[2:], "pl
 make_clip("R1", DT, SP, rule={**RULE, "threshold": 3.0}, classifier_sha=MSHA)
 cli_refused("clips found with different rules", ARGS[:2] + ["--clip", "R1"] + ARGS[4:], "one rule")
 make_clip("P1", DT, SP, per_hand=True, classifier_sha=MSHA)
-cli_refused("the per-hand finder", ["--clip", "P1"] + ARGS[4:], "per-hand finder")
+cli_refused("the per-hand finder", ["--clip", "P1"] + ARGS[4:], "pooled finder")
+make_clip("P2", DT, SP, per_hand=None, classifier_sha=MSHA)
+cli_refused("a sidecar that does not state the finder mode", ["--clip", "P2"] + ARGS[4:], "pooled finder")
 make_clip("O1", DT, SP, classifier_sha="b" * 64)
 cli_refused("punches named by another classifier", ["--clip", "O1"] + ARGS[4:], "another classifier")
 make_clip("T1", DT, SP, classifier_sha=MSHA)

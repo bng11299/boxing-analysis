@@ -72,8 +72,11 @@ def main(argv=None) -> int:
 
     facts = report.compute_facts(rows, rounds, duration)
     runs = combos.group(combos.solo_punches(rows, rounds), pose.fps)
-    cf = combos.compute(runs, report._rule_of(side.get("rule"), "the sidecar")["min_gap_s"])
-    gate = combos.read_gate(a.combo_gate, side.get("rule"), man["sha256"]) if a.combo_gate.is_file() else None
+    # classify_punches.py records the finder mode; a sidecar without it never gets the pooled gate's result
+    mode = side.get("finder_per_hand")
+    cf = combos.compute(runs, report._rule_of(side.get("rule"), "the sidecar")["min_gap_s"], mode is True)
+    gate = (combos.read_gate(a.combo_gate, side.get("rule"), man["sha256"],
+                             mode if isinstance(mode, bool) else None) if a.combo_gate.is_file() else None)
     text, numbers = report.summary(facts, bench, finder, own, combinations=(cf, gate, False))
     if Counter(report.numbers_in(text)) != Counter(t for n in numbers for t in report.numbers_in(n)):
         raise RuntimeError("a number in the summary did not come from its templates")

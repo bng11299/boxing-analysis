@@ -41,6 +41,7 @@ GATE_DOC = "docs/gates/combinations.md"
 GATE_SEED = 20261028
 GATE_PERMUTATIONS = 2000
 GATE_PERCENTILE = 97.5
+GATE_CLIPS = ("IMG_4395", "IMG_4406")   # the registered clips; any other set is an exploratory run, never the gate
 MAX_GATE_BYTES = 256 * 1024
 SHOWN = 3            # at most this many names in the commonest list; a tie is never cut
 NAME = {"jab": "jab", "cross": "cross", "lead_hook": "lead hook", "rear_hook": "rear hook",
@@ -48,7 +49,17 @@ NAME = {"jab": "jab", "cross": "cross", "lead_hook": "lead hook", "rear_hook": "
 NUMBER = {"jab": "1", "cross": "2", "lead_hook": "3", "rear_hook": "4", "lead_uppercut": "5",
           "rear_uppercut": "6", UNKNOWN: UNKNOWN}   # the boxing numbers, for the sheet only (never the summary)
 _EPS = 1e-9
-_GATE_KEYS = {"format", "document", "gap_s", "rule", "classifier_sha256", "clips", "bars", "PASS", "pooled"}
+_GATE_KEYS = {"format", "document", "gap_s", "rule", "finder_per_hand", "classifier_sha256", "clips", "bars", "PASS",
+              "pooled"}
+_POOLED_KEYS = {"recovered_exactly", "named_label_combinations", "exact_recall", "floor_mean", "floor_p975",
+                "permutations", "seed"}
+_CLIP_COUNTS = ("label_combinations", "named_label_combinations", "recovered_exactly", "found_named_combinations",
+                "found_named_that_recover", "structure_recovered", "label_combinations_with_a_gap_under_min_gap",
+                "found_combinations", "found_punches_in_combinations", "found_punches",
+                "label_punches_in_combinations", "label_punches", "tolerance_frames", "point_tolerance_frames")
+_CLIP_LISTS = ("favourite_found", "favourite_labels", "starter_found", "starter_labels")
+_CLIP_KEYS = set(_CLIP_COUNTS) | set(_CLIP_LISTS) | {"favourite_matches", "starter_matches", "fps",
+                                                      "classified_csv_sha256", "labels_sha256"}
 _BARS = ("1_better_than_chance", "2_favourite_matches", "3_starter_matches")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -159,10 +170,10 @@ def starter(runs) -> "list[str]":
     return _top(Counter(type_of(r[0]) for r in runs if len(r) >= 2 and type_of(r[0]) != UNKNOWN))[0]
 
 
-def compute(runs, min_gap_s: float) -> dict:
+def compute(runs, min_gap_s: float, per_hand: bool = False) -> dict:
     """Every number the combination sentences state, from `group`'s runs."""
     if isinstance(min_gap_s, bool) or not isinstance(min_gap_s, (int, float)) or not (
-            math.isfinite(min_gap_s) and min_gap_s >= 0):
+            math.isfinite(min_gap_s) and min_gap_s >= 0) or not isinstance(per_hand, bool):
         raise ValueError("the finder's minimum gap must be a number of seconds >= 0")
     combos = [r for r in runs if len(r) >= 2]
     named = Counter(name_of(r) for r in combos if UNKNOWN not in name_of(r))
@@ -184,7 +195,8 @@ def compute(runs, min_gap_s: float) -> dict:
             "n_named": sum(named.values()), "n_unknown": sum(UNKNOWN in name_of(r) for r in combos),
             "starter": st, "starter_n": st_n, "n_first_named": sum(firsts.values()),
             "n_doubles": sum(doubles.values()), "doubled": dbl, "doubled_n": dbl_n,
-            "lengths": Counter(len(r) for r in combos), "min_gap_s": float(min_gap_s), "gap_s": COMBO_GAP_S}
+            "lengths": Counter(len(r) for r in combos), "min_gap_s": float(min_gap_s), "per_hand": per_hand,
+            "gap_s": COMBO_GAP_S}
 
 
 # ---------------------------------------------------------------------------------- the summary ---
@@ -211,9 +223,12 @@ def say_facts(w, cf: dict, per_boxer: bool = False) -> None:
           f"{gap} s of the last), taking {w.count(k)} of the {w.count(cf['n_punches'])} punches "
           f"({w.pct(k / cf['n_punches'])}); the longest was {w.count(cf['longest'])} punches.")
     if cf["shown"]:
-        parts = [f"{spoken(nm)} ({w.count(c)})" for nm, c in cf["shown"]]
-        w.say(f"{'The commonest combination was' if len(parts) == 1 else 'The commonest combinations were'} "
-              f"{report._join(parts)}.")
+        # "commonest" is exactly the gate's favourite (the highest count, ties kept); lower counts follow it
+        top = cf["shown"][0][1]
+        first = [f"{spoken(nm)} ({w.count(c)})" for nm, c in cf["shown"] if c == top]
+        rest = [f"{spoken(nm)} ({w.count(c)})" for nm, c in cf["shown"] if c != top]
+        w.say(f"{'The commonest combination was' if len(first) == 1 else 'The commonest combinations were'} "
+              f"{report._join(first)}" + (f", followed by {report._join(rest)}" if rest else "") + ".")
     elif cf["tie_n"]:
         w.say(f"{w.count(cf['tie_n'])} different combinations tie as the commonest, seen {w.count(cf['tie_count'])} "
               f"times each.")
@@ -250,7 +265,8 @@ def say_reliability(w, cf: dict, gate: "dict | None", per_boxer: bool = False) -
     if not cf["n_combos"]:
         return
     w.say(f"Combinations are the least certain part of this report: the tool sees at most one punch per "
-          f"{w.num(f'{cf['min_gap_s']:.1f}')} s, so faster combinations are counted short or as single punches, "
+          f"{w.num(f'{cf['min_gap_s']:.1f}')} s{' from each hand' if cf['per_hand'] else ''}, so faster "
+          f"combinations are counted short or as single punches, "
           f"and a combination is right only if every punch in it was found and named right.")
     where = "two labelled clips of solo own footage (not two boxers)" if per_boxer else "two labelled clips of own footage"
     if gate is None:
@@ -409,6 +425,7 @@ def gate_result(clips: dict, rule: dict, classifier_sha256: str, fps_of: dict,
             "2_favourite_matches": all(per[c]["favourite_matches"] for c in order),
             "3_starter_matches": all(per[c]["starter_matches"] for c in order)}
     return {"format": GATE_FORMAT, "document": GATE_DOC, "gap_s": COMBO_GAP_S, "rule": dict(rule),
+            "finder_per_hand": False,   # score_combinations.py scores the pooled finder only
             "classifier_sha256": classifier_sha256, "clips": per, "bars": bars, "PASS": all(bars.values()),
             "pooled": {"recovered_exactly": obs_hit, "named_label_combinations": obs_n, "exact_recall": recall,
                        "floor_mean": float(np.mean(floor)) if floor else 0.0, "floor_p975": p975,
@@ -424,51 +441,97 @@ def _num(x, what: str, lo: float, hi: float) -> float:
     return float(x)
 
 
-def read_gate(path, rule: dict, classifier_sha256: str) -> dict:
-    """The gate result for the report: {"status": "pass" | "fail", numbers} when it was measured with this
-    classifier, this finder rule (report._rule_of's three settings) and COMBO_GAP_S; {"status": "not_applicable"}
-    when it was measured with another. A file that is not a well-formed result is refused (ValueError): its
-    PASS must be exactly what its bars say, and its counts must be counts."""
+def _check_clip(name: str, c, fname: str) -> "tuple[int, int]":
+    """One clip's block of a gate result, internally consistent: every count a count, every list a list of names,
+    and the headline matches exactly what its lists say. Returns (recovered, named label combinations)."""
+    if not isinstance(c, dict) or set(c) != _CLIP_KEYS:
+        raise ValueError(f"{fname}: clip {name} is not a gate clip block")
+    v = {k: report._count(c[k], f"combination gate: {name} {k}") for k in _CLIP_COUNTS}
+    if not (v["recovered_exactly"] <= v["named_label_combinations"] <= v["label_combinations"]
+            and v["structure_recovered"] <= v["label_combinations"]
+            and v["label_combinations_with_a_gap_under_min_gap"] <= v["label_combinations"]
+            and v["found_named_that_recover"] <= v["found_named_combinations"] <= v["found_combinations"]
+            and v["recovered_exactly"] == v["found_named_that_recover"]
+            and v["found_punches_in_combinations"] <= v["found_punches"]
+            and v["label_punches_in_combinations"] <= v["label_punches"]):
+        raise ValueError(f"{fname}: clip {name}'s counts contradict each other")
+    names = set(NAME.values()) - {UNKNOWN}
+    for k in _CLIP_LISTS:
+        x = c[k]
+        if not isinstance(x, list) or len(x) > 64 or not all(isinstance(e, str) and len(e) <= 200 for e in x):
+            raise ValueError(f"{fname}: clip {name} {k} is not a list of names")
+        if any(not set(e.split("-")) <= names for e in x):
+            raise ValueError(f"{fname}: clip {name} {k} names something that is not a punch type")
+    for k, a, b in (("favourite_matches", "favourite_found", "favourite_labels"),
+                    ("starter_matches", "starter_found", "starter_labels")):
+        if not isinstance(c[k], bool) or c[k] != (bool(c[a]) and set(c[a]) <= set(c[b])):
+            raise ValueError(f"{fname}: clip {name} {k} is not what its lists say")
+    return v["recovered_exactly"], v["named_label_combinations"]
+
+
+def read_gate(path, rule: dict, classifier_sha256: str, per_hand: bool = False) -> dict:
+    """The gate result for the report: {"status": "pass" | "fail", numbers} when it is the REGISTERED run
+    (GATE_CLIPS, GATE_PERMUTATIONS, GATE_SEED; docs/gates/combinations.md) measured with this classifier, this
+    finder rule (report._rule_of's three settings), the pooled finder (`per_hand` False) and COMBO_GAP_S;
+    {"status": "not_applicable"} otherwise. A file that is not a well-formed, internally consistent result is
+    refused (ValueError): PASS must be exactly its bars, bar 1 exactly its recall against its floor, bars 2 and 3
+    exactly its clips' headline matches, each clip's headline exactly its lists, and the pooled counts the sums
+    of the clips' (Astra, review 1)."""
+    fname = Path(path).name
     with Path(path).open("rb") as f:
         raw = f.read(MAX_GATE_BYTES + 1)
     if len(raw) > MAX_GATE_BYTES:
-        raise ValueError(f"{Path(path).name}: more than {MAX_GATE_BYTES} bytes")
+        raise ValueError(f"{fname}: more than {MAX_GATE_BYTES} bytes")
 
     def no_constant(c):
-        raise ValueError(f"{Path(path).name} contains {c}, which is not valid JSON")
+        raise ValueError(f"{fname} contains {c}, which is not valid JSON")
     try:
         d = json.loads(raw.decode("utf-8"), parse_constant=no_constant)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-        raise ValueError(f"{Path(path).name}: not valid JSON") from None
+        raise ValueError(f"{fname}: not valid JSON") from None
     if not isinstance(d, dict) or set(d) != _GATE_KEYS or d["format"] != GATE_FORMAT or d["document"] != GATE_DOC:
-        raise ValueError(f"{Path(path).name}: not a {GATE_FORMAT} result")
+        raise ValueError(f"{fname}: not a {GATE_FORMAT} result")
     bars = d["bars"]
     if not isinstance(bars, dict) or set(bars) != set(_BARS) or not all(isinstance(bars[b], bool) for b in _BARS):
-        raise ValueError(f"{Path(path).name}: every bar must be true or false")
+        raise ValueError(f"{fname}: every bar must be true or false")
     if not isinstance(d["PASS"], bool) or d["PASS"] != all(bars.values()):
-        raise ValueError(f"{Path(path).name}: PASS is not what its bars say")
+        raise ValueError(f"{fname}: PASS is not what its bars say")
+    if not isinstance(d["finder_per_hand"], bool):
+        raise ValueError(f"{fname}: finder_per_hand must be true or false")
+    clips = d["clips"]
+    if not isinstance(clips, dict) or not clips or len(clips) > 64:
+        raise ValueError(f"{fname}: no clips")
+    per = [_check_clip(k[:64], clips[k], fname) for k in sorted(clips)]
+    if (bars["2_favourite_matches"] != all(clips[k]["favourite_matches"] for k in clips)
+            or bars["3_starter_matches"] != all(clips[k]["starter_matches"] for k in clips)):
+        raise ValueError(f"{fname}: bars 2 and 3 are not what its clips say")
     p = d["pooled"]
-    if not isinstance(p, dict):
-        raise ValueError(f"{Path(path).name}: no pooled result")
-    n = report._count(p.get("named_label_combinations"), "combination gate: labelled combinations")
-    hit = report._count(p.get("recovered_exactly"), "combination gate: recovered combinations")
-    if hit > n:
-        raise ValueError(f"{Path(path).name}: more combinations recovered than labelled")
-    recall = _num(p.get("exact_recall"), "exact recall", 0, 1)
-    if n and abs(recall - hit / n) > 1e-9:
-        raise ValueError(f"{Path(path).name}: exact recall is not recovered / labelled")
-    floor = _num(p.get("floor_p975"), "floor", 0, 1)
+    if not isinstance(p, dict) or set(p) != _POOLED_KEYS:
+        raise ValueError(f"{fname}: no pooled result")
+    n = report._count(p["named_label_combinations"], "combination gate: labelled combinations")
+    hit = report._count(p["recovered_exactly"], "combination gate: recovered combinations")
+    if (hit, n) != (sum(h for h, _ in per), sum(m for _, m in per)):
+        raise ValueError(f"{fname}: the pooled counts are not the sums of its clips'")
+    recall = _num(p["exact_recall"], "exact recall", 0, 1)
+    if abs(recall - (hit / n if n else 0.0)) > 1e-9:
+        raise ValueError(f"{fname}: exact recall is not recovered / labelled")
+    floor = _num(p["floor_p975"], "floor", 0, 1)
+    _num(p["floor_mean"], "floor mean", 0, 1)
+    perms = report._count(p["permutations"], "combination gate: permutations")
+    seed = report._count(p["seed"], "combination gate: seed")
     if bars["1_better_than_chance"] != (bool(n) and recall > floor + _EPS):
-        raise ValueError(f"{Path(path).name}: bar 1 is not what its recall and floor say")
+        raise ValueError(f"{fname}: bar 1 is not what its recall and floor say")
     if not isinstance(d["classifier_sha256"], str) or not _HEX64.fullmatch(d["classifier_sha256"]):
-        raise ValueError(f"{Path(path).name}: no classifier sha256")
+        raise ValueError(f"{fname}: no classifier sha256")
     gap = _num(d["gap_s"], "gap", 0, 60)
     try:
-        theirs = report._rule_of(d["rule"], Path(path).name)
+        theirs = report._rule_of(d["rule"], fname)
     except ValueError:
-        raise ValueError(f"{Path(path).name}: no finder rule") from None
-    if theirs != report._rule_of(rule, "the punches' finder rule") or d["classifier_sha256"] != classifier_sha256 \
-            or gap != COMBO_GAP_S:
+        raise ValueError(f"{fname}: no finder rule") from None
+    registered = tuple(sorted(clips)) == GATE_CLIPS and perms == GATE_PERMUTATIONS and seed == GATE_SEED
+    if (not registered or theirs != report._rule_of(rule, "the punches' finder rule")
+            or d["classifier_sha256"] != classifier_sha256 or gap != COMBO_GAP_S
+            or d["finder_per_hand"] is not False or per_hand is not False):
         return {"status": "not_applicable"}
     return {"status": "pass" if d["PASS"] else "fail", "bars": dict(bars), "recovered": hit, "n_label": n,
             "recall": recall, "floor": floor, "sha256": hashlib.sha256(raw).hexdigest()}
