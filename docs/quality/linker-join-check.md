@@ -84,3 +84,50 @@ of the window yet: the first `check --dry` on the 23 videos is the real-data smo
   151 passed / 0 failed / 0 skipped, test_label_moments 169 / 0 / 1 -- the same numbers as the working tree.
 - All gates green: tests (151 + 169), review (Astra FIX FIRST -> fixed; code-reviewer SHIP twice), security (own
   pass; the lock-open and Refused-reason leaks fixed).
+## Measured identity error in the per-boxer report (Brendan, 2026-10-28: "wire it in")
+
+**Acceptance criteria.** (1) With the join check's result.json, a linker identity's report quotes the measured
+join error, its Wilson interval, the count checked and the footage in its first sentence; (2) every such number is
+re-derived from the answers and the sample, never read from a typed field; (3) a sample of videos outside the
+gate's 23, edited counts, an inflated p\*, or a gate verdict disagreeing with the measured one is refused; (4)
+without the result file, behaviour is unchanged; glove and headgear gates unchanged.
+
+**Threat sketch.** Asset: the report's identity claim. Entry points: the identity sidecar, `--gate-result` and the
+files beside it. Top threats: a forged "acceptable" (a PASS with numbers); a number reaching the report that no
+answer supports.
+
+**Design.** `GATES["linker"]` registers `docs/gates/linker-join-check.md`; `_check_join_result` loads the
+`sample.json` and `answers.csv` beside the result, parses the sample against `joincheck.HELD_OUT_MANIFEST`
+(asserted equal to `olympic_headgear.HELD_OUT`), counts S / D / U from the answers and recomputes rate, interval,
+p\* and verdict; `Identity.measured` holds only those recomputed numbers. `olympic_boxers.py --join-result`
+records the verdict. `report_boxers.py` changes one line (the `header` call); PR #42 edits the lines around it,
+so whichever merges second resolves a one-line conflict.
+
+### Iteration 1 (`7d2eb37`)
+- GATE test: test_identity_measured 39 passed; test_boxers 168 (one check re-pointed: "linker" was its example of
+  a method with NO registered gate; the property is kept with `torso-colour`, plus a new check that the linker's
+  gate is its own document); test_linker_join_check 151.
+- Real-data fact: Brendan's real result.json reads as `fail`, 64 of 98, 0.6531 [0.5547, 0.7399], and the header
+  prints "... failed its pre-registered gate: in a hand check of 98 of its joins on Olympic Boxing video, 65% joined
+  two different people (95% interval 55% to 74%), ...".
+- GATE review (code-reviewer): **FIX FIRST**. B1 the sample was parsed against its own video list, so made-up
+  videos with short chains gave a PASS quoted as Olympic Boxing; B2 the answer total was not tied to the sample.
+  Should-fix: counts typed in the result, not counted; "passed" beside a measured "unreliable"; huge integers
+  overflowed. Nits: bool / float counts, wilson95 in the nothing-decided branch, a traceback from olympic_boxers.
+- GATE security (own): NaN refused at parse (test added); the rest as the review.
+
+### Iteration 2 (`a4be8a7`)
+- All of the above fixed: gate manifest, counts from `answers.csv` (pinned to the sample) with n from the sample,
+  verdict agreement in the header, strict typing, clean refusal.
+- GATE test: test_identity_measured 48 passed (new: foreign videos refused; 10,000 consistent answers refused;
+  answers changed after scoring; incomplete answers; huge integer; header disagreement both ways); test_boxers 168;
+  test_linker_join_check 152 (manifest copy equals #29's). The real result still reads `fail`, 64 of 98.
+- GATE review: re-review pending.
+### Iteration 3
+- GATE review (code-reviewer re-review): **SHIP**. B1, B2 and every should-fix confirmed fixed, each with a negative test.
+  Taken: a "not established" measurement now says "too few clear answers for its gate to judge" (test added).
+- GATE test: test_identity_measured 49 passed; test_boxers 168; test_linker_join_check 152.
+- **Residuals accepted** (none reaches a number the report quotes): another complete answers.csv pinned to the same
+  sample with the same totals (answers moved between rows) would pass, and the result's per-stratum / per-camera /
+  minutes fields are not re-derived; `GATES["linker"]["manifest"]` is a test override living in module config
+  (None = the real 23; nothing in production sets it); `AnswerFile.load`'s size check is stat-then-read.

@@ -228,6 +228,12 @@ check("the first sentence warns and quantifies: the count, the rate and its inte
       and "hand check of 98 of its joins on Olympic Boxing video" in first and "65% joined two different people" in first
       and f"95% interval {100 * m['lower']:.0f}% to {100 * m['upper']:.0f}%" in first, first)
 check("every number in it came from the templates", traced(text, nums))
+thin = {**idn.measured, "verdict": "not established", "decided": 5, "different": 3, "join_error": 0.6,
+        "lower": jc.wilson(3, 5)[0], "upper": jc.wilson(3, 5)[1]}
+t_thin, n_thin = boxers.header("A", "linker", "fail", 0, 0, 1.0, 1.0, thin)
+check("a 'not established' error says too few clear answers, so a thin rate is not read as a judgement",
+      "hand check of 5 of its joins" in t_thin and "too few clear answers for its gate to judge" in t_thin
+      and traced(t_thin, n_thin), t_thin)
 plain, _ = boxers.header("A", "linker", "fail", 3, 40, 95.0, 1200.0)
 check("without a measured error the warning is the old one, with no number in it",
       "hand check" not in plain and plain.startswith("Warning:"))

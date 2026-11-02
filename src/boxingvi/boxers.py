@@ -861,7 +861,8 @@ def _measured_clause(w, m) -> str:
     interval 55% to 74%)'. Numbers only through the writer."""
     return (f"in a hand check of {w.count(m['decided'])} of its joins on {m['footage']} video, "
             f"{w.pct(m['join_error'])} joined two different people ({w.num('95')}% interval {w.pct(m['lower'])} to "
-            f"{w.pct(m['upper'])})")
+            f"{w.pct(m['upper'])})"
+            + (", too few clear answers for its gate to judge" if m["verdict"] == "not established" else ""))
 
 
 def header(boxer: str, method: str, verdict: str, n_unsure: int, n_all: int, identified_s: float,
