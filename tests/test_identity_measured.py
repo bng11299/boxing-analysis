@@ -105,6 +105,9 @@ acceptable = sample_and_score(0, 0, [[1, 1]], "acceptable")      # one join per 
 nothing = sample_and_score(0, 100, CHAINS, "nothing")
 
 print("the result file")
+refused("a sample of videos outside the gate's 23 is refused (no pass from made-up videos)",
+        lambda: boxers.read_join_result(acceptable), "not the gate's")
+boxers.GATES["linker"]["manifest"] = MAN        # from here the synthetic videos stand in for the 23
 v, m, sha = boxers.read_join_result(unreliable)
 check("an unreliable result records 'fail' and its sha256", v == "fail" and sha == hashlib.sha256(
     unreliable.read_bytes()).hexdigest())
@@ -116,36 +119,57 @@ refused("a result with nothing decided gives no measured error", lambda: boxers.
         "nothing was decided")
 
 
-def edited(fn, name: str, sample_from: Path = unreliable) -> Path:
+def edited(fn, name: str, sample_from: Path = unreliable, answers=None) -> Path:
+    """A copy of the unreliable result, edited by fn, beside a sample and answers (`answers` edits the CSV)."""
     d = json.loads(unreliable.read_text())
     fn(d)
     folder = tmp / "edited" / name
     folder.mkdir(parents=True)
     if sample_from is not None:
         shutil.copy(sample_from.with_name("sample.json"), folder / "sample.json")
+        text = unreliable.with_name("answers.csv").read_text()
+        (folder / "answers.csv").write_text(answers(text) if answers else text, newline="")
     p = folder / "result.json"
     p.write_text(json.dumps(d), encoding="utf-8")
     return p
 
 
-refused("a result with no sample.json beside it is refused (its p* could not be checked)",
-        lambda: boxers.read_join_result(edited(lambda d: None, "nosample", None)), "no sample.json")
+refused("a result with nothing beside it is refused (nothing to count from)",
+        lambda: boxers.read_join_result(edited(lambda d: None, "nosample", None)), "must lie beside it")
 refused("a result beside another sample is refused",
         lambda: boxers.read_join_result(edited(lambda d: None, "swapped", acceptable)), "not the sample it was scored on")
+refused("a result claiming 10,000 consistent answers is refused (counts come from answers.csv, total from n)",
+        lambda: boxers.read_join_result(edited(lambda d: d.update(
+            answers={"S": 10_000, "D": 0, "U": 0, "total": 10_000}, decided=10_000, join_error=0.0,
+            wilson95=list(jc.wilson(0, 10_000)), verdict="measured, acceptable"), "tenthousand")),
+        "not the answers beside it")
+refused("answers.csv changed after scoring is refused",
+        lambda: boxers.read_join_result(edited(lambda d: None, "answers_changed",
+                                               answers=lambda t: t.replace("\n1,D\n", "\n1,S\n", 1))),
+        "not the answers beside it")
+refused("an incomplete answers.csv is refused",
+        lambda: boxers.read_join_result(edited(lambda d: None, "answers_incomplete",
+                                               answers=lambda t: t.replace("\n1,D\n", "\n1,\n", 1))),
+        "not complete")
+refused("a huge integer join error is refused, not an overflow",
+        lambda: boxers.read_join_result(edited(lambda d: d.update(join_error=10 ** 400), "huge")),
+        "not what the answers give")
 
 
 for label, fn, needle in (
-        ("an edited join error", lambda d: d.update(join_error=0.01), "not what the answer counts give"),
-        ("an edited interval", lambda d: d.update(wilson95=[0.0, 0.005]), "not what the answer counts give"),
+        ("an edited join error", lambda d: d.update(join_error=0.01), "not what the answers give"),
+        ("an edited interval", lambda d: d.update(wilson95=[0.0, 0.005]), "not what the answers give"),
         ("an edited verdict", lambda d: d.update(verdict="measured, acceptable"), "verdict is not what"),
         ("an inflated p* (it could turn a result into a pass)", lambda d: d.update(p_star=0.5),
          "not the one its sample gives"),
-        ("counts that do not add up", lambda d: d["answers"].update(total=99), "do not add up"),
-        ("a decided count that disagrees", lambda d: d.update(decided=90), "do not add up"),
-        ("a fractional count", lambda d: d["answers"].update(D=64.0), "whole numbers"),
+        ("counts that do not add up", lambda d: d["answers"].update(total=99), "not the answers beside it"),
+        ("a decided count that disagrees", lambda d: d.update(decided=90), "not the answers beside it"),
+        ("a fractional count", lambda d: d["answers"].update(D=64.0), "not the answers beside it"),
+        ("a boolean decided count", lambda d: d.update(decided=True), "not the answers beside it"),
         ("another gate's document", lambda d: d.update(gate="docs/gates/glove-identity.md"), "not the linker"),
         ("an extra key", lambda d: d.update(boxer_a="red"), "not the linker"),
-        ("a missing key", lambda d: d.pop("wilson95"), "not the linker")):
+        ("a missing key", lambda d: d.pop("wilson95"), "not the linker"),
+        ("a NaN join error", lambda d: d.update(join_error=float("nan")), "not valid JSON")):
     p = edited(fn, label.replace(" ", "_").replace("*", "").replace("(", "").replace(")", ""))
     refused(f"{label} is refused", lambda p=p: boxers.read_join_result(p), needle)
 
@@ -212,6 +236,13 @@ check("a measured PASS has no warning and states the error", not t_pass.startswi
       and "Its error was measured: in a hand check of 100 of its joins" in t_pass and traced(t_pass, n_pass), t_pass)
 refused("an ungated method with a measured error is refused",
         lambda: boxers.header("A", "linker", "ungated", 0, 0, 1.0, 1.0, idn.measured), "ungated")
+refused("'passed' next to a measured 'unreliable' is refused",
+        lambda: boxers.header("A", "linker", "pass", 0, 0, 1.0, 1.0, idn.measured), "disagree")
+refused("'failed' next to a measured 'acceptable' is refused",
+        lambda: boxers.header("A", "linker", "fail", 0, 0, 1.0, 1.0, idp.measured), "disagree")
+refused("a measured verdict outside the gate's four is refused",
+        lambda: boxers.header("A", "linker", "fail", 0, 0, 1.0, 1.0, {**idn.measured, "verdict": "fine"}),
+        "measured identity error")
 for label, bad in (("a rate outside its interval", {**m, "join_error": 0.9}),
                    ("a typed-in string", {**m, "join_error": "65%"}),
                    ("other footage", {**m, "footage": "sparring"}),

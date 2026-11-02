@@ -150,7 +150,11 @@ def main(argv=None) -> int:
                     help="linker_join_check.py's result.json: record the linker's measured verdict, not 'ungated'")
     a = ap.parse_args(argv)
     rule = find_punches.load_rule(a.rule)
-    gate = linker_gate(a.join_result)
+    try:
+        gate = linker_gate(a.join_result)
+    except ValueError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
     only = {olympic_link._check_video_id(v) for v in a.only} if a.only else None
     a.identity_dir.mkdir(parents=True, exist_ok=True)
     videos, failed = {}, []

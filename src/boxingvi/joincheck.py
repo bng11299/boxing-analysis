@@ -53,6 +53,12 @@ MAX_ANSWER_BYTES = 64 * 1024
 MAX_MINUTES = lm.MAX_MINUTES
 MAX_JOINS = 10_000              # far above any real sample: a file claiming more is not one of ours
 VIDEO_ID = re.compile(r"[A-Za-z0-9]{1,32}")
+# The gate's videos: #29's frozen held-out manifest (olympic_headgear.HELD_OUT), restated here so the library can
+# check a sample without importing a script. tests/test_linker_join_check.py asserts the two are equal.
+HELD_OUT_MANIFEST = frozenset({
+    "GH088416", "GH098416", "GH108416", "GH138416", "GH148416", "GH158416", "GH168416", "GH178416", "GH188416",
+    "GH198416", "GH208416", "GH218416", "GH079681", "GH099681", "GH109681", "GH119681", "GH129681", "GH139681",
+    "GH149681", "GH169681", "GH179681", "GH189681", "GH199681"})
 _FP = re.compile(r"[0-9a-f]{64}")
 
 Refused = lm.Refused

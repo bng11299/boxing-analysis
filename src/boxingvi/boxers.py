@@ -277,7 +277,10 @@ GATES = {"glove-colour": {"document": "docs/gates/glove-identity.md",
          "headgear-colour": {"document": "docs/gates/appearance-identity.md", "bars": None},
          # The pose-only linker (#11): Brendan's hand check of 100 sampled joins on Olympic Boxing (ADR-0018). Its
          # result is `linker_join_check.py score`'s result.json, re-derived from its counts on every read.
-         "linker": {"document": "docs/gates/linker-join-check.md", "bars": None, "result": "linker-join"}}
+         # `manifest` None = joincheck.HELD_OUT_MANIFEST, the only videos a counted sample may come from.
+         "linker": {"document": "docs/gates/linker-join-check.md", "bars": None, "result": "linker-join",
+                    "manifest": None}}
+MEASURED_VERDICTS = ("measured, acceptable", "measured, unreliable", "measured, inconclusive", "not established")
 JOIN_RESULT_BASE = {"answers", "unsure_share", "decided", "p_star", "minutes", "join_error", "wilson95", "verdict",
                     "sample_sha256", "gate"}        # joincheck.score with nothing decided writes only these
 JOIN_RESULT_KEYS = JOIN_RESULT_BASE | {"misattribution", "by_stratum", "by_camera", "wrong_joins_per_chain_minute",
@@ -285,72 +288,77 @@ JOIN_RESULT_KEYS = JOIN_RESULT_BASE | {"misattribution", "by_stratum", "by_camer
 MEASURED_KEYS = {"verdict", "decided", "different", "join_error", "lower", "upper", "footage"}
 
 
-def _check_join_result(raw: bytes, name: str, sample_raw: bytes) -> "tuple[bool, dict]":
-    """The linker join check's result.json, accepted only if its own counts give every number and the verdict
-    it states: decided = S + D, join error = D / decided, the Wilson interval and the three-way verdict are
-    recomputed and must agree; and p* must be the one recomputed from the sample it names (`sample_raw`, the
-    sample.json beside it, whose sha256 the result records), so an inflated p* cannot turn a result into a pass.
-    A file that only says "acceptable" is not evidence; neither is an edited rate. Returns (PASS, the measured
-    numbers the report may quote)."""
+def _whole(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _real(x) -> bool:
+    """A JSON float (joincheck.score writes floats): no bool, no int (a huge one would overflow a comparison)."""
+    return isinstance(x, float) and math.isfinite(x)
+
+
+def _check_join_result(raw: bytes, name: str, result_path) -> "tuple[bool, dict | None]":
+    """The linker join check's result.json, accepted only as a faithful score of the gate's own sample and of
+    the answers given to it. Nothing is taken from the result's numbers: beside it must lie the sample.json it
+    names (sha256), drawn from the gate's 23 held-out videos (joincheck.HELD_OUT_MANIFEST, so a sample of made-up
+    videos cannot be counted), and the complete answers.csv pinned to that sample. S / D / U are counted from the
+    answers; the rate, Wilson interval, p* (from the sample's chains) and three-way verdict are recomputed; the
+    result must state exactly those. Returns (PASS, the measured numbers a report may quote), or (False, None)
+    when nothing was decided."""
     from . import joincheck as jc
     d = _json_object(raw, name)
     if set(d) not in (JOIN_RESULT_KEYS, JOIN_RESULT_BASE) or d["gate"] != GATES["linker"]["document"]:
         raise ValueError(f"{name}: not the linker join check's result")
+    folder = Path(result_path).parent
+    sp, ap_ = folder / "sample.json", folder / "answers.csv"
+    if not sp.is_file() or not ap_.is_file():
+        raise ValueError(f"{name}: the sample.json and answers.csv it was scored from must lie beside it")
+    sample_raw = _read_capped(sp, jc.MAX_SAMPLE_BYTES, "join-check sample")
     if d["sample_sha256"] != hashlib.sha256(sample_raw).hexdigest():
         raise ValueError(f"{name}: the sample.json beside it is not the sample it was scored on")
+    _json_object(sample_raw, "sample.json")          # refuses NaN / Infinity before the sample parser sees it
     try:
-        sample = _json_object(sample_raw, "sample.json")
-        sample_ps = jc.parse_sample(sample_raw, set(sample.get("videos") or ())).raw["frame"]["p_star"]
-    except (ValueError, AttributeError, TypeError) as e:
-        raise ValueError(f"{name}: its sample.json is not a valid join-check sample ({e})") from None
-    a = d["answers"]
-    if not isinstance(a, dict) or set(a) != {"S", "D", "U", "total"} or not all(
-            isinstance(a[k], int) and not isinstance(a[k], bool) and a[k] >= 0 for k in a):
-        raise ValueError(f"{name}: the answer counts are not whole numbers")
-    s, dd, u, total = a["S"], a["D"], a["U"], a["total"]
+        sample = jc.parse_sample(sample_raw, GATES["linker"]["manifest"] or jc.HELD_OUT_MANIFEST)
+        answers = jc.AnswerFile.load(ap_, sample)
+    except ValueError as e:
+        raise ValueError(f"{name}: its sample or answers are not the gate's ({e})") from None
+    c = answers.counts()
+    if c["empty"]:
+        raise ValueError(f"{name}: the answers beside it are not complete")
+    s, dd, u, total = c["S"], c["D"], c["U"], sample.n
     decided = s + dd
-    if total != s + dd + u or d["decided"] != decided or total == 0:
-        raise ValueError(f"{name}: the answer counts do not add up")
-    ps = d["p_star"]
-    if isinstance(ps, bool) or not isinstance(ps, (int, float)) or not (math.isfinite(ps) and 0 <= ps <= 0.5):
-        raise ValueError(f"{name}: p* is not a number in [0, 0.5]")
-    if ps != sample_ps:
+    a = d["answers"]
+    if not isinstance(a, dict) or a != {"S": s, "D": dd, "U": u, "total": total} or not all(
+            _whole(v) for v in a.values()) or not _whole(d["decided"]) or d["decided"] != decided:
+        raise ValueError(f"{name}: its answer counts are not the answers beside it")
+    ps = sample.raw["frame"]["p_star"]
+    if not _real(d["p_star"]) or d["p_star"] != ps:
         raise ValueError(f"{name}: p* is not the one its sample gives")
     if (decided == 0) != (set(d) == JOIN_RESULT_BASE):
         raise ValueError(f"{name}: not the linker join check's result (its sections do not match its counts)")
     if decided == 0:
-        if d["verdict"] != "not established" or d["join_error"] is not None:
+        if d["verdict"] != "not established" or d["join_error"] is not None or d["wilson95"] is not None:
             raise ValueError(f"{name}: with nothing decided the verdict can only be 'not established'")
         return False, None
     rate = dd / decided
     lo, hi = jc.wilson(dd, decided)
     w = d["wilson95"]
-    if (not isinstance(d["join_error"], (int, float)) or isinstance(d["join_error"], bool)
-            or abs(d["join_error"] - rate) > 1e-12 or not isinstance(w, list) or len(w) != 2
-            or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in w)
-            or abs(w[0] - lo) > 1e-12 or abs(w[1] - hi) > 1e-12):
-        raise ValueError(f"{name}: the join error or its interval is not what the answer counts give")
+    if (not _real(d["join_error"]) or abs(d["join_error"] - rate) > 1e-12 or not isinstance(w, list)
+            or len(w) != 2 or not all(_real(x) for x in w) or abs(w[0] - lo) > 1e-12 or abs(w[1] - hi) > 1e-12):
+        raise ValueError(f"{name}: the join error or its interval is not what the answers give")
     verdict = jc.verdict(decided, u, total, lo, hi, ps)
     if d["verdict"] != verdict:
-        raise ValueError(f"{name}: the verdict is not what the counts and p* give")
+        raise ValueError(f"{name}: the verdict is not what the answers and p* give")
     return verdict == "measured, acceptable", {"verdict": verdict, "decided": decided, "different": dd,
                                                "join_error": rate, "lower": lo, "upper": hi,
                                                "footage": "Olympic Boxing"}
-
-
-def _join_sample(result_path) -> bytes:
-    p = Path(result_path).with_name("sample.json")
-    if not p.is_file():
-        raise ValueError(f"{Path(result_path).name}: no sample.json beside it, so its p* cannot be checked")
-    from .joincheck import MAX_SAMPLE_BYTES
-    return _read_capped(p, MAX_SAMPLE_BYTES, "join-check sample")
 
 
 def read_join_result(path) -> "tuple[str, dict, str]":
     """For a method writing a linker identity: (the sidecar verdict, "pass" or "fail"; the measured numbers;
     the result file's sha256). Checked exactly as read_identity will check it."""
     raw = _read_capped(path, MAX_SIDECAR_BYTES, "gate result")
-    passed, measured = _check_join_result(raw, Path(path).name, _join_sample(path))
+    passed, measured = _check_join_result(raw, Path(path).name, path)
     if measured is None:
         raise ValueError(f"{Path(path).name}: nothing was decided, so there is no measured error to record")
     return ("pass" if passed else "fail"), measured, hashlib.sha256(raw).hexdigest()
@@ -412,7 +420,7 @@ def _gate_and_measure(gate, gate_result, method: str) -> "tuple[dict, dict | Non
         raise ValueError(f"{Path(gate_result).name} is not the gate result the identity recorded")
     measured = None
     if GATES[method].get("result") == "linker-join":
-        passed, measured = _check_join_result(raw, Path(gate_result).name, _join_sample(gate_result))
+        passed, measured = _check_join_result(raw, Path(gate_result).name, gate_result)
     else:
         passed = _check_result(raw, Path(gate_result).name, GATES[method]["bars"])
     if passed != (v == "pass"):
@@ -837,9 +845,15 @@ def _check_measured(m) -> None:
           and all(isinstance(m[k], int) and not isinstance(m[k], bool) for k in ("decided", "different"))
           and 0 <= m["different"] <= m["decided"] and m["decided"] > 0
           and all(isinstance(m[k], float) and 0.0 <= m[k] <= 1.0 for k in ("join_error", "lower", "upper"))
-          and m["lower"] <= m["join_error"] <= m["upper"] and isinstance(m["verdict"], str))
+          and m["lower"] <= m["join_error"] <= m["upper"] and m["verdict"] in MEASURED_VERDICTS)
     if not ok:
         raise ValueError("header: the measured identity error is not what a checked gate result gives")
+
+
+def _check_measured_matches(verdict: str, m) -> None:
+    """A gate PASS goes only with a measured "acceptable", and a measured "acceptable" only with a PASS."""
+    if (verdict == "pass") != (m["verdict"] == "measured, acceptable"):
+        raise ValueError("header: the gate verdict and the measured verdict disagree")
 
 
 def _measured_clause(w, m) -> str:
@@ -862,6 +876,7 @@ def header(boxer: str, method: str, verdict: str, n_unsure: int, n_all: int, ide
         _check_measured(measured)
         if verdict == "ungated":
             raise ValueError("header: an ungated method has no measured error")
+        _check_measured_matches(verdict, measured)
     w = report._Writer()
     if verdict != "pass":
         w.say(f"Warning: which boxer threw each punch is unverified in this report: the method that told the two "

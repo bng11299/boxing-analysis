@@ -656,6 +656,7 @@ try:
 finally:
     cli.manifest = real_manifest
 check("the real manifest is #29's 23 held-out videos", len(real_manifest()) == 23)
+check("the library's copy of the manifest is exactly #29's", jc.HELD_OUT_MANIFEST == real_manifest())
 
 print(f"\n=== {PASS} passed, {FAIL} failed, {SKIP} skipped ===")
 shutil.rmtree(tmp, ignore_errors=True)
