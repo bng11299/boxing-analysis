@@ -130,4 +130,4 @@ so whichever merges second resolves a one-line conflict.
 - **Residuals accepted** (none reaches a number the report quotes): another complete answers.csv pinned to the same
   sample with the same totals (answers moved between rows) would pass, and the result's per-stratum / per-camera /
   minutes fields are not re-derived; `GATES["linker"]["manifest"]` is a test override living in module config
-  (None = the real 23; nothing in production sets it); `AnswerFile.load`'s size check is stat-then-read.
+  (None = the real 23; nothing in production sets it); `AnswerFile.load`'s size check is stat-then-read.- Gate reproduce: fresh clone of `origin/feat/linker-join-check` at `b1e4446`: test_identity_measured 49 / 0, test_linker_join_check 152 / 0 / 0, test_boxers 168 / 0, test_label_moments 169 / 0 / 1 skipped -- the same as the working tree.
