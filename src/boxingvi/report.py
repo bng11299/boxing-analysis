@@ -556,12 +556,16 @@ def _join(items: "list[str]") -> str:
 
 
 def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str = "your",
-            identified: "tuple[str, float] | None" = None) -> "tuple[str, list[str]]":
+            identified: "tuple[str, float] | None" = None,
+            combinations: "tuple[dict, dict | None, bool] | None" = None) -> "tuple[str, list[str]]":
     """(text, the numbers it states). Fixed templates only. `who` is the possessive the text uses for the
     person ("your"; the per-boxer report passes "this boxer's"). `identified`, (label, minutes), adds the rate
-    over the time that person was identified, beside the rate over the whole footage."""
+    over the time that person was identified, beside the rate over the whole footage. `combinations`,
+    (combos.compute's facts, combos.read_gate's result or None, per_boxer), adds the combination sentences after
+    the punch types and their caveats at the end (vault ADR-0019); without it the text is unchanged."""
     if who not in ("your", "this boxer's"):
         raise ValueError("summary: who out of range")
+    from . import combos   # combos imports this module
     Who = who[0].upper() + who[1:]
     w = _Writer()
     hc = facts["hand_check"]
@@ -629,6 +633,10 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str
                       f"a cross from a rear hook or uppercut.")
         if facts["n_unnamed"]:
             w.say(f"{w.count(facts['n_unnamed'])} it could not name: the pose was too incomplete to read.")
+        if combinations is not None:
+            if combinations[0]["n_punches"] != facts["n_found"]:
+                raise ValueError("summary: the combinations were built from other punches than these")
+            combos.say_facts(w, combinations[0], per_boxer=combinations[2])
         first, last = rounds[0], rounds[-1]
         if nr >= 2 and first["n"] and last["n"]:
             a_s, b_s = w.rate(first["per_min"]), w.rate(last["per_min"])
@@ -675,6 +683,8 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str
               f"{w.pct(own['floor'])}.")
         if own["unclassifiable"]:
             w.say(f"{w.count(own['unclassifiable'])} more matched {_punches(own['unclassifiable'])} could not be named.")
+    if combinations is not None:
+        combos.say_reliability(w, combinations[0], combinations[1], per_boxer=combinations[2])
     return " ".join(w.parts), w.numbers
 
 

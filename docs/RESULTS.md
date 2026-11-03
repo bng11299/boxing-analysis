@@ -68,6 +68,9 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 9d | Punches found per labelled punch: per boxer against its owned labels (conditional on the linker's identity); whole video; credited fragments | per boxer 5.04 (left 4.34, right 6.23; per boxer-video relative error median +4.32, IQR +3.31 to +5.53, 58 boxer-videos); whole video 2.55; credited fragments 4.16 | C16 | same | new | `feat/per-boxer-report` | **new: NOT a count error** (note 9) |
 | 10a | Ring-floor feet filter, DEVELOPMENT videos only (4): credited punches whose credited person is dropped; non-boxer person-frames removed, margins −30 to +60 px (selection bar: at most 0.5% dropped) | best, +60 px: 2.0% (8 of 392; worst video 3.4%) and 28.2%; at 0 px 4.6% and 75.4%. **No margin qualifies: stopped before any held-out run** | C17 | `results/olympic_ring/dev_grid.json` | new, 2026-10-27 | `feat/ring-mask` | **new: stopped** (note 10) |
 | 10b | Same, +60 px: linked unexplained per exposure-minute baseline → filtered (ratio, 95% video bootstrap); link coverage; A/B person-frames on uncredited ids | 36.837 → 35.494 (0.96 [0.92, 1.13]); 69.1% → 62.4%; 24.3% → 26.5% | C17 | same | new, 2026-10-27 | `feat/ring-mask` | **new: design numbers, not evidence** (note 10) |
+| 12a | Punch combinations (gap 1.0 s), own footage IMG_4406 + IMG_4395, pooled: named labelled combinations recovered exactly (every punch found, matched and named right) vs the shuffled-type floor's 97.5th percentile (gate bar 1, strictly greater) | 2 of 19 (0.105) vs 0.105 (floor mean 0.020; 2,000 permutations, seed 20261028): **bar 1 FAILS** | C19 | `results/combinations_gate.json` | new, 2026-10-28 | `feat/combinations` | **new: gate FAIL** (note 12) |
+| 12b | Headline statements, found vs labels: favourite combination (bar 2); punch that starts combinations (bar 3) | IMG_4406 jab-jab within {cross-lead hook, jab-cross, jab-jab}, starter jab = jab; IMG_4395 jab-jab vs jab-cross, starter jab = jab: **bar 2 FAILS**, bar 3 passes | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
+| 12c | Why: labelled combinations with a gap under the finder's 0.4 s minimum; structure recovered (punches only, no types); combinations and punches in them, found vs labelled | IMG_4406 11 of 12, 1 of 12, 9 / 35 of 41 vs 12 / 40 of 47; IMG_4395 6 of 7, 4 of 7, 9 / 38 of 42 vs 7 / 37 of 40 | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
 
 **Suites:** all 18 green in a fresh `git clone` of main at `664a511` (no data present): analyse_clip
 113, blur 177, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99,
@@ -140,6 +143,16 @@ report 289, tracks 79, machine scripts 38.
    `olympic_completeness.py` on both paths (linked 36.837, credited 45.465 per exposure-minute). Floors:
    27 videos clicked in 329 s; GH188416 and GH208416 left out (the camera moves). Floors and reports stay
    in the gitignored `data/` and `results/`.
+12. **Rows 12a–12c (punch combinations, 2026-10-28) are a pre-registered FAIL.** Gate
+   `docs/gates/combinations.md`, committed (`909486e`) before any combination code or number; rule and gap (1.0 s,
+   Brendan's choice over 0.75 s, vault ADR-0019) fixed, nothing tuned. Detections regenerated with C8's commands
+   reproduce rows 6a/6b exactly (35/47 and 35/41; 35/40 and 35/42; type 0.857 and 0.600 of 35). Bar 1 fails by
+   the strict inequality: the observed recall equals the floor's 97.5th percentile. The finder's 0.4 s minimum gap
+   is the main cause: 17 of the 19 labelled combinations contain a gap under 0.4 s, which no found combination can
+   reproduce exactly by construction. At about one punch a second of shadowboxing the 1.0 s gap also chains most
+   punches into long runs (found: 35 of 41 and 38 of 42 punches in combinations, longest 9 and 14). The reports
+   keep the combination block and state this failure in it; the result applies only to this classifier, finder
+   rule and gap (a finder change such as PR #40 voids it).
 
 ## Commands
 
@@ -190,6 +203,8 @@ python olympic_boxers.py --data data/olympic --tracks T --rule results/repro/pun
 python olympic_ring.py prepare --data data/olympic
 python olympic_ring.py click --floors data/olympic_ring/floors.json
 python olympic_ring.py evaluate --split dev --data data/olympic --tracks T --floors data/olympic_ring/floors.json --rule results/repro/punch_finder_v6.json --out results/olympic_ring/dev_grid.json
+# C19 punch combinations gate (rows 12a-12c): C8's find + classify into a fresh folder, then score
+python score_combinations.py --clip IMG_4406 --clip IMG_4395 --punches-dir results/repro/own_tol0.2 --labels-dir data/own --pose-dir results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --out results/repro/combinations_gate.json
 # C15 face blur, own footage only (row 8; not run here, note 6); CLIP = IMG_4406, IMG_4395
 python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
 ```
