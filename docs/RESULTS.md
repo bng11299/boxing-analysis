@@ -81,6 +81,21 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 ingest 183, labels 50, linking 266, olympic 29, pipeline 314, poseswitch 30, render_punches 66,
 report 289, tracks 79, machine scripts 38.
 
+## Linker identity, measured by hand (option A, 2026-10-28)
+
+Gate `docs/gates/linker-join-check.md` (committed `ec52160` before any code or check; bar ADR-0018). Brendan
+answered same / different / can't tell for 100 seeded, gap-stratified joins of the #11 linker (default parameters,
+as the per-boxer report uses it) on the 23 held-out Olympic videos; the window showed only the two fragments.
+Supersedes "identity error not measurable" (rows 9a-9d, note 9) and the option C record for the linker. Same-session
+hand labels, one annotator; not reproducible from a clone (the answers are Olympic-derived and stay local).
+
+| # | Claim | Value now | Cmd | Output | Recorded | Source | Status |
+|---|---|---|---|---|---|---|---|
+| 11a | Linker joins that connect two DIFFERENT people (D / decided, Wilson 95%), held-out, n = 100 | **0.653 [0.555, 0.740]** (64 D, 34 S, 2 U; 98 decided); p\* 0.0088 -> **measured, unreliable** | C18 | `results/linker_join_check/result.json` | new, 2026-10-28 | `feat/linker-join-check` | **new** |
+| 11b | Same, by gap: short (<= median) / long | 0.510 [0.375, 0.644] (25 of 49) / 0.796 [0.664, 0.885] (39 of 49) | C18 | same | new | `feat/linker-join-check` | **new: descriptive** |
+| 11c | Implied share of credited punches on the wrong person (two-person model, independent joins; an estimate) | 0.457 [0.454, 0.459] (saturates at 0.5) | C18 | same | new | `feat/linker-join-check` | **new: estimate** |
+| 11d | Wrong joins per chain-minute (video-cluster bootstrap, 10,000 draws) | 5.78 [4.82, 6.77]; frame 1,030 joins | C18 | same | new | `feat/linker-join-check` | **new: descriptive** |
+
 ## Notes
 
 1. **Finder F1 interval.** The lower bound is 0.4722. A brief listed 0.473, which was the value
@@ -224,6 +239,10 @@ python olympic_boxers.py --data data/olympic --tracks T --rule results/repro/pun
 python olympic_ring.py prepare --data data/olympic
 python olympic_ring.py click --floors data/olympic_ring/floors.json
 python olympic_ring.py evaluate --split dev --data data/olympic --tracks T --floors data/olympic_ring/floors.json --rule results/repro/punch_finder_v6.json --out results/olympic_ring/dev_grid.json
+# C18 hand-checked linker joins (rows 11a-11d): draw once, Brendan answers in the window, score once (answers stay local)
+python linker_join_check.py sample --data data/olympic --tracks T
+python linker_join_check.py check --data data/olympic --tracks T
+python linker_join_check.py score
 # C19 punch combinations gate (rows 12a-12c): C8's find + classify into a fresh folder, then score
 python score_combinations.py --clip IMG_4406 --clip IMG_4395 --punches-dir results/repro/own_tol0.2 --labels-dir data/own --pose-dir results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --out results/repro/combinations_gate.json
 # C15 face blur, own footage only (row 8; not run here, note 6); CLIP = IMG_4406, IMG_4395
@@ -253,7 +272,7 @@ python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any check
 N1 and N2 each had a gate committed before any rule code or number. N3's gate was committed with its
 code, before any floor, margin or feet-filter number (after a pixel-mask check on the development videos,
 recorded in the gate). Each result is reported as it came out: nothing was tuned on a held-out video
-afterwards, and none is iterated further. N4 had no gate, because no existing label can score it. All four are Future Work, not adopted methods. They sit here, apart from
+afterwards, and none is iterated further. N4 had no gate, because no existing label can score it; it was later measured with new hand-checked labels (row 11a). All four are Future Work, not adopted methods. They sit here, apart from
 the numbers table, so later re-runs of that table do not touch them. The sparring-video results (N2) are
 aggregate counts only, from the three consented 10-22 videos: no frame, file name or person is recorded.
 
@@ -262,7 +281,7 @@ aggregate counts only, from the three consented 10-22 videos: no frame, file nam
 | N1 | Headgear corner colour: do two co-present credited punchers read opposite corners? (Olympic Boxing) | G1: opposite ≥ 0.90 of decided pairs, ≥ 100 decided pairs, 95% video-cluster bootstrap lower bound ≥ 0.80 (more than 1% empty bootstrap draws also fails), on the 23 held-out videos (`docs/gates/appearance-identity.md`, `c1b8b9c`; rule frozen `9d18ca6`, run once). G2 (linking) only if G1 passes | **277 of 333 decided pairs opposite, 83.2%**; Wilson [0.788, 0.868]; bootstrap [0.756, 0.880]. Share ✗, pairs ✓, lower bound ✗ (0 of 10,000 draws empty). kam4 87.6% (269/307), kam2 30.8% (8/26). Decided 35.8% of 931 co-present credited pairs. G2 not run | #29 (merged) | **negative (gate failed)** (note N1) |
 | N2 | Glove colour: who is who, moment by moment, in the sparring videos | Bars 1–3 on EACH of two TEST videos separately: (1) accuracy ≥ 0.90, Wilson lower bound ≥ 0.80, ≥ 30 decided moments; (2) unsure ≤ 0.30; (3) ≤ 1 swap per 3-min round and correct share above both baselines (ByteTrack alone; the #11 linker). Bar 4 (fails safe on a same-colour video) not testable: no such video exists (`docs/gates/glove-identity.md` on `feat/glove-identity`, `0e95deb`, addendum `60a3e29`; frozen `cc48822`, each TEST scored once) | TEST (v2): verdict "separable", **28 of 44 decided, 28 of 28 right**, 0 swaps, unsure **0.36**: bar 1 ✗ (28 < 30 decided), bar 2 ✗, bar 3 ✓ (0.64 vs best baseline 0.30). TEST2 (v1): "not separable", **0 of 50** decided: bars 1–3 ✗ (unsure 1.00; 0 vs 0.57). DEV (v3, design data): "not separable", 0 of 59 | #31 (draft; gate result posted on the PR 2026-10-28) | **negative (gate failed)** (note N2) |
 | N3 | Ring-floor filter: does dropping everyone outside the ring help two-boxer tracking? (Olympic Boxing) | Choose the margin on the 4 development videos: the largest removal among margins dropping ≤ 0.5% of credited punches, else stop before any held-out run (`docs/gates/ring-floor-filter.md`, `ddf6399`) | Best margin (+60 px) drops 2.0% of credited punches (8 of 392); no margin qualifies. **Stopped on the development videos; no held-out run**, by the gate's own rule. Pixel mask dropped earlier on dev: on kam4 even the most generous boxer-safe region blacks out 0% of bystanders. Summary: rows 10a–10b; full grid: `docs/quality/ring-floor-filter.md` | #36 (merged) | **negative (gate failed: stopped on dev)** (note 10, note N3) |
-| N4 | Olympic ID-swap rate of the #11 linker | None committed: no existing label can score it (new identity labels could) | **Not measurable.** The 29 annotation files (4,609 punch tracks) record target × the thrower's own hand only; every `attributes` list is empty and nothing names a corner or a boxer. #29's co-present pairs stay true under an A/B swap, so they cannot detect one. Decision (Brendan, 2026-10-24): option C, no held-out swap rate reported (`docs/quality/olympic-swap-rate.md`) | #32 (merged) | **not measurable (no gate run)** |
+| N4 | Olympic ID-swap rate of the #11 linker | None committed: no existing label can score it (new identity labels could) | **Not measurable.** The 29 annotation files (4,609 punch tracks) record target × the thrower's own hand only; every `attributes` list is empty and nothing names a corner or a boxer. #29's co-present pairs stay true under an A/B swap, so they cannot detect one. Decision (Brendan, 2026-10-24): option C, no held-out swap rate reported (`docs/quality/olympic-swap-rate.md`). **Superseded by row 11a:** new hand-checked identity labels (C18, 2026-10-28) measured it: 0.653 [0.555, 0.740] of linker joins connect different people, so the linker is unreliable | #32 (merged); #39 | **not measurable from existing labels; measured in row 11a (0.653, unreliable)** |
 
 N1. **Why headgear was tried, and where it fails.** An eye check of a development pair showed the torso
    rule (ADR-0013) reading the vests correctly, but both boxers wore red vests; the corner colour is on the

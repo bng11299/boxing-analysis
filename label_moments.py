@@ -63,7 +63,18 @@ def summary(lf) -> str:
 
 
 class App:
-    """The window. All file writes go through the Session; this class only shows clips and maps keys."""
+    """The window. All file writes go through the Session; this class only shows clips and maps keys.
+
+    Another keypress tool (linker_join_check.py) subclasses it: the class attributes and the small methods
+    under "hooks" are what it may change; key arming, dwell, saving and quitting stay here, in one place."""
+
+    TITLE = "Label moments"
+    VALUES = lm.VALUES              # the answers a key can give
+    CANT_TELL = "?"                 # the only answer allowed when nothing could be shown
+    HOLD_MS = HOLD_MS               # how long the held picture stays, before and after the clip
+    ITEM = "moment"                 # what one row is called in messages
+    HELP = ("L = A on the LEFT of the picture     R = A on the RIGHT of the picture     ? = can't tell\n"
+            "<- / Backspace = previous     -> = next     Space = replay     E = first empty     Q / Esc = quit (saved)")
 
     def __init__(self, root, session, guard, meta, title, clock=time.monotonic):
         import tkinter as tk
@@ -78,7 +89,7 @@ class App:
         self.answer_code = self._press_code = None
         self.message = ""
         self.closed = False             # True only after a successful final save
-        root.title(f"Label moments: {title}")
+        root.title(f"{self.TITLE}: {title}")
         root.configure(bg="black")
         self.frame = tk.Frame(root, bg=GREY, padx=BORDER, pady=BORDER)
         self.frame.pack()
@@ -89,10 +100,7 @@ class App:
         self.status = tk.Label(root, font=("Segoe UI", 12), fg="#dddddd", bg="black", anchor="w", justify="left")
         self.status.pack(fill="x", padx=8)
         tk.Label(root, font=("Segoe UI", 11), fg="#9a9a9a", bg="black", anchor="w", justify="left",
-                 text="L = A on the LEFT of the picture     R = A on the RIGHT of the picture     "
-                      "? = can't tell\n"
-                      "<- / Backspace = previous     -> = next     Space = replay     "
-                      "E = first empty     Q / Esc = quit (saved)").pack(fill="x", padx=8, pady=(0, 8))
+                 text=self.HELP).pack(fill="x", padx=8, pady=(0, 8))
         root.bind("<KeyPress>", self.on_key)
         root.bind("<KeyRelease>", self.on_release)
         root.protocol("WM_DELETE_WINDOW", self.quit)
@@ -105,10 +113,52 @@ class App:
             self.root.after_cancel(aid)
             setattr(self, name, None)
 
+    # -- hooks (a subclass may override these) --
+    def key(self, i):
+        """The cache key of item i (here its time t)."""
+        return self.s.lf.times[i]
+
+    def decode(self, t):
+        """Runs on the worker thread."""
+        return lm.decode_clip(self.guard, self.meta, t)
+
+    def action_for(self, keysym):
+        return lm.action_for(keysym)
+
+    def loading_caption(self, t):
+        return f"loading t = {t} s ..."
+
+    def hold_view(self, c):
+        """(photo, border colour, caption, caption colour) for the held picture."""
+        return (self._photo(c.centre), RED,
+                f"RED FRAME = t {c.t} s.  Is A on the picture's L (left) or R (right)?", RED)
+
+    def play_view(self, c, j):
+        """(border colour, caption) while frame j plays."""
+        a, b = c.start_f / c.fps, (c.start_f + len(c.frames) - 1) / c.fps
+        return RED if j == c.centre else GREY, f"playing {a:.1f} s to {b:.1f} s  (red = t {c.t} s)"
+
+    def frame_ms(self, c, j):
+        return max(1, int(1000 / c.fps))
+
+    def first_view(self):
+        """What a newly loaded item starts with: here the held red frame; answers count from the first hold."""
+        self._hold()
+
+    def status_text(self):
+        s = self.s
+        cur = s.lf.values[s.i] or "-"
+        done = s.n - s.lf.counts()["empty"]
+        return f"moment {s.i + 1} of {s.n}    current answer: {cur}    answered {done}/{s.n}    A = {s.lf.head('A')}"
+
+    def answer_blocked(self):
+        """A reason string to refuse every answer for now (e.g. a break is due), or None."""
+        return None
+
     # -- clips --
     def _request(self, t):
         if t not in self.cache and t not in self.pending:
-            self.pending[t] = self.pool.submit(lm.decode_clip, self.guard, self.meta, t)
+            self.pending[t] = self.pool.submit(self.decode, t)
 
     def _photo(self, j):
         if j not in self.photos:
@@ -124,14 +174,14 @@ class App:
         self.shown_at, self.clip, self.photos = None, None, {}
         self.frame.config(bg=GREY)
         self.image.config(image="")
-        t = self.s.lf.times[self.s.i]
-        keep = {t} | ({self.s.lf.times[self.s.i + 1]} if self.s.i + 1 < self.s.n else set())
+        t = self.key(self.s.i)
+        keep = {t} | ({self.key(self.s.i + 1)} if self.s.i + 1 < self.s.n else set())
         for old in [x for x in self.pending if x not in keep]:   # a jump leaves clips nobody will show
             self.pending.pop(old).cancel()
         for old in [x for x in self.cache if x not in keep]:
             del self.cache[old]
         self._request(t)
-        self.caption.config(text=f"loading t = {t} s ...", fg="white")
+        self.caption.config(text=self.loading_caption(t), fg="white")
         self._update_status()
         self._wait_for(t)
 
@@ -146,50 +196,45 @@ class App:
                 self.cache[t] = self.pending.pop(t).result()
             except Exception as e:     # noqa: BLE001 -- Refused, or ffmpeg failing to start: never stall
                 why = str(e) if isinstance(e, lm.Refused) else "the video could not be decoded"
-                self.caption.config(text=f"cannot show this moment ({why}). Press ? (can't tell) or move on.",
+                self.caption.config(text=f"cannot show this {self.ITEM} ({why}). Space retries; "
+                                         f"{self.CANT_TELL} (can't tell) if it keeps failing, or move on.",
                                     fg="white")
-                self.shown_at = self.clock()           # only ? and moves are accepted: see handle()
+                self.shown_at = self.clock()           # only CANT_TELL and moves are accepted: see handle()
                 return
         self.clip = self.cache[t]
         if self.s.i + 1 < self.s.n:
-            self._request(self.s.lf.times[self.s.i + 1])   # decode the next moment while this one is judged
-        self._hold()
+            self._request(self.key(self.s.i + 1))      # decode the next moment while this one is judged
+        self.first_view()
 
     def _hold(self):
-        c = self.clip
-        self.frame.config(bg=RED)
-        self.image.config(image=self._photo(c.centre))
-        self.caption.config(text=f"RED FRAME = t {c.t} s.  Is A on the picture's L (left) or R (right)?",
-                            fg=RED)
+        photo, border, text, fg = self.hold_view(self.clip)
+        self.frame.config(bg=border)
+        self.image.config(image=photo)
+        self.caption.config(text=text, fg=fg)
         if self.shown_at is None:
             self.shown_at = self.clock()
-        self.after_id = self.root.after(HOLD_MS, lambda: self._play(0))
+        self.after_id = self.root.after(self.HOLD_MS, lambda: self._play(0))
 
     def _play(self, j):
         c = self.clip
         if j >= len(c.frames):
             self._hold()
             return
-        self.frame.config(bg=RED if j == c.centre else GREY)
+        border, text = self.play_view(c, j)
+        self.frame.config(bg=border)
         self.image.config(image=self._photo(j))
-        a, b = c.start_f / c.fps, (c.start_f + len(c.frames) - 1) / c.fps
-        self.caption.config(text=f"playing {a:.1f} s to {b:.1f} s  (red = t {c.t} s)", fg="white")
-        self.after_id = self.root.after(max(1, int(1000 / c.fps)), lambda: self._play(j + 1))
+        self.caption.config(text=text, fg="white")
+        self.after_id = self.root.after(self.frame_ms(c, j), lambda: self._play(j + 1))
 
     def _update_status(self):
-        s = self.s
-        cur = s.lf.values[s.i] or "-"
-        done = s.n - s.lf.counts()["empty"]
-        self.status.config(text=f"moment {s.i + 1} of {s.n}    current answer: {cur}    answered {done}/{s.n}"
-                                f"    A = {s.lf.head('A')}"
-                                + (f"\n{self.message}" if self.message else ""))
+        self.status.config(text=self.status_text() + (f"\n{self.message}" if self.message else ""))
 
     # -- keys --
     def on_key(self, event):
         if self.arm_id is not None:            # a release and a press back to back: auto-repeat
             self._cancel("arm_id")
         self._press_code = getattr(event, "keycode", None)
-        return self.handle(lm.action_for(event.keysym))
+        return self.handle(self.action_for(event.keysym))
 
     def on_release(self, event):
         """Only the release of the key that gave the last answer re-arms (letting go of Shift while still
@@ -206,12 +251,17 @@ class App:
     def handle(self, action):
         if action is None:
             return None
-        if action in lm.VALUES:
+        if action in self.VALUES:
+            blocked = self.answer_blocked()
+            if blocked:
+                self.message = blocked
+                self._update_status()
+                return "blocked"
             if not self.armed:
                 return "held"                           # the last answer's key has not been released
             if self.shown_at is None or self.clock() - self.shown_at < MIN_DWELL_S:
                 return "too-soon"                       # the moment has not been on screen yet
-            if self.clip is None and action != "?":
+            if self.clip is None and action != self.CANT_TELL:
                 return "not-shown"                      # nothing to judge: only "can't tell" is honest
             self.message = ""
             try:
@@ -227,7 +277,7 @@ class App:
             self.armed = False
             self.answer_code = self._press_code
             if self.s.done():
-                self.message = f"All {self.s.n} moments answered and saved. Q to finish, or <- to review."
+                self.message = f"All {self.s.n} {self.ITEM}s answered and saved. Q to finish, or <- to review."
         elif action == "quit":
             return self.quit()
         else:

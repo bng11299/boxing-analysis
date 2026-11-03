@@ -134,11 +134,13 @@ def check_labels_path(labels, participant_root=PARTICIPANT_ROOT) -> Path:
 class VideoGuard:
     """The checked video, held open until the session ends. On Windows an open file can be neither replaced
     nor renamed, nor its folder renamed; everywhere, `check()` re-confirms before each decode that the path
-    still resolves to the same file (device, file id, size, modification time) under the blurred root."""
+    still resolves to the same file (device, file id, size, modification time) under the blurred root.
+    `path_check(video, root)` is the path rule (default: blurred copies only); another tool may pass its own."""
 
-    def __init__(self, video, blurred_root=BLURRED_ROOT):
+    def __init__(self, video, blurred_root=BLURRED_ROOT, path_check=None):
         self.root = blurred_root
-        self.path = check_video_path(video, blurred_root)
+        self._path_check = path_check or check_video_path
+        self.path = self._path_check(video, blurred_root)
         self._f = open(self.path, "rb")
         st = os.fstat(self._f.fileno())
         self._id = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
@@ -147,7 +149,7 @@ class VideoGuard:
         if self._f is None:
             raise Refused("the video was closed")
         try:
-            again = check_video_path(self.path, self.root)
+            again = self._path_check(self.path, self.root)
             st = os.stat(again)
         except (Refused, OSError):
             raise Refused("the video moved or changed after it was checked") from None
@@ -186,6 +188,35 @@ def check_description(text: str) -> str:
 
 
 # ---- the labels file ------------------------------------------------------------------------------
+def replace_file(path: Path, data: bytes, on_disk, what: str, prefix: str = ".label_moments-") -> None:
+    """Write `data` to `path` atomically: a temp file beside it, then a rename. A crash leaves the old file
+    whole, and a hard link planted at the target is replaced, not written through. Refused (FileChanged) if
+    the file on disk is not `on_disk` (what the caller read or last wrote), so a stale session never
+    overwrites newer answers. `what` names the file in messages ("labels file")."""
+    try:
+        current = path.read_bytes()
+    except OSError:
+        raise SaveFailed(f"could not read the {what} back before saving") from None
+    if current != on_disk:
+        raise FileChanged(f"the {what} was changed by something else since this window opened it "
+                          "(another copy of this tool?); nothing was written")
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=prefix, suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise SaveFailed(f"could not save the {what} (is it open in Excel or another program?)") from None
+
+
 @dataclass
 class LabelFile:
     path: Path
@@ -308,30 +339,8 @@ class LabelFile:
         on disk is not what this session read or last wrote, so a stale session never overwrites newer
         answers."""
         data = self.to_bytes()
-        try:
-            current = self.path.read_bytes()
-        except OSError:
-            raise SaveFailed("could not read the labels file back before saving") from None
-        if current != getattr(self, "on_disk", None):
-            raise FileChanged("the labels file was changed by something else since this window opened it "
-                              "(another copy of this tool?); nothing was written")
-        tmp = None
-        try:
-            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".label_moments-", suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-            self.on_disk = data
-        except OSError:
-            if tmp is not None:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-            raise SaveFailed("could not save the labels file (is it open in Excel or another program?)") \
-                from None
+        replace_file(self.path, data, getattr(self, "on_disk", None), "labels file")
+        self.on_disk = data
 
     def first_empty(self):
         return next((k for k, v in enumerate(self.values) if not v), None)
@@ -447,30 +456,47 @@ def display_size(meta: VideoMeta, max_w: int = MAX_DISPLAY_W) -> "tuple[int, int
 
 def decode_clip(guard: VideoGuard, meta: VideoMeta, t: int, half: float = CLIP_HALF_S) -> Clip:
     """Stored frames round((t - half) x fps) .. round((t + half) x fps), clamped to the video, scaled for
-    display. -ss before -i seeks exactly (ffmpeg decodes from the keyframe and drops earlier frames); it is
-    aimed half a frame early so a rounded timestamp never skips the first wanted frame, and -frames:v stops
-    at the last. Passthrough timing keeps one output frame per stored frame. A short decode is refused rather
-    than shifting the red frame onto another moment."""
+    display (decode_frames). A decode that stops before the red frame is refused rather than shifting the red
+    frame onto another moment."""
     video = guard.check()
     start_f = max(0, int(round((t - half) * meta.fps)))
     t_f = int(round(t * meta.fps))
     end_f = min(meta.n_frames - 1, int(round((t + half) * meta.fps)))
-    n_want = end_f - start_f + 1
     w, h = display_size(meta)
+    frames = decode_frames(video, meta.fps, start_f, end_f - start_f + 1, w, h, f"the clip at t = {t} s",
+                           min_frames=t_f - start_f + 1)
+    return Clip(t, w, h, meta.fps, start_f, frames, t_f - start_f)
+
+
+def decode_frames(video: Path, fps: float, start_f: int, n_want: int, w: int, h: int, what: str,
+                  min_frames: int = 1) -> tuple:
+    """Up to `n_want` stored frames from `start_f`, scaled to w x h, as raw RGB24 bytes, one per frame.
+    -ss before -i seeks exactly (ffmpeg decodes from the keyframe and drops earlier frames); it is aimed half
+    a frame early so a rounded timestamp never skips the first wanted frame, and -frames:v stops at the last.
+    Passthrough timing keeps one output frame per stored frame. Fewer than `min_frames` is refused rather than
+    shifting a frame onto another moment. `what` names the clip in messages."""
+    buf, n = decode_raw(video, fps, start_f, n_want, w, h, what, min_frames)
+    size = w * h * 3
+    return tuple(buf[i * size:(i + 1) * size] for i in range(n))
+
+
+def decode_raw(video: Path, fps: float, start_f: int, n_want: int, w: int, h: int, what: str,
+               min_frames: int = 1) -> "tuple[bytes, int]":
+    """decode_frames without splitting: (ffmpeg's whole RGB24 output, number of whole frames in it), so a
+    caller can view it as one array instead of copying every frame."""
     cmd = [_tool("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", "-protocol_whitelist", "file",
-           "-ss", f"{max(0.0, (start_f - 0.5) / meta.fps):.6f}", "-i", str(video),
+           "-ss", f"{max(0.0, (start_f - 0.5) / fps):.6f}", "-i", str(video),
            "-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v", str(n_want), "-fps_mode", "passthrough",
            "-vf", f"scale={w}:{h}:flags=bilinear", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
     try:
         done = subprocess.run(cmd, capture_output=True, timeout=FFMPEG_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        raise Refused(f"ffmpeg took over {FFMPEG_TIMEOUT_S} s to decode the clip at t = {t} s") from None
+        raise Refused(f"ffmpeg took over {FFMPEG_TIMEOUT_S} s to decode {what}") from None
     size = w * h * 3
-    n = len(done.stdout) // size
-    if done.returncode != 0 or n <= t_f - start_f:
-        raise Refused(f"ffmpeg could not decode the clip at t = {t} s")
-    frames = tuple(done.stdout[i * size:(i + 1) * size] for i in range(n))
-    return Clip(t, w, h, meta.fps, start_f, frames, t_f - start_f)
+    n = min(len(done.stdout) // size, n_want)
+    if done.returncode != 0 or n < min_frames:
+        raise Refused(f"ffmpeg could not decode {what}")
+    return done.stdout, n
 
 
 # ---- one labelling session ------------------------------------------------------------------------
