@@ -99,6 +99,28 @@ number reaches tuning, or a second held-out run is made after seeing the first.
   sandbox, all three rounds) and could not independently confirm scipy tie-equivalence at runtime; the
   300-signal randomized test (ties and plateaus included) covers it here.
 
+## 2026-11-03: real pose on the training videos (V1, V6, V7, V8, V10 from the laptop)
+Pose and alignment were checked before any tuning; nothing was scored.
+
+| Video | fps (native) | pose length / video | detected | alignment: best offset, sharpness | labelled spans |
+|---|---|---|---|---|---|
+| V1 | 24.000 (24.000) | 1940.1 / 1940 s | 88.1% | 0, **1.00: FAILS** | 1,865 |
+| V4 | 23.976 (23.976) | 1474.9 / 1475 s | 99.3% | 0, 2.19 | 560 |
+| V6 | 23.976 (23.976) | 1948.0 / 1948 s | 99.7% | 0, 2.12 | 685 (= `punch_finder_v6.json`) |
+| V7 | 29.970 (29.970) | 936.3 / 936 s | 99.8% | 0, 2.64 | 195 |
+| V8 | 29.970 (29.970) | 803.5 / 804 s | 96.7% | 0, 3.07 | 199 |
+| V10 | 25.000 (25.000) | 1076.7 / 1077 s | 99.8% | 0, 2.00 | 151 |
+
+- **V1 is excluded by the gate's rule.** Its shipped skeletons are ~0.2 frame heights from the YOLO person at
+  every offset in +-12 frames (aligned videos: ~0.008), across all five fifths of the video. Not a small
+  shift: like O61, the skeletons are not from the video the link gives, or the download is another cut (the
+  link carries `&t=709s`). No offset was searched for; using V1 with a found offset would change the gate.
+- **Bug found on the real data, fixed (`5473b70`):** V6 ships one continuous skeleton, not clips, so
+  `held_out_clips` refused it. `v6_ground_truth` builds a <= 25-frame alignment window per span from the
+  continuous skeleton, so V6 takes the same gate. The stubbed tuning test could not catch this: it stubs
+  `load_video`. Tests: fastcombo_eval 98/98 (5 new V6 checks), fast_combinations 78/78; 2 mutants on the new
+  branch caught (**27 of 27 in total**). Astra (one review of this commit): **SHIP**, no findings.
+
 ## Residuals (accepted)
 - Results files are gitignored (`results/`), so the tune JSON lives on disk only: copy its chosen point
   and the arm into the PR when tuning runs, before the held-out run.
