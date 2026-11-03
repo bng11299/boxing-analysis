@@ -143,11 +143,11 @@ def fresh(text: str = None, name: str = "syn-v1.labels.csv") -> Path:
 # ---- 1. the video path ----------------------------------------------------------------------------
 print("\n-- 1. which video may be shown")
 check("a blurred copy under blurred/ is accepted", lm.check_video_path(vid, blurred) == vid.resolve())
-orig = blurred / "PXL_20261022_101500.mp4"
+orig = blurred / "PXL_20000101_000000.mp4"
 shutil.copy(vid, orig)
 raises("an unblurred original (PXL_*) is refused even under blurred/",
        lambda: lm.check_video_path(orig, blurred), contains="unblurred original")
-lower = blurred / "pxl_20261022_101500.mp4"
+lower = blurred / "pxl_20000101_000000.mp4"
 raises("PXL_ is matched without regard to case",
        lambda: lm.check_video_path(lower, blurred), contains="unblurred original")
 raises("a PXL_ name is refused before the file is even looked for",

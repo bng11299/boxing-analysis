@@ -11,7 +11,7 @@ boxer is which, moment by moment, better than tracking alone? Pixels are read fo
 punch classification), reduced to counts in memory, and never written as images.
 
 ## Status of the data (read first)
-The three videos are participant footage (study FA26-22-NG, Garage Gang amendment). On 2026-10-23 their
+The three videos are participant footage (study FA26-22-NG, sparring amendment). On 2026-10-23 their
 intake STOPPED at consent scope, with a procedure deviation (vault ISSUES-LOG O65). **Nothing in this gate runs
 on them until Hector rules and the faces are blurred.** Until then only synthetic fixtures exist, and they
 never produce a reported number. If no ruling allows it by Fri Oct 30, the gate is recorded as NOT EVALUATED
