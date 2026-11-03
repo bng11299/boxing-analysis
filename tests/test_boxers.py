@@ -447,8 +447,12 @@ quiet(boxer_punches.main, punches_args(out, idf=p_pass, extra=["--gate-result", 
 rc = quiet(report_boxers.main, report_args(out, out / "BOUT01.boxers.csv", idf=p_pass,
                                            extra=["--gate-result", str(r_pass)]))
 pt = (out / "BOUT01.A.summary.txt").read_text(encoding="utf-8")
-check("pass: no warning, the header leads", rc == 0 and pt.startswith("This is boxer A's report.")
-      and "Warning: which boxer" not in pt)
+# This fixture's hand check warns (5 of 8). With a passing identity the header carries no warning, so the hand
+# warning leads (vault ADR-0015) and the header is the second paragraph; with no hand warning the header leads
+# (report_boxers.order_paragraphs, tested in test_narrate.py).
+check("pass: no identity warning; the hand-check warning leads, then the header",
+      rc == 0 and "Warning: which boxer" not in pt and pt.startswith("Warning: the punch types")
+      and pt.split("\n\n")[1].startswith("This is boxer A's report."), pt[:300])
 refused("pass without its gate result", lambda: boxers.read_identity(p_pass, table, tracks), "give its gate result")
 other = data / "pass" / "other.json"
 other.write_bytes(b'{"PASS": true}')
@@ -940,7 +944,9 @@ check("after every refusal the out-dir is exactly as it was", sorted((p.name, sh
 rc = quiet(analyse_clip.main, TWO[:TWO.index("--identity") + 1] + [str(p_pass)] + TWO[TWO.index("--identity") + 2:]
            + ["--gate-result", str(r_pass)])
 check("a pass with its gate result runs through, and replaces the previous two-boxer set",
-      rc == 0 and (out / "BOUT01.A.summary.txt").read_text(encoding="utf-8").startswith("This is boxer A")
+      rc == 0 and (out / "BOUT01.A.summary.txt").read_text(encoding="utf-8").split("\n\n")[1].startswith(
+          "This is boxer A")
+      and "Warning: which boxer" not in (out / "BOUT01.A.summary.txt").read_text(encoding="utf-8")
       and solo_marker.read_bytes() == b"solo report")
 
 shutil.rmtree(tmp, ignore_errors=True)

@@ -93,8 +93,10 @@ def main(argv=None) -> int:
     (a.out_dir / f"{clip}.summary.txt").write_text(text + "\n", encoding="utf-8")
     if a.prompt_out:
         # participant-derived numbers never go to a cloud model (vault O63-O65): the file says so
+        # every input that contributes a number to the prompt (resolved: relative paths and links followed)
         local = any(boxers.faceblur._under(Path(x).resolve(), Path(r).resolve())
-                    for x in (a.pose, a.classified) for r in boxers.PARTICIPANT_ROOTS)
+                    for x in (a.pose, a.classified, a.score, a.combo_gate) if x is not None
+                    for r in boxers.PARTICIPANT_ROOTS)
         boxers.replace_bytes(a.out_dir / f"{clip}.narration-prompt.json", json.dumps(
             narrate.build(w, "your", may_leave_machine=not local), indent=1, ensure_ascii=False).encode("utf-8"))
         print(f"-> {clip}.narration-prompt.json" + (" (participant data: a LOCAL model only)" if local else ""))

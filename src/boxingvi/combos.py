@@ -254,8 +254,8 @@ def say_facts(w, cf: dict, per_boxer: bool = False, gate: "dict | None" = None) 
         st = _or(["the " + NAME[t] for t in cf["starter"]])
         w.say(f"Of the {w.count(cf['n_first_named'])} {'combination' if cf['n_first_named'] == 1 else 'combinations'}"
               f" whose first punch it could name, {w.count(cf['starter_n'])}{_each(len(cf['starter']))} "
-              f"({w.pct(cf['starter_n'] / cf['n_first_named'])}{_each(len(cf['starter']))}) started with {st}.",
-              trust=_trust(gate, "3_starter_matches"))
+              f"({w.pct(cf['starter_n'] / cf['n_first_named'])}{_each(len(cf['starter']))}) started with {st}"
+              f"{_FLAG[_trust(gate, '3_starter_matches')]}.", trust=_trust(gate, "3_starter_matches"))
     if cf["n_doubles"]:
         d = report._join(["the " + NAME[t] for t in cf["doubled"]])
         tr = _trust(gate, "1_better_than_chance")

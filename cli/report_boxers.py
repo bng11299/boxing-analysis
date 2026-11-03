@@ -36,6 +36,16 @@ from boxingvi.pose_yolo import PoseTable  # noqa: E402
 DEFAULT_OUT = Path("results/reports")
 
 
+def order_paragraphs(head: str, body: str, verdict: str) -> str:
+    """The header, then the summary; except that when the identity PASSED (so the header carries no warning) and
+    the summary opens with a warning paragraph (the hand check), that warning leads (vault ADR-0015: the summary
+    leads with its warning). A failed or ungated identity's warning is the header's first sentence and stays first."""
+    paras = body.split("\n\n")
+    if verdict == "pass" and paras and paras[0].startswith("Warning:"):   # a Caution does not move
+        return "\n\n".join([paras[0], head] + paras[1:])
+    return head + "\n\n" + body
+
+
 def boxer_text(boxer: str, identity, stats: dict, facts: dict, n_unsure: int, n_all: int, duration_s: float,
                fps: float, bench: dict, finder: dict, combinations=None) -> "tuple[str, list[str]]":
     """The header, then the solo summary of this boxer's punches; every number through the templates.
@@ -45,7 +55,7 @@ def boxer_text(boxer: str, identity, stats: dict, facts: dict, n_unsure: int, n_
     body, n_body = report.summary(facts, bench, finder, None, who="this boxer's",
                                   identified=(f"boxer {boxer}", identified_s / 60),
                                   combinations=None if combinations is None else (*combinations, True))
-    text, numbers = head + "\n\n" + body, n_head + n_body
+    text, numbers = order_paragraphs(head, body, identity.verdict), n_head + n_body
     if Counter(report.numbers_in(text)) != Counter(t for n in numbers for t in report.numbers_in(n)):
         raise RuntimeError("a number in the summary did not come from its templates")
     return text, numbers
