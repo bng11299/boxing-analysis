@@ -202,7 +202,7 @@ def punches_args(out: Path, tr=tracks, idf=ident, extra=()) -> list:
 
 def report_args(out: Path, csv_p: Path, tr=tracks, idf=ident, extra=()) -> list:
     return (["--tracks", str(tr), "--boxers", str(csv_p), "--identity", str(idf), "--reference", str(reference),
-             "--out-dir", str(out)] + MODEL_FILES + list(extra))
+             "--out-dir", str(out), "--combo-gate", str(out / "no-combo-gate.json")] + MODEL_FILES + list(extra))
 
 
 def fresh(name: str) -> Path:
@@ -364,8 +364,8 @@ try:
 except ValueError:
     check("summary refuses a possessive outside its fixed set", True)
 wb = load_workbook(run / "BOUT01.A.report.xlsx")
-check("the workbook has the solo sheets plus Identity", wb.sheetnames == ["Punches", "Rounds", "Reliability", "About",
-                                                                          "Identity"])
+check("the workbook has the solo sheets plus Identity and Combinations",
+      wb.sheetnames == ["Punches", "Rounds", "Reliability", "About", "Identity", "Combinations"], str(wb.sheetnames))
 idrows = {r[0]: r[1] for r in wb["Identity"].iter_rows(values_only=True)}
 check("the Identity sheet records method, verdict and the identity file's hash",
       idrows["identity method"] == "glove-colour" and idrows["gate verdict"] == "ungated"
