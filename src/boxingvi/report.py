@@ -491,12 +491,26 @@ def shares(counts: "dict[str, int]") -> "dict[str, int]":
 
 # ----------------------------------------------------------------- summary ---
 
+SECTIONS = ("warning", "headline", "facts", "trust")
+SECTION_TITLES = {"headline": "In short:", "facts": "What the tool saw:", "trust": "How much to trust it:"}
+TRUST = ("warning", "checked", "unchecked", "failed", "caveat")
+_DEFAULT_TRUST = {"warning": "warning", "headline": "unchecked", "facts": "unchecked", "trust": "caveat"}
+
+
 class _Writer:
-    """Collects sentences; every number enters through a method here, which records it."""
+    """Collects sentences; every number enters through a method here, which records it.
+
+    Each sentence is also kept as a record: its section (warning, headline, facts, trust), how far it can be
+    trusted (warning / checked = passed a check / unchecked / failed = failed a check / caveat) and the numbers
+    it states, so a narrator can be held to them (boxingvi.narrate). `section` is set by the caller; a number
+    belongs to the next sentence said after it."""
 
     def __init__(self):
         self.parts: "list[str]" = []
         self.numbers: "list[str]" = []
+        self.records: "list[dict]" = []
+        self.section = "warning"
+        self._mark = 0
 
     def num(self, s: str) -> str:
         self.numbers.append(s)
@@ -541,8 +555,23 @@ class _Writer:
         s = int(round(s))
         return self.num(f"{s // 60}:{s % 60:02d}")
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, trust: "str | None" = None) -> None:
+        if self.section not in SECTIONS or (trust is not None and trust not in TRUST):
+            raise ValueError("say: section or trust out of range")
         self.parts.append(text)
+        self.records.append({"id": f"s{len(self.records) + 1}", "section": self.section,
+                             "trust": trust or _DEFAULT_TRUST[self.section], "text": text,
+                             "numbers": self.numbers[self._mark:]})
+        self._mark = len(self.numbers)
+
+    def text(self) -> str:
+        """The sections as paragraphs, in SECTIONS order, each after its title (the warnings have none)."""
+        out = []
+        for sec in SECTIONS:
+            said = [r["text"] for r in self.records if r["section"] == sec]
+            if said:
+                out.append((SECTION_TITLES[sec] + " " if sec in SECTION_TITLES else "") + " ".join(said))
+        return "\n\n".join(out)
 
 
 def _punches(n: int) -> str:
@@ -558,11 +587,53 @@ def _join(items: "list[str]") -> str:
 def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str = "your",
             identified: "tuple[str, float] | None" = None,
             combinations: "tuple[dict, dict | None, bool] | None" = None) -> "tuple[str, list[str]]":
-    """(text, the numbers it states). Fixed templates only. `who` is the possessive the text uses for the
-    person ("your"; the per-boxer report passes "this boxer's"). `identified`, (label, minutes), adds the rate
-    over the time that person was identified, beside the rate over the whole footage. `combinations`,
-    (combos.compute's facts, combos.read_gate's result or None, per_boxer), adds the combination sentences after
-    the punch types and their caveats at the end (vault ADR-0019); without it the text is unchanged."""
+    """(text, the numbers it states). Fixed templates only, in four parts: any warning first (unchanged rule:
+    the summary LEADS with it), then "In short:" (a scouting headline built only from statements that have not
+    failed a check), "What the tool saw:" and "How much to trust it:". `who` is the possessive the text uses for
+    the person ("your"; the per-boxer report passes "this boxer's"). `identified`, (label, minutes), adds the
+    rate over the time that person was identified. `combinations`, (combos.compute's facts, combos.read_gate's
+    result or None, per_boxer), adds the combination sentences and their caveats (vault ADR-0019)."""
+    w = summary_writer(facts, bench, finder, own, who, identified, combinations)
+    return w.text(), w.numbers
+
+
+def _headline(w, facts: dict, bench: dict, combinations) -> None:
+    """The scouting headline. Fixed rule, stated in the About sheet: the pace always; the commonest punch type
+    only when the hand check did not warn and the tool names that type at least LOW_RECALL of the time on the
+    benchmark; how combinations start only when the combination gate measured that statement and it held."""
+    from . import combos
+    if not facts["n_found"]:
+        return
+    w.section = "headline"
+    n = facts["n_found"]
+    clause = ""
+    hc = facts["hand_check"]
+    recall = {t.cls: t.recall for t in bench["types"]}
+    if facts["n_named"] and hc["verdict"] != "warn":
+        top = max(facts["types"].values())
+        common = [c for c in CLASSES if facts["types"][c] == top]
+        if all(recall[c] >= LOW_RECALL for c in common):
+            clause = (f", most often {_join([PLURAL[c] for c in common])} ({w.count(top)}"
+                      f"{' each' if len(common) > 1 else ''} of the {w.count(facts['n_named'])} named)")
+    w.say(f"{w.count(n)} {_punches(n)} in {w.mmss(facts['round_minutes'] * 60)}, {w.rate(facts['per_min'])} a "
+          f"minute{clause}.")
+    if combinations is None:
+        return
+    cf, gate = combinations[0], combinations[1]
+    if (cf["n_combos"] and cf["starter"] and gate is not None and gate["status"] in ("pass", "fail")
+            and gate["bars"]["3_starter_matches"]):
+        share = cf["starter_n"] / cf["n_first_named"]
+        st = " or ".join("the " + combos.NAME[t] for t in cf["starter"])
+        w.say(f"Combinations {'usually' if share > 0.5 else 'most often'} start with {st} "
+              f"({w.count(cf['starter_n'])}{' each' if len(cf['starter']) > 1 else ''} of "
+              f"{w.count(cf['n_first_named'])}).", trust="checked")
+
+
+def summary_writer(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str = "your",
+                   identified: "tuple[str, float] | None" = None,
+                   combinations: "tuple[dict, dict | None, bool] | None" = None) -> "_Writer":
+    """The summary's writer, with every sentence as a record (`summary` joins it; boxingvi.narrate builds a
+    prompt from the records)."""
     if who not in ("your", "this boxer's"):
         raise ValueError("summary: who out of range")
     from . import combos   # combos imports this module
@@ -600,6 +671,12 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str
     elif hc["verdict"] == "too_few":
         w.say(f"Caution: only {w.count(hc['n'])} named {_punches(hc['n'])}, too few to check the punch types "
               f"against the wrist that moved.")
+    if combinations is not None and combinations[0]["n_punches"] != facts["n_found"]:
+        raise ValueError("summary: the combinations were built from other punches than these")
+    _headline(w, facts, bench, combinations)
+    w.section = "facts"
+    types_trust = "failed" if hc["verdict"] == "warn" else "unchecked"
+    later: "list[tuple[str, str]]" = []     # facts-time sentences that belong in the trust section
     rounds = facts["rounds"]
     nr = len(rounds)
     where = "one round" if nr == 1 else f"{w.count(nr)} rounds"
@@ -617,26 +694,28 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str
             order = sorted((c for c in CLASSES if facts["types"][c]), key=lambda c: (-facts["types"][c], c))
             parts = [f"{w.share(sh[c], facts['types'][c], facts['n_named'])} {PLURAL[c]} "
                      f"({w.count(facts['types'][c])})" for c in order]
-            w.say(f"Of the {w.count(facts['n_named'])} it could name, {_join(parts)}.")
+            w.say(f"Of the {w.count(facts['n_named'])} it could name, {_join(parts)}.", trust=types_trust)
             lead = facts["n_type_lead"] / facts["n_named"]
-            w.say(f"By punch type, {w.pct(lead)} were thrown with {who} lead hand.")
-            if facts["n_hands_disagree"]:
-                k = facts["n_hands_disagree"]
-                w.say(f"For {w.count(k)} {_punches(k)} the punch type and the wrist that moved point to "
-                      f"different hands; one of the two readings is wrong there.")
-            if hc["verdict"] == "pass":
-                w.say(f"Across the clip the hand each punch type implies is the wrist that moved for "
+            w.say(f"By punch type, {w.pct(lead)} were thrown with {who} lead hand.", trust=types_trust)
+    w.section = "trust"
+    if facts["n_found"] and facts["n_named"]:
+        if facts["n_hands_disagree"]:
+            k = facts["n_hands_disagree"]
+            w.say(f"For {w.count(k)} {_punches(k)} the punch type and the wrist that moved point to "
+                  f"different hands; one of the two readings is wrong there.")
+        if hc["verdict"] == "pass":
+            w.say(f"Across the clip the hand each punch type implies is the wrist that moved for "
                       f"{w.count(hc['k'])} of {w.count(hc['n'])} ({w.pct(hc['agree'])}) against "
                       f"{w.pct(hc['chance'])} by chance ({w.pval(hc['p_binomial'])} binomial, "
                       f"{w.pval(hc['p_fisher'])} Fisher), and at least the {w.pct(HAND_FLOOR)} this report "
                       f"requires. That checks the hand only: it cannot tell a jab from a lead hook or uppercut, or "
                       f"a cross from a rear hook or uppercut.")
+    w.section = "facts"
+    if facts["n_found"]:
         if facts["n_unnamed"]:
             w.say(f"{w.count(facts['n_unnamed'])} it could not name: the pose was too incomplete to read.")
         if combinations is not None:
-            if combinations[0]["n_punches"] != facts["n_found"]:
-                raise ValueError("summary: the combinations were built from other punches than these")
-            combos.say_facts(w, combinations[0], per_boxer=combinations[2])
+            combos.say_facts(w, combinations[0], per_boxer=combinations[2], gate=combinations[1])
         first, last = rounds[0], rounds[-1]
         if nr >= 2 and first["n"] and last["n"]:
             a_s, b_s = w.rate(first["per_min"]), w.rate(last["per_min"])
@@ -652,6 +731,7 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str
             k = facts["n_outside_rounds"]
             w.say(f"{w.count(k)} {_punches(k)} fell outside the rounds and {'is' if k == 1 else 'are'} not counted.")
 
+    w.section = "trust"
     low = [t for t in bench["types"] if t.recall < LOW_RECALL]
     if low:
         w.say(f"The tool names these least reliably: {_join([PLURAL[t.cls] for t in low])}. On held-out benchmark "
@@ -685,7 +765,7 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str
             w.say(f"{w.count(own['unclassifiable'])} more matched {_punches(own['unclassifiable'])} could not be named.")
     if combinations is not None:
         combos.say_reliability(w, combinations[0], combinations[1], per_boxer=combinations[2])
-    return " ".join(w.parts), w.numbers
+    return w
 
 
 def numbers_in(text: str) -> "list[str]":
@@ -785,6 +865,10 @@ def write_workbook(path: Path, clip: str, rows, rounds, facts: dict, bench: dict
                HAND_FLOOR, _check_result(hc)])
     ws = wb.create_sheet("About")
     for line in (f"clip: {clip}", "", "summary:", text, "", how_cut,
+                 f"'In short' states the pace always; the commonest punch type only when the hand check did not warn "
+                 f"and the tool names that type correctly at least {100 * LOW_RECALL:.0f}% of the time on held-out "
+                 f"benchmark footage; and how combinations start only when the combination check measured that and "
+                 f"it held. A statement that failed a check is marked where it appears.",
                  f"'named least reliably' = named correctly under {100 * LOW_RECALL:.0f}% of the time on held-out "
                  f"benchmark footage; type counts reported when more than {100 * COUNT_BIAS:.0f}% off; a change in "
                  f"punch rate reported only beyond {CHANCE_SE:.0f} standard errors of a Poisson count.",

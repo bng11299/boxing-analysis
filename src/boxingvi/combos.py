@@ -209,8 +209,21 @@ def _or(items: "list[str]") -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " or " + items[-1]
 
 
-def say_facts(w, cf: dict, per_boxer: bool = False) -> None:
-    """The combination sentences, through report._Writer `w`. Says nothing when there was no punch."""
+# Said inline after a statement whose check FAILED, so the reader never meets it unqualified.
+_FLAG = {"failed": " (this failed its check on labelled footage; see below)", "checked": "", "unchecked": ""}
+
+
+def _trust(gate: "dict | None", bar: str) -> str:
+    """What the gate said about one statement: checked (its bar held), failed, or unchecked (no usable result)."""
+    if gate is None or gate.get("status") not in ("pass", "fail"):
+        return "unchecked"
+    return "checked" if gate["bars"][bar] else "failed"
+
+
+def say_facts(w, cf: dict, per_boxer: bool = False, gate: "dict | None" = None) -> None:
+    """The combination sentences, through report._Writer `w`, each tagged with what the gate said about it (the
+    commonest: bar 2; the starter: bar 3; doubles, a sequence claim: bar 1). Says nothing when there was no
+    punch."""
     if not cf["n_punches"]:
         return
     gap = w.num(f"{cf['gap_s']:.1f}")
@@ -227,23 +240,28 @@ def say_facts(w, cf: dict, per_boxer: bool = False) -> None:
         top = cf["shown"][0][1]
         first = [f"{spoken(nm)} ({w.count(c)})" for nm, c in cf["shown"] if c == top]
         rest = [f"{spoken(nm)} ({w.count(c)})" for nm, c in cf["shown"] if c != top]
+        tr = _trust(gate, "2_favourite_matches")
         w.say(f"{'The commonest combination was' if len(first) == 1 else 'The commonest combinations were'} "
-              f"{report._join(first)}" + (f", followed by {report._join(rest)}" if rest else "") + ".")
+              f"{report._join(first)}" + (f", followed by {report._join(rest)}" if rest else "") + _FLAG[tr] + ".",
+              trust=tr)
     elif cf["tie_n"]:
+        tr = _trust(gate, "2_favourite_matches")
         w.say(f"{w.count(cf['tie_n'])} different combinations tie as the commonest, seen {w.count(cf['tie_count'])} "
-              f"times each.")
+              f"times each{_FLAG[tr]}.", trust=tr)
     elif cf["n_named"]:
         w.say("No named combination came up more than once.")
     if cf["starter"]:
         st = _or(["the " + NAME[t] for t in cf["starter"]])
         w.say(f"Of the {w.count(cf['n_first_named'])} {'combination' if cf['n_first_named'] == 1 else 'combinations'}"
               f" whose first punch it could name, {w.count(cf['starter_n'])}{_each(len(cf['starter']))} "
-              f"({w.pct(cf['starter_n'] / cf['n_first_named'])}{_each(len(cf['starter']))}) started with {st}.")
+              f"({w.pct(cf['starter_n'] / cf['n_first_named'])}{_each(len(cf['starter']))}) started with {st}.",
+              trust=_trust(gate, "3_starter_matches"))
     if cf["n_doubles"]:
         d = report._join(["the " + NAME[t] for t in cf["doubled"]])
+        tr = _trust(gate, "1_better_than_chance")
         w.say(f"The same punch came twice in a row {w.count(cf['n_doubles'])} "
               f"{'time' if cf['n_doubles'] == 1 else 'times'} inside combinations, most often {d} "
-              f"({w.count(cf['doubled_n'])}{_each(len(cf['doubled']))}).")
+              f"({w.count(cf['doubled_n'])}{_each(len(cf['doubled']))}){_FLAG[tr]}.", trust=tr)
     if cf["n_unknown"]:
         u = cf["n_unknown"]
         w.say(f"{w.count(u)} {'combination includes' if u == 1 else 'combinations include'} a punch it could not "
@@ -251,7 +269,7 @@ def say_facts(w, cf: dict, per_boxer: bool = False) -> None:
     if per_boxer:
         w.say("A combination never spans a change of tracked person or a round, so a wrong join between tracks "
               "cannot merge two people's punches into one; which boxer threw it is only as certain as the split "
-              "between the boxers.")
+              "between the boxers.", trust="caveat")
 
 
 _BAR_WORDS = {"1_better_than_chance": "exact recovery was not above chance",
