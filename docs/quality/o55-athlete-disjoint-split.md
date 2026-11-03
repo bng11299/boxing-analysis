@@ -87,6 +87,13 @@ size (less training data, different test mix). Real-world check: the run's own `
   `report.py` still uses `PIPELINE_HELD_OUT_VIDEOS`. All 24 Python suites (including combos 158 and
   report 291) and the machine scripts (45) are green. No classifier input changed, so the headline
   re-run above stands.
+- **Third merge** (`c3b3420`, 2026-11-03, after #35 and #39 landed): again one docs conflict (the
+  quality-loop index), with all three lines kept. Measured against the merge-base, none of main's
+  additions (label-moments, linker join-check) reference the split functions. RESULTS note 13
+  stays unique, and main's row 11a and N4 came in intact. All 27 Python suites are green (pipeline
+  351, classify 299, plus the new identity_measured 49, label_moments 169 and linker_join_check
+  152), and so are the machine scripts (45). label_moments skips one check because this Windows
+  account cannot create symlinks; that test is unrelated to the split.
 
 ## Exit: all gates green
 
