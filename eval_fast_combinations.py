@@ -148,7 +148,8 @@ def run_e2e(a, rule_path: Path, out_dir: Path, sha: str, videos: "dict[str, fc.V
     classifier), with the FROZEN rule file; the classified rows are read back checked against
     `rule`, the rule validated at the start, not a fresh read of any file."""
     if e2e.main(["--data", str(a.data), "--poses", str(a.poses), "--classifier", str(a.classifier),
-                 "--stance", a.stance, "--rule", str(rule_path), "--out-dir", str(out_dir)]):
+                 "--stance", a.stance, "--rule", str(rule_path), "--out-dir", str(out_dir),
+                 "--extent", str(a.extent), "--reference", str(a.reference)]):
         raise SystemExit(f"eval_pipeline_v5v9.py failed with {rule_path.name}")
     rows = {}
     for v in E2E_VIDEOS:
@@ -169,6 +170,9 @@ def main(argv=None) -> int:
     ap.add_argument("--rule", type=Path, default=tune.DEFAULT_RULE_OUT)
     ap.add_argument("--out", type=Path, default=tune.DEFAULT_HELDOUT)
     ap.add_argument("--e2e-dir", type=Path, default=Path("results/fast_combinations_e2e"))
+    # Passed through to eval_pipeline_v5v9.py, whose own defaults are relative to the working folder:
+    ap.add_argument("--extent", type=Path, default=e2e.classify_punches.DEFAULT_EXTENT)
+    ap.add_argument("--reference", type=Path, default=e2e.DEFAULT_REFERENCE)
     a = ap.parse_args(argv)
 
     tune.split_ready()

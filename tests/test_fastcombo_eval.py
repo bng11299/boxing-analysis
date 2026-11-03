@@ -346,6 +346,21 @@ check("jab found and named jab counts; cross found but named jab does not; a mis
 pc = ev.paired_named_ci({"Vx": nc}, {"Vx": nc})
 check("named-right difference of a run against itself is 0", pc["point"] == 0 and pc["ci_low"] == 0 == pc["ci_high"])
 
+print("run_e2e hands the end-to-end script explicit extent and reference paths")
+seen_argv = []
+e2e_main_saved = ev.e2e.main
+ev.e2e.main = lambda argv: (seen_argv.append(list(argv)), 1)[1]       # 1: the stage "fails", nothing is read back
+import argparse  # noqa: E402
+ns = argparse.Namespace(data=Path("D"), poses=Path("P"), classifier=Path("C"), stance="orthodox",
+                        extent=Path("EXT.json"), reference=Path("REF.json"))
+raises("a failing end-to-end stage stops the run", lambda: ev.run_e2e(ns, Path("R.json"), tmp / "e2e-x", "s", {}, {}),
+       SystemExit)
+av = seen_argv[0] if seen_argv else []
+check("--extent and --reference are passed through, with the frozen rule and the run's own out-dir",
+      av[av.index("--extent") + 1] == "EXT.json" and av[av.index("--reference") + 1] == "REF.json"
+      and av[av.index("--rule") + 1] == "R.json" and Path(av[av.index("--out-dir") + 1]) == tmp / "e2e-x", str(av))
+ev.e2e.main = e2e_main_saved
+
 print("V6: one continuous skeleton, not clips")
 v6_saved = (bdata.load_v6_track, bdata.load_v6_spans)
 n6 = 200
