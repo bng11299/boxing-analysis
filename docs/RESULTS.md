@@ -65,6 +65,7 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 7g | Unexplained per exposure-minute, unmasked → masked (min 1; min 2) | 45.352 → 44.120; 45.205 → 44.066 | C14 | same | 45.35 → 44.12; 45.21 → 44.07 | #13 | match |
 | 7h | Mask cost: exposure removed; own-labelled punches hidden (min 1; min 2) | 8.7%, 104 of 2,407 (4.3%); 8.3%, 72 of 1,741 (4.1%) | C14 | same | body: 8.5%, 4.3%; log: 8.7% / 8.3%, 4.3% / 4.1% | #13, quality-loop | match (note 5) |
 | 7i | Sample rows still unexplained with skips (min-2 sample) | 29 of 40 (11 drop out) | C14 | `results/repro/olympic_completeness_credited_min2_sample_skipcheck.csv` | 29 of 40, 11 | #13 | match |
+| 7j | Olympic completeness audit, min-2 sample viewed by Brendan: rows judged a punch the labels missed (Wilson 95%) → estimated missed labels among 4,342 unexplained bursts | **7 of 40 = 0.175 [0.087, 0.319] → 760 [380, 1,387]** (28 not a punch, 4 unsure, 1 a referee; unsure dropped 7 of 36, 844 [423, 1,521]; unsure as punch 11 of 40, 1,194 [699, 1,860]) | — (viewed by hand) | `results/olympic_completeness_credited_min2_sample.csv` (gitignored) | new, 2026-11-03 | `docs/olympic-completeness-audit` | **new** (note 13) |
 | 8 | Face blur, own footage: frames with no face found | not re-run | C15 | — | 89 of 2,353 (3.8%); 843 of 2,659 (31.7%) | #21 | **not re-run: needs Brendan's OK** (note 6) |
 | 9a | Per-boxer path, Olympic, linker (#11) as the identity input (ungated): identity files written and read back through every check; finder punches identical to linked completeness | 29 of 29 videos both; 7,984 punches on A + B (= row 7c), 10,077 on credited fragments (= row 7d) | C16 | `results/repro/olympic_boxers.json` | new, 2026-10-25 | `feat/per-boxer-report` | **new** (note 9) |
 | 9b | Punches the linker identity leaves unassigned (on credited fragments in neither chain) | 3,772 of 11,756 found (32.1%) | C16 | same | new | `feat/per-boxer-report` | **new** (note 9) |
@@ -189,6 +190,20 @@ hand labels, one annotator; not reproducible from a clone (the answers are Olymp
    on `origin/main` at `42e1c04`, outputs in the gitignored `results/repro5835/` with the rule files
    byte-identical to `results/repro/`'s (sha256 `60d92c2d…` finder, `2a44b74d…` extent); the same run
    re-scored IMG_4406 and IMG_4395 and reproduced rows 6a–6d exactly at both tolerances.
+
+13. **Row 7j (Olympic completeness audit, 2026-11-03) is the viewed sample ADR-0012 asks for.** The 40 rows are
+   the seeded simple random sample (seed 20261007, inclusion probability 0.00921 each) of the 4,342 bursts that
+   no label explains in the credited min-2 run (row 7d). Brendan watched each moment and marked it; the reviewer did
+   not view any frame (ADR-0011). Scoring is ADR-0012's, applied literally: the share judged "a punch the labels
+   missed", times 4,342, with a Wilson 95% interval from n = 40 (the finite-population correction, n/N = 0.9%,
+   is ignored). "Unsure" and the one referee row count as not a missed punch in the headline; the two other
+   readings are printed beside it. 10 rows were first judged on 2026-10-09; Brendan re-viewed them on
+   2026-11-03 and changed 5 (two old "a" codes, meaning not recorded, became 0; three "1" became 0, 0 and
+   unsure), so 7j uses only the 11-03 judgements. **Agreement with the frame-skip check (row 7i), blind:** the
+   11 rows the skip mask explains were all judged 0 or unsure, and all 7 missed punches are among the 29 rows it
+   leaves unexplained. **Limits (`docs/quality/completeness-credited.md`):** credited fragments only, possible
+   duplicates when two ids follow one person, and a referee can be a credited fragment (one was here). So 7j
+   shows that the labels miss punches inside credited fragments; it is not a bout-level count.
 
 ## Commands
 
