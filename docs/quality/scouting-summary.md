@@ -66,3 +66,14 @@ sandbox, so its bypasses were traced statically; each one is now a test that run
    assert the stronger order (warning, then header, no identity warning).
 - **Gate test.** `test_narrate.py` 88/88, `test_boxers.py` 168, `test_report.py` 293, `test_combos.py` 158. The
   realistic IMG_4406 draft is still accepted (output deleted again).
+- **Gate security (changed files).** No network, subprocess or model call. The model's reply is untrusted: read
+  through a 16 KiB cap, parsed strictly (no NaN, exact keys, one line per sentence), every rule checked, refused
+  drafts write nothing. The prompt file is read through a 1 MiB cap and must be a `<clip>.narration-prompt.json`
+  object; outputs go through `boxers.replace_bytes`. Participant inputs mark the prompt `may_leave_machine:
+  false` (findings 4-5 above). No finding open beyond the two documented residuals.
+- **Gate reproduce.** Fresh `git clone`, branch tip `0d8afa8`, no `data/` or `results/`: 28 Python suites and the
+  machine-script suite green, 4,146 checks (1 existing skip in label_moments): narrate 88, report 293, boxers
+  168, combos 158, analyse_clip 113, and every other suite as on main.
+- **Exit: all gates green.** Residuals: entailment is not verified (positively worded misreadings and the focus
+  line can pass; warnings and trust notes stay verbatim); participant data copied out of its folder is not
+  recognised as such.
