@@ -35,3 +35,34 @@ a number, computes a new one or drops the failed-gate caveat; participant number
 - **Rendered and read.** IMG_4406 summary in the new layout; its real prompt; a realistic hand-written draft (as a
   model would answer) accepted and assembled; the closing line said "from the facts above", which the narrated
   version does not show: reworded. The dry-run output was deleted.
+
+### Iteration 2 (Astra review 1: FIX FIRST, 6 findings; all addressed, one as a documented residual)
+Review: `codex-companion task`, read-only, effort medium, on `27f0b2c` (its runtime probe was denied by the
+sandbox, so its bypasses were traced statically; each one is now a test that runs).
+1. **Fixed — numeric bypasses.** Fullwidth / other Unicode digits, Roman numeral characters, vulgar fractions:
+   any numeric character outside 0-9 is refused. Ordinals (third .. twelfth) and quantity words (couple,
+   several, handful) join the spelled-number list. A number keeps its unit: tokens are taken WITH a trailing `%`
+   from the cited facts' text, so "8%" cannot reuse the count 8. Digits glued to letters (`8e9`, `1st`) and
+   ASCII Roman numerals (`IV`) are refused. Tests for each.
+2. **Fixed in part, residual documented — inverted claims and fake hedges.** Negation (not, no, never, -n't,
+   without, rarely, ...) is refused in the headline and points, except inside the required hedge phrases, so
+   "You do not lead combinations with the jab" and "this is not unreliable" are refused (tests); the prompt says
+   to state facts positively. Residual: the verifier checks numbers, citations, words and hedges, not
+   entailment; a positively worded claim that misreads a cited fact (or a focus line, where negation is allowed)
+   can pass. Mitigation by construction: warnings and every trust sentence are the tool's, verbatim, and the
+   closing line says which parts a model wrote.
+3. **Fixed — a failed starter was not marked inline.** It now carries the same "(this failed its check on
+   labelled footage; see below)" as the other failed statements (test).
+4. **Fixed — delimiter separation.** Fact and fixed lines are JSON-quoted with `<` and `>` escaped, so no data
+   line can close or open a tag (test with `</facts>` and `</printed_by_the_program>` in the data); the
+   data-only rule is in the system message as well.
+5. **Fixed — privacy inputs.** `may_leave_machine` now covers every input that contributes a number: pose,
+   classified CSV, `--score` and `--combo-gate` (resolved: relative paths and links followed). Residual: a copy
+   of participant data moved outside the participant folder is not recognised (no provenance to check).
+6. **Fixed — warning order with a passing identity.** When the identity passed (its header carries no warning)
+   and the summary opens with a "Warning:" paragraph, that warning now leads the per-boxer text and the header
+   follows (`report_boxers.order_paragraphs`); a Caution does not move; a failed or ungated identity's warning
+   stays first. Two `test_boxers.py` checks that encoded "header first" for a fixture whose hand check warns now
+   assert the stronger order (warning, then header, no identity warning).
+- **Gate test.** `test_narrate.py` 88/88, `test_boxers.py` 168, `test_report.py` 293, `test_combos.py` 158. The
+  realistic IMG_4406 draft is still accepted (output deleted again).
