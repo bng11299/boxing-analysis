@@ -70,6 +70,19 @@ RESULTS.md rows 1f–1i and note 13 say why the old rows changed, and that the d
 size (less training data, different test mix). Real-world check: the run's own `val_videos` /
 `train_videos` fields read V2/V3/V5/V9 and V1/V4/V7/V8/V10, and 1,787 + 2,970 = 4,757, the corpus.
 
+## Merge with main (2026-11-02)
+
+- **Merge:** `origin/main` merged in at `3f7d04c` (no force-push). The two conflicts were both in
+  docs. The quality-loop index keeps every line. In RESULTS.md, main keeps note 10 and the O55 note
+  became 13 (#41 and #42 take 11 and 12).
+- **Test gate:** all 24 suites green on the merged branch, including main's new gloves (273),
+  pose_watcher (68) and ring (219) suites. Pipeline 351, classify 299, machine scripts 45. Main's
+  Olympic `HELD_OUT_VIDEOS` lives in `olympic_ring.py` and does not touch the classifier split.
+- **Headline re-run:** three seeds at `3f7d04c`. Every result field is identical to the `b65a043`
+  run (only `train_seconds` differs). Real-world check: `val_videos` reads V2/V3/V5/V9,
+  `train_videos` reads V1/V4/V7/V8/V10, and the log reads "train 2970 clips / val 1787 clips". The
+  3-seed mean is still 0.7722 / 0.6331.
+
 ## Exit: all gates green
 
 - **Reproduce:** fresh `git clone` of `7de4c8d` (no `data/`): all 20 Python suites and the machine

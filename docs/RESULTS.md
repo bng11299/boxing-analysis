@@ -178,8 +178,11 @@ report 289, tracks 79, machine scripts 38.
       uses no trained model. Fixing these would mean retraining the checkpoint, which was declined
       for now (it would move every pipeline row).
     - **Run:** `b65a043`, the three seeds concurrently on the CPU above (6 torch threads each), about
-      3 h wall-clock. Each seed ran once on this split. Determinism was shown on the old split (note
-      7) with the same environment, and running concurrently does not change the thread count.
+      3 h wall-clock. **Re-run 2026-11-02** at `3f7d04c` (this branch after merging main) the same
+      way: all three seeds reproduced every result field exactly (accuracies, F1s, intervals, gaps,
+      split videos). Only `train_seconds` differed. The environment was the same (Python 3.13.15,
+      torch 2.13.0+cpu, 6 threads). So the run is deterministic on this split too (as note 7 showed
+      for the old one), and main's changes do not move rows 1f-1i.
 
 ## Commands
 
