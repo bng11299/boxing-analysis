@@ -52,6 +52,10 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 6b | Own footage IMG_4395, ±0.2 s | 35/40; 35/42; 0.600 of 35 (floor 0.371) | C8 | `results/repro/own_tol0.2/IMG_4395.*score.json` | same | #22 | match |
 | 6c | Own footage, ±0.1 s (IMG_4406; IMG_4395) | 28/47, 28/41, 0.821 of 28; 27/40, 27/42, 0.667 of 27 | C9 | `results/repro/own_tol0.1/` | same | #22 | match |
 | 6d | Framing marks flagged as punches, ±0.2 s (bounds) | 1 to 1 of 5; 1 to 1 of 2 | C8 | `results/repro/own_tol0.2/` | same | #22 | match |
+| 6e | Own footage IMG_5835 (a full 3:04 round), ±0.2 s: found; real; type on matched (floor) | 117/149; 117/162; **0.744 of 117 (floor 0.248)** | C8 | `results/repro/own_tol0.2/IMG_5835.*score.json` | new, 2026-10-28 | `feat/img5835-own-scores` | **new** (note 11) |
+| 6f | Own footage IMG_5835, ±0.1 s | 92/149; 92/162; 0.793 of 92 (floor 0.196) | C9 | `results/repro/own_tol0.1/` | new, 2026-10-28 | `feat/img5835-own-scores` | **new** (note 11) |
+| 6g | Own footage pooled over IMG_4406, IMG_4395 and IMG_5835 — **ONE boxer**: found; real; type on matched (sums of the per-clip counts in 6a–6c, 6e, 6f) | ±0.2 s: 187/236 (0.792); 187/245 (0.763); 138/187 (0.738). ±0.1 s: 147/236 (0.623); 147/245 (0.600); 114/147 (0.776) | C8, C9 | the per-clip files above | new, 2026-10-28 | `feat/img5835-own-scores` | **new: one boxer, not a population** (note 11) |
+| 6h | Framing marks flagged as punches (bounds): IMG_5835; pooled over the three clips | ±0.2 s: 3 to 3 of 8; 5 of 15. ±0.1 s: 1 to 1 of 8; 2 of 15 | C8, C9 | same | new, 2026-10-28 | `feat/img5835-own-scores` | **new** (note 11) |
 | 7a | Olympic: punches credited to a thrower; convention test | 2,423 of 4,605 (52.6%); nearest wrist is the labelled hand in 77.6% of 1,794 (629 ties) | C10 | `results/repro/olympic_attribution.json` | 2,363 of 4,490 (53%); 78% of 1,756 (607 ties) | #10 (quality-loop, 10-07 run) | **changed: input** (note 4) |
 | 7b | Olympic linking: credited punches on boxer A or B; median both-identified | 65.4% (50.7% with half held out); 57% | C11 | `results/repro/olympic_linking.json` | same | #11 | match |
 | 7c | Linked completeness: unexplained bursts; per exposure-minute vs own labels | 5,766 of 7,984; 39.4 vs 10.8 | C12 | `results/repro/olympic_completeness.json` | same | #11 | match |
@@ -68,6 +72,9 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 9d | Punches found per labelled punch: per boxer against its owned labels (conditional on the linker's identity); whole video; credited fragments | per boxer 5.04 (left 4.34, right 6.23; per boxer-video relative error median +4.32, IQR +3.31 to +5.53, 58 boxer-videos); whole video 2.55; credited fragments 4.16 | C16 | same | new | `feat/per-boxer-report` | **new: NOT a count error** (note 9) |
 | 10a | Ring-floor feet filter, DEVELOPMENT videos only (4): credited punches whose credited person is dropped; non-boxer person-frames removed, margins −30 to +60 px (selection bar: at most 0.5% dropped) | best, +60 px: 2.0% (8 of 392; worst video 3.4%) and 28.2%; at 0 px 4.6% and 75.4%. **No margin qualifies: stopped before any held-out run** | C17 | `results/olympic_ring/dev_grid.json` | new, 2026-10-27 | `feat/ring-mask` | **new: stopped** (note 10) |
 | 10b | Same, +60 px: linked unexplained per exposure-minute baseline → filtered (ratio, 95% video bootstrap); link coverage; A/B person-frames on uncredited ids | 36.837 → 35.494 (0.96 [0.92, 1.13]); 69.1% → 62.4%; 24.3% → 26.5% | C17 | same | new, 2026-10-27 | `feat/ring-mask` | **new: design numbers, not evidence** (note 10) |
+| 12a | Punch combinations (gap 1.0 s), own footage IMG_4406 + IMG_4395, pooled: named labelled combinations recovered exactly (every punch found, matched and named right) vs the shuffled-type floor's 97.5th percentile (gate bar 1, strictly greater) | 2 of 19 (0.105) vs 0.105 (floor mean 0.020; 2,000 permutations, seed 20261028): **bar 1 FAILS** | C19 | `results/combinations_gate.json` | new, 2026-10-28 | `feat/combinations` | **new: gate FAIL** (note 12) |
+| 12b | Headline statements, found vs labels: favourite combination (bar 2); punch that starts combinations (bar 3) | IMG_4406 jab-jab within {cross-lead hook, jab-cross, jab-jab}, starter jab = jab; IMG_4395 jab-jab vs jab-cross, starter jab = jab: **bar 2 FAILS**, bar 3 passes | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
+| 12c | Why: labelled combinations with a gap under the finder's 0.4 s minimum; structure recovered (punches only, no types); combinations and punches in them, found vs labelled | IMG_4406 11 of 12, 1 of 12, 9 / 35 of 41 vs 12 / 40 of 47; IMG_4395 6 of 7, 4 of 7, 9 / 38 of 42 vs 7 / 37 of 40 | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
 
 **Suites:** all 18 green in a fresh `git clone` of main at `664a511` (no data present): analyse_clip
 113, blur 177, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99,
@@ -140,6 +147,33 @@ report 289, tracks 79, machine scripts 38.
    `olympic_completeness.py` on both paths (linked 36.837, credited 45.465 per exposure-minute). Floors:
    27 videos clicked in 329 s; GH188416 and GH208416 left out (the camera moves). Floors and reports stay
    in the gitignored `data/` and `results/`.
+12. **Rows 12a–12c (punch combinations, 2026-10-28) are a pre-registered FAIL.** Gate
+   `docs/gates/combinations.md`, committed (`909486e`) before any combination code or number; rule and gap (1.0 s,
+   Brendan's choice over 0.75 s, vault ADR-0019) fixed, nothing tuned. Detections regenerated with C8's commands
+   reproduce rows 6a/6b exactly (35/47 and 35/41; 35/40 and 35/42; type 0.857 and 0.600 of 35). Bar 1 fails by
+   the strict inequality: the observed recall equals the floor's 97.5th percentile. The finder's 0.4 s minimum gap
+   is the main cause: 17 of the 19 labelled combinations contain a gap under 0.4 s, which no found combination can
+   reproduce exactly by construction. At about one punch a second of shadowboxing the 1.0 s gap also chains most
+   punches into long runs (found: 35 of 41 and 38 of 42 punches in combinations, longest 9 and 14). The reports
+   keep the combination block and state this failure in it; the result applies only to this classifier, finder
+   rule and gap (a finder change such as PR #40 voids it).
+
+11. **Rows 6e–6h (IMG_5835, 2026-10-28): the third own clip, and the first scored with every choice fixed
+   before its labels existed.** A full shadowboxing round (184.5 s, 11,056 frames at **59.937 fps**, not the
+   59.946 of the first two clips, so the Label Studio config's `frameRate` was set to 59.937 for this
+   project; the importer's two frame checks passed, offset +1). Brendan labelled it on 10-27/28 in 56.3 min
+   of stopwatch time, two sittings: 157 marks, 149 punches (143 single-frame clicks, 6 start-to-end spans)
+   and 8 "unclear" marks meaning FRAMING, scored as not a punch (`--unclear not-a-punch`). The finder rule,
+   the extent rule, the per-clip window and both point tolerances were all set before these labels were
+   made (the 0.2 s tolerance was chosen on IMG_4406/4395 after seeing their scores,
+   `docs/quality/own-footage-scoring.md`), so 6e/6f are a cleaner test of them than 6a–6c. **All three clips
+   are the same boxer (Brendan, orthodox)**: 6g is a pooled count over one
+   person, not an estimate for boxers in general. Pooled rows are sums of the per-clip counts (type correct
+   = accuracy × n per clip: 30 + 21 + 87 at ±0.2 s, 23 + 18 + 73 at ±0.1 s); no pooled floor is given,
+   since a commonest-type floor does not add across clips (per clip: 0.314, 0.371, 0.248 at ±0.2 s). Run
+   on `origin/main` at `42e1c04`, outputs in the gitignored `results/repro5835/` with the rule files
+   byte-identical to `results/repro/`'s (sha256 `60d92c2d…` finder, `2a44b74d…` extent); the same run
+   re-scored IMG_4406 and IMG_4395 and reproduced rows 6a–6d exactly at both tolerances.
 
 ## Commands
 
@@ -164,7 +198,7 @@ python eval_pipeline_v5v9.py --data data --poses results/ingest --classifier wei
 New-Item -ItemType Directory -Force results/repro/e2e_v5v9_audit
 Copy-Item results/e2e_v5v9/audit_key.json results/repro/e2e_v5v9_audit/audit_key.json
 python eval_pipeline_v5v9.py ...C6's arguments... --out-dir results/repro/e2e_v5v9_audit --judgments results/e2e_v5v9/audit/judgments.csv
-# C8  own footage, as shipped (+-0.2 s points); CLIP = IMG_4406, IMG_4395 (rows 6a, 6b, 6d)
+# C8  own footage, as shipped (+-0.2 s points); CLIP = IMG_4406, IMG_4395 (rows 6a, 6b, 6d), IMG_5835 (rows 6e, 6g, 6h)
 python find_punches.py --pose results/ingest/CLIP.pose.npz --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --out-dir results/repro/own_tol0.2
 python classify_punches.py --pose results/ingest/CLIP.pose.npz --punches results/repro/own_tol0.2/CLIP.punches.csv --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --out-dir results/repro/own_tol0.2
 # C9  own footage at +-0.1 s: the same two main()s with punchfind.POINT_TOL_S = 0.1 (no CLI flag exists; this is how #22 scored it)
@@ -190,6 +224,8 @@ python olympic_boxers.py --data data/olympic --tracks T --rule results/repro/pun
 python olympic_ring.py prepare --data data/olympic
 python olympic_ring.py click --floors data/olympic_ring/floors.json
 python olympic_ring.py evaluate --split dev --data data/olympic --tracks T --floors data/olympic_ring/floors.json --rule results/repro/punch_finder_v6.json --out results/olympic_ring/dev_grid.json
+# C19 punch combinations gate (rows 12a-12c): C8's find + classify into a fresh folder, then score
+python score_combinations.py --clip IMG_4406 --clip IMG_4395 --punches-dir results/repro/own_tol0.2 --labels-dir data/own --pose-dir results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --out results/repro/combinations_gate.json
 # C15 face blur, own footage only (row 8; not run here, note 6); CLIP = IMG_4406, IMG_4395
 python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
 ```
@@ -200,9 +236,9 @@ python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any check
    For row 8 only: `pip install --no-deps deface==1.5.0` into the same venv.
 2. Put the gitignored inputs in place, as on any working machine (`docs/MACHINE-SYNC.md`):
    `data/Skeleton_data/`, `data/Annotation_files/`, `data/rgb/V6.mp4`, `data/olympic/`,
-   `data/own/IMG_4406.*` and `IMG_4395.*`; `weights/stgcnpp_ntu120_xsub_hrnet_j.pth` and
+   `data/own/IMG_4406.*`, `IMG_4395.*` and `IMG_5835.*`; `weights/stgcnpp_ntu120_xsub_hrnet_j.pth` and
    `weights/classifier/stgcnpp-boxingvi-seed0.{pt,json}` (the manifest pins the checkpoint by sha256,
-   `32c1982d…`); `results/ingest/{V2,V5,V9,IMG_4406,IMG_4395}.pose.npz` and the 29
+   `32c1982d…`); `results/ingest/{V2,V5,V9,IMG_4406,IMG_4395,IMG_5835}.pose.npz` and the 29
    `results/ingest/olympic/<id>.tracks.npz` (pose comes from `run_ingest.py` on the GPU machine);
    for C3 and C7, `results/sweep-2026-09-22/seed0.json` and `results/e2e_v5v9/` from the run they check.
 3. Run the suites: every `python tests/test_*.py`, and
@@ -211,3 +247,45 @@ python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any check
    C2 takes about 70 min per seed and C3 about 35 min on this CPU when run alone; C13 about an hour.
    Everything else takes seconds to five minutes.
 5. Compare each printed value with "Value now".
+
+## Pre-registered negatives (identity and background, 2026-10-22 to 10-28)
+
+N1 and N2 each had a gate committed before any rule code or number. N3's gate was committed with its
+code, before any floor, margin or feet-filter number (after a pixel-mask check on the development videos,
+recorded in the gate). Each result is reported as it came out: nothing was tuned on a held-out video
+afterwards, and none is iterated further. N4 had no gate, because no existing label can score it. All four are Future Work, not adopted methods. They sit here, apart from
+the numbers table, so later re-runs of that table do not touch them. The sparring-video results (N2) are
+aggregate counts only, from the three consented 10-22 videos: no frame, file name or person is recorded.
+
+| # | Question | Gate (pre-registered) | Numbers | Source | Status |
+|---|---|---|---|---|---|
+| N1 | Headgear corner colour: do two co-present credited punchers read opposite corners? (Olympic Boxing) | G1: opposite ≥ 0.90 of decided pairs, ≥ 100 decided pairs, 95% video-cluster bootstrap lower bound ≥ 0.80 (more than 1% empty bootstrap draws also fails), on the 23 held-out videos (`docs/gates/appearance-identity.md`, `c1b8b9c`; rule frozen `9d18ca6`, run once). G2 (linking) only if G1 passes | **277 of 333 decided pairs opposite, 83.2%**; Wilson [0.788, 0.868]; bootstrap [0.756, 0.880]. Share ✗, pairs ✓, lower bound ✗ (0 of 10,000 draws empty). kam4 87.6% (269/307), kam2 30.8% (8/26). Decided 35.8% of 931 co-present credited pairs. G2 not run | #29 (merged) | **negative (gate failed)** (note N1) |
+| N2 | Glove colour: who is who, moment by moment, in the sparring videos | Bars 1–3 on EACH of two TEST videos separately: (1) accuracy ≥ 0.90, Wilson lower bound ≥ 0.80, ≥ 30 decided moments; (2) unsure ≤ 0.30; (3) ≤ 1 swap per 3-min round and correct share above both baselines (ByteTrack alone; the #11 linker). Bar 4 (fails safe on a same-colour video) not testable: no such video exists (`docs/gates/glove-identity.md` on `feat/glove-identity`, `0e95deb`, addendum `60a3e29`; frozen `cc48822`, each TEST scored once) | TEST (v2): verdict "separable", **28 of 44 decided, 28 of 28 right**, 0 swaps, unsure **0.36**: bar 1 ✗ (28 < 30 decided), bar 2 ✗, bar 3 ✓ (0.64 vs best baseline 0.30). TEST2 (v1): "not separable", **0 of 50** decided: bars 1–3 ✗ (unsure 1.00; 0 vs 0.57). DEV (v3, design data): "not separable", 0 of 59 | #31 (draft; gate result posted on the PR 2026-10-28) | **negative (gate failed)** (note N2) |
+| N3 | Ring-floor filter: does dropping everyone outside the ring help two-boxer tracking? (Olympic Boxing) | Choose the margin on the 4 development videos: the largest removal among margins dropping ≤ 0.5% of credited punches, else stop before any held-out run (`docs/gates/ring-floor-filter.md`, `ddf6399`) | Best margin (+60 px) drops 2.0% of credited punches (8 of 392); no margin qualifies. **Stopped on the development videos; no held-out run**, by the gate's own rule. Pixel mask dropped earlier on dev: on kam4 even the most generous boxer-safe region blacks out 0% of bystanders. Summary: rows 10a–10b; full grid: `docs/quality/ring-floor-filter.md` | #36 (merged) | **negative (gate failed: stopped on dev)** (note 10, note N3) |
+| N4 | Olympic ID-swap rate of the #11 linker | None committed: no existing label can score it (new identity labels could) | **Not measurable.** The 29 annotation files (4,609 punch tracks) record target × the thrower's own hand only; every `attributes` list is empty and nothing names a corner or a boxer. #29's co-present pairs stay true under an A/B swap, so they cannot detect one. Decision (Brendan, 2026-10-24): option C, no held-out swap rate reported (`docs/quality/olympic-swap-rate.md`) | #32 (merged) | **not measurable (no gate run)** |
+
+N1. **Why headgear was tried, and where it fails.** An eye check of a development pair showed the torso
+   rule (ADR-0013) reading the vests correctly, but both boxers wore red vests; the corner colour is on the
+   headgear and gloves. The headgear read agrees far more often on one
+   camera group (kam4, 87.6%, still under 0.90) than on the other (kam2, 30.8% on only 26 decided pairs: its
+   blue kit sits below 0.3 saturation, and when kam2 decides it mostly reads both people red). On the Olympic
+   development videos, gloves scored only about 58–60% opposite in #29's design checks, so the evidence
+   was against gloves before the sparring test (N2) began.
+
+N2. **Why gloves failed, and what the one success shows.** On two of three videos the rule never found
+   a glove-colour split. On DEV its two clusters were grey/white against black, with every hue bin near
+   zero. About 51% of the pixels it read were skin, so the read disc is probably not landing on the
+   glove. Where it did split (TEST), it never named a
+   boxer wrong (28 of 28) and beat both baselines (ByteTrack 0 of 44, linker 13 of 43), but it spoke on
+   too few moments to pass. Even a pass would have been reported only as "bars 1–3 passed on two held-out
+   videos; bar 4 not testable": two videos of the same pair of boxers, in the same gym and light, are not
+   evidence that the method generalises. Ground-truth labels: Brendan, 10.5 min in all, under a protocol
+   that does not show the labeller any method's output.
+
+N3. **Why masking stopped.** The cameras sit at a ring corner at head height, so a boxer at the far ropes
+   and the crowd behind them share pixels; only depth separates them, and in one image the cue to depth is
+   where a person's feet are. All 8 credits lost at +60 px are on tracks whose box bottoms sit 70–150 px
+   beyond the far edge of the floor (a boxer with hidden feet, or a punch credited to a spectator; the labels
+   cannot say which). The linked burst rate barely moved (36.837 → 35.494 per exposure-minute at +60 px,
+   ratio 0.96 [0.92, 1.13]; it rose at 0 and −30 px), and link coverage fell (69.1% → 62.4%). Details in
+   note 10.
