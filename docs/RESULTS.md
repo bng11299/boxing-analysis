@@ -52,6 +52,10 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 6b | Own footage IMG_4395, ±0.2 s | 35/40; 35/42; 0.600 of 35 (floor 0.371) | C8 | `results/repro/own_tol0.2/IMG_4395.*score.json` | same | #22 | match |
 | 6c | Own footage, ±0.1 s (IMG_4406; IMG_4395) | 28/47, 28/41, 0.821 of 28; 27/40, 27/42, 0.667 of 27 | C9 | `results/repro/own_tol0.1/` | same | #22 | match |
 | 6d | Framing marks flagged as punches, ±0.2 s (bounds) | 1 to 1 of 5; 1 to 1 of 2 | C8 | `results/repro/own_tol0.2/` | same | #22 | match |
+| 6e | Own footage IMG_5835 (a full 3:04 round), ±0.2 s: found; real; type on matched (floor) | 117/149; 117/162; **0.744 of 117 (floor 0.248)** | C8 | `results/repro/own_tol0.2/IMG_5835.*score.json` | new, 2026-10-28 | `feat/img5835-own-scores` | **new** (note 11) |
+| 6f | Own footage IMG_5835, ±0.1 s | 92/149; 92/162; 0.793 of 92 (floor 0.196) | C9 | `results/repro/own_tol0.1/` | new, 2026-10-28 | `feat/img5835-own-scores` | **new** (note 11) |
+| 6g | Own footage pooled over IMG_4406, IMG_4395 and IMG_5835 — **ONE boxer**: found; real; type on matched (sums of the per-clip counts in 6a–6c, 6e, 6f) | ±0.2 s: 187/236 (0.792); 187/245 (0.763); 138/187 (0.738). ±0.1 s: 147/236 (0.623); 147/245 (0.600); 114/147 (0.776) | C8, C9 | the per-clip files above | new, 2026-10-28 | `feat/img5835-own-scores` | **new: one boxer, not a population** (note 11) |
+| 6h | Framing marks flagged as punches (bounds): IMG_5835; pooled over the three clips | ±0.2 s: 3 to 3 of 8; 5 of 15. ±0.1 s: 1 to 1 of 8; 2 of 15 | C8, C9 | same | new, 2026-10-28 | `feat/img5835-own-scores` | **new** (note 11) |
 | 7a | Olympic: punches credited to a thrower; convention test | 2,423 of 4,605 (52.6%); nearest wrist is the labelled hand in 77.6% of 1,794 (629 ties) | C10 | `results/repro/olympic_attribution.json` | 2,363 of 4,490 (53%); 78% of 1,756 (607 ties) | #10 (quality-loop, 10-07 run) | **changed: input** (note 4) |
 | 7b | Olympic linking: credited punches on boxer A or B; median both-identified | 65.4% (50.7% with half held out); 57% | C11 | `results/repro/olympic_linking.json` | same | #11 | match |
 | 7c | Linked completeness: unexplained bursts; per exposure-minute vs own labels | 5,766 of 7,984; 39.4 vs 10.8 | C12 | `results/repro/olympic_completeness.json` | same | #11 | match |
@@ -154,6 +158,23 @@ report 289, tracks 79, machine scripts 38.
    keep the combination block and state this failure in it; the result applies only to this classifier, finder
    rule and gap (a finder change such as PR #40 voids it).
 
+11. **Rows 6e–6h (IMG_5835, 2026-10-28): the third own clip, and the first scored with every choice fixed
+   before its labels existed.** A full shadowboxing round (184.5 s, 11,056 frames at **59.937 fps**, not the
+   59.946 of the first two clips, so the Label Studio config's `frameRate` was set to 59.937 for this
+   project; the importer's two frame checks passed, offset +1). Brendan labelled it on 10-27/28 in 56.3 min
+   of stopwatch time, two sittings: 157 marks, 149 punches (143 single-frame clicks, 6 start-to-end spans)
+   and 8 "unclear" marks meaning FRAMING, scored as not a punch (`--unclear not-a-punch`). The finder rule,
+   the extent rule, the per-clip window and both point tolerances were all set before these labels were
+   made (the 0.2 s tolerance was chosen on IMG_4406/4395 after seeing their scores,
+   `docs/quality/own-footage-scoring.md`), so 6e/6f are a cleaner test of them than 6a–6c. **All three clips
+   are the same boxer (Brendan, orthodox)**: 6g is a pooled count over one
+   person, not an estimate for boxers in general. Pooled rows are sums of the per-clip counts (type correct
+   = accuracy × n per clip: 30 + 21 + 87 at ±0.2 s, 23 + 18 + 73 at ±0.1 s); no pooled floor is given,
+   since a commonest-type floor does not add across clips (per clip: 0.314, 0.371, 0.248 at ±0.2 s). Run
+   on `origin/main` at `42e1c04`, outputs in the gitignored `results/repro5835/` with the rule files
+   byte-identical to `results/repro/`'s (sha256 `60d92c2d…` finder, `2a44b74d…` extent); the same run
+   re-scored IMG_4406 and IMG_4395 and reproduced rows 6a–6d exactly at both tolerances.
+
 ## Commands
 
 From the repo root, PowerShell, with the venv's `python`.
@@ -177,7 +198,7 @@ python eval_pipeline_v5v9.py --data data --poses results/ingest --classifier wei
 New-Item -ItemType Directory -Force results/repro/e2e_v5v9_audit
 Copy-Item results/e2e_v5v9/audit_key.json results/repro/e2e_v5v9_audit/audit_key.json
 python eval_pipeline_v5v9.py ...C6's arguments... --out-dir results/repro/e2e_v5v9_audit --judgments results/e2e_v5v9/audit/judgments.csv
-# C8  own footage, as shipped (+-0.2 s points); CLIP = IMG_4406, IMG_4395 (rows 6a, 6b, 6d)
+# C8  own footage, as shipped (+-0.2 s points); CLIP = IMG_4406, IMG_4395 (rows 6a, 6b, 6d), IMG_5835 (rows 6e, 6g, 6h)
 python find_punches.py --pose results/ingest/CLIP.pose.npz --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --out-dir results/repro/own_tol0.2
 python classify_punches.py --pose results/ingest/CLIP.pose.npz --punches results/repro/own_tol0.2/CLIP.punches.csv --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --out-dir results/repro/own_tol0.2
 # C9  own footage at +-0.1 s: the same two main()s with punchfind.POINT_TOL_S = 0.1 (no CLI flag exists; this is how #22 scored it)
@@ -215,9 +236,9 @@ python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any check
    For row 8 only: `pip install --no-deps deface==1.5.0` into the same venv.
 2. Put the gitignored inputs in place, as on any working machine (`docs/MACHINE-SYNC.md`):
    `data/Skeleton_data/`, `data/Annotation_files/`, `data/rgb/V6.mp4`, `data/olympic/`,
-   `data/own/IMG_4406.*` and `IMG_4395.*`; `weights/stgcnpp_ntu120_xsub_hrnet_j.pth` and
+   `data/own/IMG_4406.*`, `IMG_4395.*` and `IMG_5835.*`; `weights/stgcnpp_ntu120_xsub_hrnet_j.pth` and
    `weights/classifier/stgcnpp-boxingvi-seed0.{pt,json}` (the manifest pins the checkpoint by sha256,
-   `32c1982d…`); `results/ingest/{V2,V5,V9,IMG_4406,IMG_4395}.pose.npz` and the 29
+   `32c1982d…`); `results/ingest/{V2,V5,V9,IMG_4406,IMG_4395,IMG_5835}.pose.npz` and the 29
    `results/ingest/olympic/<id>.tracks.npz` (pose comes from `run_ingest.py` on the GPU machine);
    for C3 and C7, `results/sweep-2026-09-22/seed0.json` and `results/e2e_v5v9/` from the run they check.
 3. Run the suites: every `python tests/test_*.py`, and
