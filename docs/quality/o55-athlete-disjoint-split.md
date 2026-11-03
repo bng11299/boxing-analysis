@@ -94,6 +94,13 @@ size (less training data, different test mix). Real-world check: the run's own `
   351, classify 299, plus the new identity_measured 49, label_moments 169 and linker_join_check
   152), and so are the machine scripts (45). label_moments skips one check because this Windows
   account cannot create symlinks; that test is unrelated to the split.
+- **Fourth merge** (`ae548df`, after #44 release-readiness landed): one conflict, the README
+  "Reported results" row. Both intents are kept: main's pointer to RESULTS.md as the current
+  numbers and its note that the first baselines are as reported in September, plus the
+  athlete-disjoint V2/V3/V5/V9 split. Main's new README sections (reproducing, licence, Olympic
+  Boxing citation), LICENSE and .gitignore came in unchanged. The .gitignore change only adds
+  patterns, and `data/`, `results/` and `weights/` are still ignored. All 27 Python suites and the
+  machine scripts are green, with the same counts as after the third merge.
 
 ## Exit: all gates green
 
