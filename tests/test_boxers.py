@@ -202,7 +202,7 @@ def punches_args(out: Path, tr=tracks, idf=ident, extra=()) -> list:
 
 def report_args(out: Path, csv_p: Path, tr=tracks, idf=ident, extra=()) -> list:
     return (["--tracks", str(tr), "--boxers", str(csv_p), "--identity", str(idf), "--reference", str(reference),
-             "--out-dir", str(out)] + MODEL_FILES + list(extra))
+             "--out-dir", str(out), "--combo-gate", str(out / "no-combo-gate.json")] + MODEL_FILES + list(extra))
 
 
 def fresh(name: str) -> Path:
@@ -364,8 +364,8 @@ try:
 except ValueError:
     check("summary refuses a possessive outside its fixed set", True)
 wb = load_workbook(run / "BOUT01.A.report.xlsx")
-check("the workbook has the solo sheets plus Identity", wb.sheetnames == ["Punches", "Rounds", "Reliability", "About",
-                                                                          "Identity"])
+check("the workbook has the solo sheets plus Identity and Combinations",
+      wb.sheetnames == ["Punches", "Rounds", "Reliability", "About", "Identity", "Combinations"], str(wb.sheetnames))
 idrows = {r[0]: r[1] for r in wb["Identity"].iter_rows(values_only=True)}
 check("the Identity sheet records method, verdict and the identity file's hash",
       idrows["identity method"] == "glove-colour" and idrows["gate verdict"] == "ungated"
@@ -475,8 +475,10 @@ refused("a PASS its own bars contradict", lambda: boxers.read_identity(p_inc, ta
 p_str, r_str = gated("strbars", "pass", result_json(True, ("yes", True, True, True)))
 refused("a bar that is not true or false", lambda: boxers.read_identity(p_str, table, tracks, r_str),
         "not this gate's result")
-refused("a gated verdict for a method with no registered gate (the linker)", lambda: gated(
-    "linkergate", "fail", FAILED, method="linker"), "no gate is registered for the method linker")
+refused("a gated verdict for a method with no registered gate (torso colour)", lambda: gated(
+    "torsogate", "fail", FAILED, method="torso-colour"), "no gate is registered for the method torso-colour")
+refused("the linker's gate is its own join check, not another method's document", lambda: gated(
+    "linkergate", "fail", FAILED, method="linker"), "not the gate pre-registered for linker")
 refused("a gate document that is not the method's own", lambda: gated(
     "wrongdoc", "fail", FAILED, doc=boxers.GATES["headgear-colour"]["document"]), "is not the gate pre-registered")
 p_hg, r_hg = gated("headgear", "fail", FAILED, method="headgear-colour",

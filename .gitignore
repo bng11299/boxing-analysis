@@ -6,6 +6,29 @@ Dataset/
 *.mov
 *.avi
 *.mkv
+# Upper-case variants: phones write .MOV/.MP4, and git matches case-sensitively
+# on Linux and macOS clones (Windows hides this).
+*.MP4
+*.MOV
+*.AVI
+*.MKV
+# Frames, crops and audio pulled out of footage
+*.png
+*.jpg
+*.jpeg
+*.PNG
+*.JPG
+*.JPEG
+*.heic
+*.HEIC
+*.wav
+*.m4a
+# Arrays and pickles (pose files, tracks) written outside data/ and results/.
+# CSV is not ignored: annotations are part of the release contract.
+*.npy
+*.npz
+*.pkl
+*.pickle
 
 # Derived
 results/
@@ -13,6 +36,10 @@ runs/
 *.pt
 *.pth
 *.ckpt
+*.onnx
+*.safetensors
+*.engine
+*.tflite
 # Pretrained third-party weights: fetched and verified, never committed.
 weights/
 __pycache__/

@@ -213,6 +213,7 @@ class Identity:
     segments: tuple
     csv_sha256: str
     sidecar_sha256: str
+    measured: "dict | None" = None   # the method's measured identity error, from its checked gate result only
 
     @property
     def verdict(self) -> str:
@@ -273,7 +274,94 @@ def check_segments(table: PoseTable, segments) -> None:
 # failed its gate and has no result format registered, so it can record "fail" without a result, never "pass".
 GATES = {"glove-colour": {"document": "docs/gates/glove-identity.md",
                           "bars": ("1_accuracy", "2_unsure", "3_better_than_tracking", "4_fails_safe")},
-         "headgear-colour": {"document": "docs/gates/appearance-identity.md", "bars": None}}
+         "headgear-colour": {"document": "docs/gates/appearance-identity.md", "bars": None},
+         # The pose-only linker (#11): Brendan's hand check of 100 sampled joins on Olympic Boxing (ADR-0018). Its
+         # result is `linker_join_check.py score`'s result.json, re-derived from its counts on every read.
+         # `manifest` None = joincheck.HELD_OUT_MANIFEST, the only videos a counted sample may come from.
+         "linker": {"document": "docs/gates/linker-join-check.md", "bars": None, "result": "linker-join",
+                    "manifest": None}}
+MEASURED_VERDICTS = ("measured, acceptable", "measured, unreliable", "measured, inconclusive", "not established")
+JOIN_RESULT_BASE = {"answers", "unsure_share", "decided", "p_star", "minutes", "join_error", "wilson95", "verdict",
+                    "sample_sha256", "gate"}        # joincheck.score with nothing decided writes only these
+JOIN_RESULT_KEYS = JOIN_RESULT_BASE | {"misattribution", "by_stratum", "by_camera", "wrong_joins_per_chain_minute",
+                                       "bootstrap"}
+MEASURED_KEYS = {"verdict", "decided", "different", "join_error", "lower", "upper", "footage"}
+
+
+def _whole(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _real(x) -> bool:
+    """A JSON float (joincheck.score writes floats): no bool, no int (a huge one would overflow a comparison)."""
+    return isinstance(x, float) and math.isfinite(x)
+
+
+def _check_join_result(raw: bytes, name: str, result_path) -> "tuple[bool, dict | None]":
+    """The linker join check's result.json, accepted only as a faithful score of the gate's own sample and of
+    the answers given to it. Nothing is taken from the result's numbers: beside it must lie the sample.json it
+    names (sha256), drawn from the gate's 23 held-out videos (joincheck.HELD_OUT_MANIFEST, so a sample of made-up
+    videos cannot be counted), and the complete answers.csv pinned to that sample. S / D / U are counted from the
+    answers; the rate, Wilson interval, p* (from the sample's chains) and three-way verdict are recomputed; the
+    result must state exactly those. Returns (PASS, the measured numbers a report may quote), or (False, None)
+    when nothing was decided."""
+    from . import joincheck as jc
+    d = _json_object(raw, name)
+    if set(d) not in (JOIN_RESULT_KEYS, JOIN_RESULT_BASE) or d["gate"] != GATES["linker"]["document"]:
+        raise ValueError(f"{name}: not the linker join check's result")
+    folder = Path(result_path).parent
+    sp, ap_ = folder / "sample.json", folder / "answers.csv"
+    if not sp.is_file() or not ap_.is_file():
+        raise ValueError(f"{name}: the sample.json and answers.csv it was scored from must lie beside it")
+    sample_raw = _read_capped(sp, jc.MAX_SAMPLE_BYTES, "join-check sample")
+    if d["sample_sha256"] != hashlib.sha256(sample_raw).hexdigest():
+        raise ValueError(f"{name}: the sample.json beside it is not the sample it was scored on")
+    _json_object(sample_raw, "sample.json")          # refuses NaN / Infinity before the sample parser sees it
+    try:
+        sample = jc.parse_sample(sample_raw, GATES["linker"]["manifest"] or jc.HELD_OUT_MANIFEST)
+        answers = jc.AnswerFile.load(ap_, sample)
+    except ValueError as e:
+        raise ValueError(f"{name}: its sample or answers are not the gate's ({e})") from None
+    c = answers.counts()
+    if c["empty"]:
+        raise ValueError(f"{name}: the answers beside it are not complete")
+    s, dd, u, total = c["S"], c["D"], c["U"], sample.n
+    decided = s + dd
+    a = d["answers"]
+    if not isinstance(a, dict) or a != {"S": s, "D": dd, "U": u, "total": total} or not all(
+            _whole(v) for v in a.values()) or not _whole(d["decided"]) or d["decided"] != decided:
+        raise ValueError(f"{name}: its answer counts are not the answers beside it")
+    ps = sample.raw["frame"]["p_star"]
+    if not _real(d["p_star"]) or d["p_star"] != ps:
+        raise ValueError(f"{name}: p* is not the one its sample gives")
+    if (decided == 0) != (set(d) == JOIN_RESULT_BASE):
+        raise ValueError(f"{name}: not the linker join check's result (its sections do not match its counts)")
+    if decided == 0:
+        if d["verdict"] != "not established" or d["join_error"] is not None or d["wilson95"] is not None:
+            raise ValueError(f"{name}: with nothing decided the verdict can only be 'not established'")
+        return False, None
+    rate = dd / decided
+    lo, hi = jc.wilson(dd, decided)
+    w = d["wilson95"]
+    if (not _real(d["join_error"]) or abs(d["join_error"] - rate) > 1e-12 or not isinstance(w, list)
+            or len(w) != 2 or not all(_real(x) for x in w) or abs(w[0] - lo) > 1e-12 or abs(w[1] - hi) > 1e-12):
+        raise ValueError(f"{name}: the join error or its interval is not what the answers give")
+    verdict = jc.verdict(decided, u, total, lo, hi, ps)
+    if d["verdict"] != verdict:
+        raise ValueError(f"{name}: the verdict is not what the answers and p* give")
+    return verdict == "measured, acceptable", {"verdict": verdict, "decided": decided, "different": dd,
+                                               "join_error": rate, "lower": lo, "upper": hi,
+                                               "footage": "Olympic Boxing"}
+
+
+def read_join_result(path) -> "tuple[str, dict, str]":
+    """For a method writing a linker identity: (the sidecar verdict, "pass" or "fail"; the measured numbers;
+    the result file's sha256). Checked exactly as read_identity will check it."""
+    raw = _read_capped(path, MAX_SIDECAR_BYTES, "gate result")
+    passed, measured = _check_join_result(raw, Path(path).name, path)
+    if measured is None:
+        raise ValueError(f"{Path(path).name}: nothing was decided, so there is no measured error to record")
+    return ("pass" if passed else "fail"), measured, hashlib.sha256(raw).hexdigest()
 
 
 def _check_result(raw: bytes, name: str, bars) -> bool:
@@ -293,6 +381,12 @@ def _check_result(raw: bytes, name: str, bars) -> bool:
 
 def _check_gate(gate, gate_result, method: str) -> dict:
     """The sidecar's gate block, and the gate result file when one is given (module docstring)."""
+    return _gate_and_measure(gate, gate_result, method)[0]
+
+
+def _gate_and_measure(gate, gate_result, method: str) -> "tuple[dict, dict | None]":
+    """_check_gate, plus the measured numbers when the method's result format carries them (the linker's), taken
+    only from the checked result file: nothing typed into a sidecar can put a number in a report."""
     if not isinstance(gate, dict) or not isinstance(gate.get("verdict"), str) or gate["verdict"] not in VERDICTS:
         raise ValueError(f"the gate verdict must be one of {VERDICTS}")
     v = gate["verdict"]
@@ -301,7 +395,7 @@ def _check_gate(gate, gate_result, method: str) -> dict:
             raise ValueError("an ungated identity carries no gate document or result")
         if gate_result is not None:
             raise ValueError("a gate result was given for an identity that records no gate")
-        return {"verdict": v}
+        return {"verdict": v}, None
     if set(gate) != {"verdict", "document", "result_sha256"}:
         raise ValueError("a gated identity records exactly verdict, document and result_sha256")
     doc, sha = gate["document"], gate["result_sha256"]
@@ -320,15 +414,19 @@ def _check_gate(gate, gate_result, method: str) -> dict:
         if v == "pass":
             raise ValueError("the identity records a gate PASS: give its gate result file (--gate-result) so the "
                              "pass can be checked, or record the identity as ungated")
-        return {"verdict": v, "document": doc, "result_sha256": sha}
+        return {"verdict": v, "document": doc, "result_sha256": sha}, None
     raw = _read_capped(gate_result, MAX_SIDECAR_BYTES, "gate result")
     if hashlib.sha256(raw).hexdigest() != sha:
         raise ValueError(f"{Path(gate_result).name} is not the gate result the identity recorded")
-    passed = _check_result(raw, Path(gate_result).name, GATES[method]["bars"])
+    measured = None
+    if GATES[method].get("result") == "linker-join":
+        passed, measured = _check_join_result(raw, Path(gate_result).name, gate_result)
+    else:
+        passed = _check_result(raw, Path(gate_result).name, GATES[method]["bars"])
     if passed != (v == "pass"):
         raise ValueError(f"the identity records a gate {v.upper()}, its gate result says "
                          f"{'PASS' if passed else 'FAIL'}")
-    return {"verdict": v, "document": doc, "result_sha256": sha}
+    return {"verdict": v, "document": doc, "result_sha256": sha}, measured
 
 
 def sidecar_path(csv_path) -> Path:
@@ -373,7 +471,7 @@ def read_identity(csv_path, table: PoseTable, tracks_path, gate_result=None) -> 
         raise ValueError(f"{side_p.name}: not a {FORMAT} sidecar")
     if not isinstance(side["method"], str) or not _METHOD.fullmatch(side["method"]):
         raise ValueError(f"{side_p.name}: the method must be lower-case letters and hyphens (at most 40)")
-    gate = _check_gate(side["gate"], gate_result, side["method"])
+    gate, measured = _gate_and_measure(side["gate"], gate_result, side["method"])
     check_binding(side["tracks"], table, tracks_path, f"identity {csv_path.name}")
     raw = _read_capped(csv_path, MAX_CSV_BYTES, "identity")
     if not isinstance(side["csv_sha256"], str) or hashlib.sha256(raw).hexdigest() != side["csv_sha256"]:
@@ -381,7 +479,7 @@ def read_identity(csv_path, table: PoseTable, tracks_path, gate_result=None) -> 
     segments = _parse_identity_csv(raw, csv_path.name)
     check_segments(table, segments)
     return Identity(side["method"], gate, tuple(segments), side["csv_sha256"],
-                    hashlib.sha256(raw_side).hexdigest())
+                    hashlib.sha256(raw_side).hexdigest(), measured)
 
 
 def write_identity(csv_path, table: PoseTable, tracks_path, segments, method: str, gate: dict) -> None:
@@ -742,18 +840,54 @@ VERDICT_WORDS = {"pass": "passed its pre-registered gate", "fail": "failed its p
                  "ungated": "has not been tested against a gate"}
 
 
+def _check_measured(m) -> None:
+    ok = (isinstance(m, dict) and set(m) == MEASURED_KEYS and m["footage"] == "Olympic Boxing"
+          and all(isinstance(m[k], int) and not isinstance(m[k], bool) for k in ("decided", "different"))
+          and 0 <= m["different"] <= m["decided"] and m["decided"] > 0
+          and all(isinstance(m[k], float) and 0.0 <= m[k] <= 1.0 for k in ("join_error", "lower", "upper"))
+          and m["lower"] <= m["join_error"] <= m["upper"] and m["verdict"] in MEASURED_VERDICTS)
+    if not ok:
+        raise ValueError("header: the measured identity error is not what a checked gate result gives")
+
+
+def _check_measured_matches(verdict: str, m) -> None:
+    """A gate PASS goes only with a measured "acceptable", and a measured "acceptable" only with a PASS."""
+    if (verdict == "pass") != (m["verdict"] == "measured, acceptable"):
+        raise ValueError("header: the gate verdict and the measured verdict disagree")
+
+
+def _measured_clause(w, m) -> str:
+    """'in a hand check of 98 of its joins on Olympic Boxing video, 65% joined two different people (95%
+    interval 55% to 74%)'. Numbers only through the writer."""
+    return (f"in a hand check of {w.count(m['decided'])} of its joins on {m['footage']} video, "
+            f"{w.pct(m['join_error'])} joined two different people ({w.num('95')}% interval {w.pct(m['lower'])} to "
+            f"{w.pct(m['upper'])})"
+            + (", too few clear answers for its gate to judge" if m["verdict"] == "not established" else ""))
+
+
 def header(boxer: str, method: str, verdict: str, n_unsure: int, n_all: int, identified_s: float,
-           duration_s: float) -> "tuple[str, list[str]]":
+           duration_s: float, measured: "dict | None" = None) -> "tuple[str, list[str]]":
     """The block that leads each boxer's summary. Fixed templates; every number through report._Writer. When
-    the identity method failed its gate or has none, the FIRST sentence says the split is unverified."""
+    the identity method failed its gate or has none, the FIRST sentence says the split is unverified, and, when
+    the method's error was measured (`Identity.measured`, from its checked gate result), how large it was and
+    on what footage."""
     if boxer not in BOXERS or verdict not in VERDICTS or not _METHOD.fullmatch(method):
         raise ValueError("header: boxer, verdict or method out of range")
+    if measured is not None:
+        _check_measured(measured)
+        if verdict == "ungated":
+            raise ValueError("header: an ungated method has no measured error")
+        _check_measured_matches(verdict, measured)
     w = report._Writer()
     if verdict != "pass":
         w.say(f"Warning: which boxer threw each punch is unverified in this report: the method that told the two "
-              f"boxers apart ({method}) {VERDICT_WORDS[verdict]}, so some punches counted here may have been "
-              f"thrown by the other boxer, and some of this boxer's may be counted in the other report.")
+              f"boxers apart ({method}) {VERDICT_WORDS[verdict]}"
+              + (f": {_measured_clause(w, measured)}" if measured else "")
+              + ", so some punches counted here may have been thrown by the other boxer, and some of this "
+                "boxer's may be counted in the other report.")
     w.say(f"This is boxer {boxer}'s report. The boxers were told apart by {method}, which {VERDICT_WORDS[verdict]}.")
+    if verdict == "pass" and measured:
+        w.say(f"Its error was measured: {_measured_clause(w, measured)}.")
     w.say(f"Boxer {boxer} was identified for {w.mmss(identified_s)} of the {w.mmss(duration_s)} of video.")
     if n_all == 0:
         w.say("The tool found no punch on either boxer, so none was left unassigned.")
@@ -770,9 +904,17 @@ def header(boxer: str, method: str, verdict: str, n_unsure: int, n_all: int, ide
 def identity_sheet(identity: Identity, boxer: str, stats: dict, n_unsure: int, n_all: int) -> list:
     """The Identity sheet's rows: what split the punches, and how much of the video it covered for this boxer."""
     g = identity.gate
+    m = identity.measured
+    measured = [] if not m else [["measured on", f"{m['footage']}, hand check of sampled joins"],
+                                 ["measured verdict", m["verdict"]],
+                                 ["joins decided (same or different)", m["decided"]],
+                                 ["of them joining two different people", m["different"]],
+                                 ["identity join error", round(m["join_error"], 4)],
+                                 ["identity join error, Wilson 95% lower", round(m["lower"], 4)],
+                                 ["identity join error, Wilson 95% upper", round(m["upper"], 4)]]
     return [["identity method", identity.method],
             ["gate verdict", g["verdict"]],
-            ["gate document", g.get("document", "")],
+            ["gate document", g.get("document", "")]] + measured + [
             ["identity file sha256", identity.csv_sha256],
             ["punches found on the two boxers (inside the rounds)", n_all],
             ["of them on unsure segments, counted in neither report", n_unsure],
