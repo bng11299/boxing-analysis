@@ -82,6 +82,11 @@ size (less training data, different test mix). Real-world check: the run's own `
   run (only `train_seconds` differs). Real-world check: `val_videos` reads V2/V3/V5/V9,
   `train_videos` reads V1/V4/V7/V8/V10, and the log reads "train 2970 clips / val 1787 clips". The
   3-seed mean is still 0.7722 / 0.6331.
+- **Second merge** (`9c1b92a`, after #37, #41 and #42 landed): one docs conflict (the quality-loop
+  index), with both lines kept. None of the incoming Python references the split functions.
+  `report.py` still uses `PIPELINE_HELD_OUT_VIDEOS`. All 24 Python suites (including combos 158 and
+  report 291) and the machine scripts (45) are green. No classifier input changed, so the headline
+  re-run above stands.
 
 ## Exit: all gates green
 
