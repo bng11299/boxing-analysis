@@ -63,3 +63,9 @@ that error be measured instead of described.
   [1, that frame] are scored for that video (labels and detections both), it must cover at least 3 minutes,
   and every row carries "partial (x of y min)". A video with neither is recorded as **unscored**.
 - If no video qualifies, the sparring per-boxer counts are recorded in `docs/RESULTS.md` as unscored.
+
+## 2026-11-03 -- not run before the freeze
+Brendan decided ("Report unscored") that there is no labelling this week. This gate was pre-registered but NOT
+run before the Fri 2026-11-06 freeze: the sparring per-boxer counts go into the freeze as **unscored**, and no
+number has been computed under it. Running it (v2 and v3 labels, the v1 labels already made, identity files for
+the 10-22 videos) is Future Work / post-freeze. The rules above stand unchanged for that run.
