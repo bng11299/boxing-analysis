@@ -346,6 +346,26 @@ check("jab found and named jab counts; cross found but named jab does not; a mis
 pc = ev.paired_named_ci({"Vx": nc}, {"Vx": nc})
 check("named-right difference of a run against itself is 0", pc["point"] == 0 and pc["ci_low"] == 0 == pc["ci_high"])
 
+print("V6: one continuous skeleton, not clips")
+v6_saved = (bdata.load_v6_track, bdata.load_v6_spans)
+n6 = 200
+xy6 = np.tile(np.linspace(100, 900, N_JOINTS)[None, :, None], (n6, 1, 2)).astype(float)
+ids6 = np.r_[np.arange(0, 120), np.arange(130, 210)]                 # frames 120-129 missing from the skeleton
+bdata.load_v6_track = lambda p: Track(ids6.astype(np.int64), xy6, 23.976)
+bdata.load_v6_spans = lambda p: [Span(10, 40, LH), Span(115, 125, RU), Span(150, 151, LU)]
+sp6, cl6, bad6 = tune.v6_ground_truth(Path("x"))
+check("every labelled V6 span is ground truth, and none is left out as unusable", len(sp6) == 3 and bad6 == [])
+check("a span whose frames the skeleton lacks gives no alignment window; the others do",
+      [c.start for c in cl6] == [10, 150], str([(c.start, c.end) for c in cl6]))
+check("a window is at most the corpus's 25 frames, in the corpus's normalised form with validity",
+      cl6[0].end == 34 and cl6[0].alphapose.shape == (25, N_JOINTS, 3)
+      and abs(cl6[0].alphapose[0, 0, 0] - 100 / 1920) < 1e-6 and cl6[0].alphapose[:, :, 2].all())
+check("a two-frame span gives a two-frame window, zero-padded after", cl6[1].end == 151
+      and not cl6[1].alphapose[2:, :, 2].any())
+bdata.load_v6_spans = lambda p: [Span(120, 125, RU)]
+raises("no span on the skeleton at all: refused", lambda: tune.v6_ground_truth(Path("x")), SystemExit)
+bdata.load_v6_track, bdata.load_v6_spans = v6_saved
+
 print("tune script: the whole path, stubbed, on synthetic punches")
 bdata.HELD_OUT_VIDEOS = ("V2", "V3", "V5", "V9")
 tpose = tmp / "tposes"; tpose.mkdir()

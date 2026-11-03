@@ -25,6 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
@@ -92,19 +94,49 @@ def load_video(data: Path, poses: Path, v: str) -> "tuple[fc.Video, dict]":
     pose = PoseSequence.load(pose_path)
     if abs(pose.fps - NATIVE_FPS[v]) > 1e-3:
         raise SystemExit(f"{v}: pose {pose_path.name} is {pose.fps:.3f} fps, the source is {NATIVE_FPS[v]:.3f}")
-    clips, mismatched = poseswitch.held_out_clips(data, v)
-    bad = e2e.unusable_rows(data, v, {c.index for c in clips})
-    if (not clips or len(bad) != mismatched or max(c.end for c in clips) >= len(pose)
-            or any(e >= len(pose) for _, _, e in bad)):
-        raise SystemExit(f"{v}: the spans run past the pose's {len(pose)} frames, or the left-out rows do not reconcile")
+    if v == "V6":
+        spans, clips, bad = v6_ground_truth(data)
+    else:
+        clips, mismatched = poseswitch.held_out_clips(data, v)
+        bad = e2e.unusable_rows(data, v, {c.index for c in clips})
+        if len(bad) != mismatched:
+            raise SystemExit(f"{v}: the left-out labelled rows do not reconcile")
+        spans = [Span(c.start, c.end, c.label) for c in clips]
+    if not spans or max(s.end for s in spans) >= len(pose) or any(e >= len(pose) for _, _, e in bad):
+        raise SystemExit(f"{v}: the spans run past the pose's {len(pose)} frames")
     al = poseswitch.align(pose, clips)
     track = punchfind.bridge(pose.to_track(usable_only=False), int(round(punchfind.BRIDGE_S * pose.fps)))
     video = fc.Video(name=v, fps=pose.fps, n_frames=len(pose), track=track,
                      signal=punchfind.wrist_signal(track, fc.VARIANT),
-                     spans=[Span(c.start, c.end, c.label) for c in clips], unusable=[(s, e) for _, s, e in bad])
+                     spans=spans, unusable=[(s, e) for _, s, e in bad])
     return video, {"pose_file": pose_path.name, "best_offset": al["best"], "sharpness": al["ratio"],
-                   "aligned": bool(al["sharp"] and al["best"] == 0), "labelled": len(clips),
-                   "unusable_rows": len(bad)}
+                   "aligned": bool(al["sharp"] and al["best"] == 0), "labelled": len(spans),
+                   "alignment_windows": len(clips), "unusable_rows": len(bad)}
+
+
+def v6_ground_truth(data: Path) -> "tuple[list[Span], list, list]":
+    """V6 ships ONE continuous skeleton in video frame numbers (load_v6_track), not clips, and
+    its labels as spans in the same numbering (load_v6_spans, which refuses an unusable row, so
+    none is left out). For the alignment gate, each span's first frames (up to the corpus's 25)
+    become a comparison window in poseswitch's form, so V6 passes or fails the same test as every
+    other video. A window with a frame the skeleton lacks is not used for alignment; its span
+    still counts as ground truth."""
+    track = bdata.load_v6_track(data / "Skeleton_data")
+    spans = bdata.load_v6_spans(data / "Annotation_files")
+    row = {int(f): i for i, f in enumerate(track.frame_ids)}
+    w, h = bdata.SOURCE_SIZE
+    clips = []
+    for k, s in enumerate(spans):
+        frames = list(range(s.start, min(s.end, s.start + bdata.MAX_FRAMES - 1) + 1))
+        if len(frames) < 2 or any(f not in row for f in frames):
+            continue
+        r = [row[f] for f in frames]
+        kp = np.zeros((len(frames), bdata.N_JOINTS, 3), np.float32)
+        kp[..., 0], kp[..., 1], kp[..., 2] = track.xy[r, :, 0] / w, track.xy[r, :, 1] / h, 1.0
+        clips.append(poseswitch.HeldOutClip("V6", k, frames[0], frames[-1], s.label, bdata.pad_or_trim(kp)))
+    if not clips:
+        raise SystemExit("V6: no labelled span lies on the skeleton; nothing to align")
+    return spans, clips, []
 
 
 def sha256(p: Path) -> str:
