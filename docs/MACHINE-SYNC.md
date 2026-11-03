@@ -84,6 +84,56 @@ publishes for the asset in the Ultralytics `v8.4.0` release
 the file is byte-identical to what Ultralytics published, not that it is benign;
 the loader still refuses it unless this hash is passed and matches.
 
+## 5. Pose without walking to the laptop
+
+The desktop has no pose step (`-NoPose`); the laptop does. Section 3's folders already
+carry a clip there and its pose back, so one watcher on the laptop closes the loop:
+
+```
+desktop: clip -> data\own\X.mov  ──Syncthing──>  laptop: pose_watcher.py -> results\ingest\X.pose.npz
+desktop: wait_for_pose.py  <──Syncthing──  results\ingest\X.pose.npz   (or X.pose.failed: why)
+desktop: analyse_clip.py --skip-ingest  (run by wait_for_pose.py)
+```
+
+**Once, at the laptop** (logged in as you, normal PowerShell, not an assistant terminal: a task
+registered from inside the app is fine, but test it after an app restart):
+
+```powershell
+cd ~\repos\boxing-comps
+git pull
+.\scripts\setup-env.ps1                          # CUDA torch AND the pose step; ends ENVIRONMENT OK
+.\.venv\Scripts\python.exe run_ingest.py --hash-weights weights\yolo11m-pose.pt   # must print 29b17eaf...
+.\scripts\install-pose-watcher.ps1 -DryRun       # shows the task; refuses if venv, script or weights are missing
+.\scripts\install-pose-watcher.ps1               # registers "boxing-comps pose watcher" at logon and starts it
+Get-Content ~\boxing-comps-pose-watcher.log -Tail 5   # "watching ... every 30 s"
+```
+
+The task runs as you, at logon, with normal privileges and no stored password; it is restarted
+if it stops. Remove it with `-Uninstall`. Keep the laptop plugged in and set to not sleep while
+it should work: a sleeping or logged-out laptop runs nothing, and the desktop just waits.
+
+**Each clip, at the desktop:**
+
+```powershell
+Copy-Item <phone export>\IMG_5835.mov data\own\
+.\.venv\Scripts\python.exe wait_for_pose.py --video data\own\IMG_5835.mov --stance orthodox
+```
+
+It prints `waiting for ...` until the pose arrives (about the clip's transfer time twice, plus
+pose at GPU speed, plus a minute for the watcher's two looks), then runs the chain with
+`--skip-ingest`; outputs land in `results\analyse` as with `analyse_clip.py`. `--timeout`
+(default 2 h) bounds the wait.
+
+**What is checked, and where.** The watcher reads a clip only when Syncthing has no temporary
+file for it and two looks 30 s apart see the same size and time (Syncthing copies the source's
+modification time, so age alone proves nothing). Pose is written to `results\.pose-staging`
+(never synced), checked against the video (name, content fingerprint, frame count, rate, size,
+model), and moved into `results\ingest` in one rename. The desktop checks the same things again
+before running anything, and `analyse_clip.py` a third time. A clip whose pose fails gets
+`X.pose.failed`, one line saying why, which syncs back and stops `wait_for_pose.py`; delete it
+on either machine to retry. Only `data\own` is watched, and a source folder under
+`~\comps-participant-data` is refused: participant footage never takes this path.
+
 ## Participant footage: not in these folders yet
 
 The approved protocol (FA26-22-NG, item 15) keeps data "password-protected and

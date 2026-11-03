@@ -1,0 +1,699 @@
+"""Glove colour: which of two sparring boxers a tracked person is (glove identity v1).
+
+Why: in sparring where both boxers wear black, pose and tracking alone swap the two when they cross
+(linking.py's stated residual), and the clothes carry no colour. If their GLOVES differ in colour, the
+glove is the one part of the picture that says who is who. docs/gates/glove-identity.md is the gate,
+committed before this file. Pixels are read for identity only, never for punch classification.
+
+The rule, in order (every constant below was written from the geometry of a glove and a forearm and from
+synthetic fixtures, BEFORE any study frame was read; DEV-only changes are recorded in docs/quality-loop.md):
+  1. Rows: every pose-table row on a frame divisible by `sample_every(fps)` (about SAMPLE_HZ per second).
+  2. Glove disc per hand, only where the WRIST is confident (>= WRIST_MIN_CONF, stricter than the 0.3 the
+     finder uses) and the elbow gives the forearm (>= ELBOW_MIN_CONF): centre = wrist + GLOVE_AHEAD x
+     (wrist - elbow), i.e. a little beyond the wrist where the glove sits; radius = GLOVE_RADIUS x forearm.
+     A forearm under MIN_FOREARM_PX or a disc wider than MAX_RADIUS_FRAC of the frame is not read.
+  3. A read is CONTESTED when another person's confident wrist is within CONTEST_FACTOR x radius of the
+     disc centre: two gloves together (a clinch, a parry, a glove on the other's glove) mix colours.
+     A read whose disc centre lies under the mosaic of a VERY LARGE face box (taller than LARGE_FACE_PX; a
+     false detection the face blur mosaicked; Brendan 2026-10-25) is contested too: the mosaic is not the
+     glove's colour. The boxes come from the same detector on the original (`FaceMasks`), and the mosaic
+     rectangle is the blur's own (`faceblur.det_region`). LARGE_FACE_PX = 160 was read off the face-box
+     size distribution of the three study videos (real faces 40-100 px, the false large squares above
+     160), before any glove was read and with no label. Contested reads are counted and never used.
+  4. Each disc pixel goes to exactly one of 16 classes in HSV: DARK (value < DARK_V; black clothes and
+     shadow), SKIN (hue < SKIN_HUE_MAX with NEUTRAL_S <= saturation < SKIN_SAT_MAX), GREY / WHITE (saturation
+     < NEUTRAL_S, split at WHITE_V), or one of 12 HUE bins of 30 degrees (bin 0 centred on red). Skin is
+     counted and excluded from the descriptor; black is NOT excluded, because black gloves are a colour too.
+  5. Row descriptor: the class shares (15 classes, skin out) over the row's uncontested reads, both hands
+     pooled; a row needs MIN_GLOVE_PX non-skin pixels.
+  6. Per VIDEO, unsupervised: two clusters of the descriptors (2-means in the Hellinger embedding, a
+     deterministic farthest-point start). No label and no colour name is used. The video is SEPARABLE only if
+     the centroids are at least SEP_MIN apart (Hellinger), each cluster holds MIN_CLUSTER_SHARE of the rows,
+     and -- the internal check -- two boxers on screen at the same time fall into DIFFERENT clusters in at
+     least COPRESENT_SPLIT_MIN of at least MIN_COPRESENT_FRAMES such frames. Otherwise every row is unsure.
+  7. A row's raw decision is its nearer cluster when the margin (d_far - d_near) / (d_far + d_near) is at
+     least MARGIN_MIN, else unsure (motion blur, odd light, half a glove).
+  8. Every table row (sampled or not) is then named by the raw decisions of the SAME track id within
+     +-SMOOTH_S: at least SMOOTH_MIN_VOTES votes and a SMOOTH_MAJORITY majority, else unsure. A row with any
+     raw decision of its track within one sampling step that contradicts that name is unsure: direct
+     evidence beats the window (an id lent to the other boxer for a moment). A row is named only with an
+     AGREEING raw decision of its track within +-SUPPORT_S: where the gloves are hidden (a clinch, a lent id
+     whose borrower's gloves are out of sight) the window does not guess for more than SUPPORT_S. Two rows of
+     one frame given the same name are both made unsure (they cannot be the same boxer).
+
+What it cannot do (reported, not hidden): two gloves of the same colour (the gate's FAIL-CASE; the
+right output is "not separable"); tan or brown gloves overlap skin and are read as skin; coloured light moves
+every hue; an id lent to the other boxer while that boxer's gloves are hidden and the lender is undetected
+can be named as the lender for up to SUPPORT_S past the last glove seen (there is no evidence either way).
+
+PIXELS NEVER LEAVE MEMORY: frames are decoded one at a time and only 16 class counts per glove read survive.
+Nothing here writes a crop, an image or a pixel array.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from .appearance import hsv
+from .faceblur import FACE_DET_PAD, det_region
+from .npyread import read_header
+from .punchfind import MIN_CONF
+from .video import iter_frames
+
+L_ELBOW, R_ELBOW, L_WRIST, R_WRIST = 7, 8, 9, 10
+HANDS = ((L_WRIST, L_ELBOW), (R_WRIST, R_ELBOW))   # hand 0 = left, 1 = right (the person's, COCO order)
+
+SAMPLE_HZ = 10.0
+WRIST_MIN_CONF = 0.5
+ELBOW_MIN_CONF = MIN_CONF
+GLOVE_AHEAD = 0.25
+GLOVE_RADIUS = 0.30
+MIN_FOREARM_PX = 6.0
+MAX_RADIUS_FRAC = 0.25
+MIN_DISC_PX = 20
+CONTEST_FACTOR = 2.0
+
+DARK_V = 0.25
+NEUTRAL_S = 0.20
+WHITE_V = 0.75
+SKIN_HUE_MAX = 50.0
+SKIN_SAT_MAX = 0.60
+HUE_BINS = 12
+N_CLASSES = HUE_BINS + 4          # 12 hues, dark, grey, white, skin
+DESC = HUE_BINS + 3               # the descriptor: everything but skin
+CLASS_NAMES = tuple(f"hue{i * 30:03d}" for i in range(HUE_BINS)) + ("dark", "grey", "white", "skin")
+
+MIN_GLOVE_PX = 30
+MIN_FIT_ROWS = 20
+SEP_MIN = 0.30
+MIN_CLUSTER_SHARE = 0.15
+MARGIN_MIN = 0.20
+COPRESENT_SPLIT_MIN = 0.70
+MIN_COPRESENT_FRAMES = 10
+KMEANS_ITERS = 50
+SMOOTH_S = 1.0
+SMOOTH_MIN_VOTES = 3
+SMOOTH_MAJORITY = 0.75
+SUPPORT_S = 0.3
+LARGE_FACE_PX = 160.0     # a face box taller than this is a false detection: its mosaic hides what is under it
+
+VERDICTS = ("separable", "not_separable", "too_few_rows", "too_few_copresent")
+FORMAT = "boxingvi-gloves-2"
+MASK_FORMAT_KEYS = {"frame", "box", "score", "width", "height", "every", "n_frames", "source_sha256"}
+MAX_FILE_BYTES = 256 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+MAX_REGION_PX = 3840 * 2160
+_KEYS = {"format", "source", "video_fp", "table_sha256", "provenance", "mask_sha256", "meta", "rows", "hand",
+         "bins", "n", "contested"}
+_FP = re.compile(r"[0-9a-f]{64}")
+
+
+def rule_constants() -> dict:
+    """Every constant the decision depends on. Its digest is what `glove_identity.py freeze` records."""
+    names = ("SAMPLE_HZ", "WRIST_MIN_CONF", "ELBOW_MIN_CONF", "GLOVE_AHEAD", "GLOVE_RADIUS", "MIN_FOREARM_PX",
+             "MAX_RADIUS_FRAC", "MIN_DISC_PX", "CONTEST_FACTOR", "DARK_V", "NEUTRAL_S", "WHITE_V",
+             "SKIN_HUE_MAX", "SKIN_SAT_MAX", "HUE_BINS", "MIN_GLOVE_PX", "MIN_FIT_ROWS", "SEP_MIN",
+             "MIN_CLUSTER_SHARE", "MARGIN_MIN", "COPRESENT_SPLIT_MIN", "MIN_COPRESENT_FRAMES", "KMEANS_ITERS",
+             "SMOOTH_S", "SMOOTH_MIN_VOTES", "SMOOTH_MAJORITY", "SUPPORT_S", "LARGE_FACE_PX", "FORMAT")
+    g = globals()
+    return {k: g[k] for k in names}
+
+
+def sample_every(fps: float) -> int:
+    if not (isinstance(fps, (int, float)) and math.isfinite(fps) and fps > 0):
+        raise ValueError("fps must be a finite number > 0")
+    return max(1, int(round(fps / SAMPLE_HZ)))
+
+
+# ---- geometry and pixels ----------------------------------------------------------------
+def glove_disc(xy, conf, hand: int, width: int, height: int):
+    """(cx, cy, r) of one hand's glove disc, or None when the wrist or elbow is not confident enough or the
+    forearm is too short or implausibly long."""
+    w, e = HANDS[hand]
+    if conf[w] < WRIST_MIN_CONF or conf[e] < ELBOW_MIN_CONF:
+        return None
+    d = np.asarray(xy[w], dtype=np.float64) - np.asarray(xy[e], dtype=np.float64)
+    fl = float(np.hypot(d[0], d[1]))
+    if not fl >= MIN_FOREARM_PX:
+        return None
+    r = GLOVE_RADIUS * fl
+    if r > MAX_RADIUS_FRAC * min(width, height):
+        return None
+    c = np.asarray(xy[w], dtype=np.float64) + GLOVE_AHEAD * d
+    return float(c[0]), float(c[1]), r
+
+
+def pixel_classes(rgb) -> np.ndarray:
+    """(N_CLASSES,) int64 counts of (n, 3) uint8 RGB pixels; every pixel lands in exactly one class."""
+    h, s, v = hsv(rgb)
+    dark = v < DARK_V
+    skin = ~dark & (h < SKIN_HUE_MAX) & (s >= NEUTRAL_S) & (s < SKIN_SAT_MAX)
+    neutral = ~dark & ~skin & (s < NEUTRAL_S)
+    chroma = ~dark & ~skin & ~neutral
+    hb = np.minimum((((h + 15.0) % 360.0) // 30.0).astype(np.int64), HUE_BINS - 1)
+    out = np.zeros(N_CLASSES, dtype=np.int64)
+    out[:HUE_BINS] = np.bincount(hb[chroma], minlength=HUE_BINS)
+    out[HUE_BINS] = int(dark.sum())
+    out[HUE_BINS + 1] = int((neutral & (v < WHITE_V)).sum())
+    out[HUE_BINS + 2] = int((neutral & (v >= WHITE_V)).sum())
+    out[HUE_BINS + 3] = int(skin.sum())
+    return out
+
+
+def disc_classes(frame: np.ndarray, disc):
+    """(class counts, disc pixels inside the frame), or None under MIN_DISC_PX pixels. Counts only."""
+    cx, cy, r = disc
+    H, W = frame.shape[:2]
+    x0, x1 = max(0, int(math.floor(cx - r))), min(W - 1, int(math.ceil(cx + r)))
+    y0, y1 = max(0, int(math.floor(cy - r))), min(H - 1, int(math.ceil(cy + r)))
+    if x1 < x0 or y1 < y0:
+        return None
+    X, Y = np.meshgrid(np.arange(x0, x1 + 1, dtype=np.float64), np.arange(y0, y1 + 1, dtype=np.float64))
+    m = (X - cx) ** 2 + (Y - cy) ** 2 <= r * r
+    n = int(m.sum())
+    if n < MIN_DISC_PX:
+        return None
+    return pixel_classes(frame[y0:y1 + 1, x0:x1 + 1][m]), n
+
+
+def _inside(rects, x: float, y: float) -> bool:
+    return any(r[0] <= x < r[2] and r[1] <= y < r[3] for r in rects)
+
+
+def frame_reads(frame: np.ndarray, table, rows_here, read_rows, blocked=(), mosaics=(), stats=None):
+    """Glove reads of the rows in `read_rows` (a subset of `rows_here`, all rows of this frame):
+    a list of (row, hand, counts, n, contested). A read whose disc centre lies under a `blocked` rectangle
+    (the mosaic of a very large face box, Brendan 2026-10-25) is contested: the mosaic is not the glove's
+    colour. `mosaics` (every face mosaic) are only counted in `stats`, never excluded."""
+    H, W = frame.shape[:2]
+    wrists = {}
+    for r in rows_here:
+        wrists[r] = [table.xy[r][w] for w, _ in HANDS if table.conf[r][w] >= WRIST_MIN_CONF]
+    out = []
+    for r in read_rows:
+        for hand in (0, 1):
+            disc = glove_disc(table.xy[r], table.conf[r], hand, W, H)
+            if disc is None:
+                continue
+            got = disc_classes(frame, disc)
+            if got is None:
+                continue
+            cx, cy, rad = disc
+            contested = any(math.hypot(p[0] - cx, p[1] - cy) <= CONTEST_FACTOR * rad
+                            for o in rows_here if o != r for p in wrists[o])
+            under_large = _inside(blocked, cx, cy)
+            if stats is not None:
+                stats["reads"] = stats.get("reads", 0) + 1
+                stats["under_large_square"] = stats.get("under_large_square", 0) + int(under_large)
+                stats["under_any_face_mosaic"] = stats.get("under_any_face_mosaic", 0) + int(_inside(mosaics, cx, cy))
+            out.append((r, hand, got[0], got[1], contested or under_large))
+    return out
+
+
+# ---- the face mosaics of one video (measured on the ORIGINAL, the same detector as the blur) ------
+@dataclass(frozen=True)
+class FaceMasks:
+    """Face boxes per sampled frame of one video, from the detector the blur used, bound to the ORIGINAL by
+    its sha256. Every sampled frame was run, so a frame with no row simply had no face found."""
+
+    frame: np.ndarray
+    box: np.ndarray
+    score: np.ndarray
+    width: int
+    height: int
+    every: int
+    n_frames: int
+    source_sha256: str
+    file_sha256: str = ""
+
+    def check_table(self, table) -> None:
+        if (self.width, self.height) != (table.width, table.height):
+            raise ValueError("the face boxes are for a video of another size")
+        if self.n_frames != table.n_frames:
+            raise ValueError(f"the face boxes cover {self.n_frames} frames, the pose table {table.n_frames}")
+        if self.every != sample_every(table.fps):
+            raise ValueError("the face boxes were not measured on the frames the glove reader samples")
+
+    def regions(self, frame: int):
+        """(very large face mosaics, all face mosaics) of one frame, as the blur drew them (det_region)."""
+        sel = np.flatnonzero(self.frame == frame)
+        big, every_one = [], []
+        for i in sel.tolist():
+            r = det_region(self.box[i], self.width, self.height)
+            if r is None:
+                continue
+            every_one.append(r)
+            if self.box[i, 3] - self.box[i, 1] > LARGE_FACE_PX:
+                big.append(r)
+        return big, every_one
+
+    @classmethod
+    def load(cls, path) -> "FaceMasks":
+        """An INPUT file: size capped, zip directory and NPY headers read before any allocation, no pickles,
+        exactly the known arrays, boxes inside the frame, frames on the sampling grid, scores in [0, 1]."""
+        p = Path(path)
+
+        def bad(msg):
+            raise ValueError(f"{p.name}: {msg}")
+        z = _checked_npz(p, MASK_FORMAT_KEYS, "face boxes")
+        with z:
+            for k in ("width", "height", "every", "n_frames"):
+                a = z[k]
+                if a.dtype.kind != "i" or a.shape != () or int(a) < 1:
+                    bad(f"{k} must be one whole number >= 1")
+            w, h, every, n = (int(z[k]) for k in ("width", "height", "every", "n_frames"))
+            src = z["source_sha256"]
+            if src.dtype.kind != "U" or src.shape != () or not _FP.fullmatch(str(src)):
+                bad("source_sha256 must be a sha256 hex digest")
+            fr, box, sc = z["frame"], z["box"], z["score"]
+            if fr.dtype != np.int64 or fr.ndim != 1:          # before len(): a 0-d array has no length
+                bad("frame must be a 1-D int64 array")
+            m = len(fr)
+            if box.dtype != np.float64 or box.shape != (m, 4) or sc.dtype != np.float64 or sc.shape != (m,):
+                bad("frame, box and score must be int64 (n,), float64 (n, 4) and float64 (n,)")
+            if m and ((fr < 0).any() or (fr >= n).any() or (fr % every != 0).any()):
+                bad("frames must be sampled frames inside the video")
+            if not (np.isfinite(box).all() and np.isfinite(sc).all()):
+                bad("boxes and scores must be finite")
+            if m and ((box[:, 0] < 0).any() or (box[:, 1] < 0).any() or (box[:, 2] > w).any()
+                      or (box[:, 3] > h).any() or (box[:, 2] <= box[:, 0]).any() or (box[:, 3] <= box[:, 1]).any()):
+                bad("a box lies outside the frame or is empty")
+            if ((sc < 0) | (sc > 1)).any():
+                bad("scores must lie in [0, 1]")
+            h_ = hashlib.sha256()
+            with open(p, "rb") as f:
+                for c in iter(lambda: f.read(1 << 20), b""):
+                    h_.update(c)
+            return cls(fr.copy(), box.copy(), sc.copy(), w, h, every, n, str(src), h_.hexdigest())
+
+
+def check_blur_report(masks: FaceMasks, report: dict) -> None:
+    """The face boxes must be the detector run the blur actually used, not just boxes from the same original:
+    same original (sha256), the deface policy with the mosaic padding `det_region` assumes, the same frame
+    count, and on EVERY sampled frame exactly as many boxes as the blur says it found there. A run with
+    another threshold or model changes those counts somewhere."""
+    if not isinstance(report, dict):
+        raise ValueError("the blur report is not a JSON object")
+    if report.get("source_sha256") != masks.source_sha256:
+        raise ValueError("the blur report and the face boxes come from different originals")
+    if report.get("face_policy") != "deface":
+        raise ValueError("the blur did not use the deface policy: its mosaics are not the face boxes")
+    params = report.get("params")
+    if not isinstance(params, dict) or params.get("face_det_pad") != FACE_DET_PAD:
+        raise ValueError("the blur report's mosaic padding is not the one the glove rule assumes")
+    pf = report.get("per_frame")
+    faces = pf.get("faces") if isinstance(pf, dict) else None
+    if not isinstance(faces, list) or len(faces) != masks.n_frames \
+            or not all(isinstance(k, int) and not isinstance(k, bool) and k >= 0 for k in faces):
+        raise ValueError("the blur report's per-frame face counts are missing or cover another length")
+    got = np.bincount(masks.frame, minlength=masks.n_frames)
+    sampled = np.arange(0, masks.n_frames, masks.every)
+    if (got[sampled] != np.asarray(faces, dtype=np.int64)[sampled]).any():
+        raise ValueError("the face boxes are not the blur's own detections (box counts differ on sampled frames)")
+
+
+def _checked_npz(p: Path, keys: set, what: str):
+    """np.load of an untrusted .npz after its size, its zip directory and every member's NPY header have
+    been checked (no pickles, no member declaring more data than it holds)."""
+    try:
+        size = p.stat().st_size
+    except OSError as e:
+        raise ValueError(f"{p.name}: cannot be read ({e.strerror})") from e
+    if size > MAX_FILE_BYTES:
+        raise ValueError(f"{p.name}: more than {MAX_FILE_BYTES} bytes")
+    try:
+        with zipfile.ZipFile(p) as zf:
+            info = zf.infolist()
+            if len(info) != len(keys) or {i.filename for i in info} != {k + ".npy" for k in keys}:
+                raise ValueError(f"{p.name}: not a {what} file (wrong arrays)")
+            if sum(i.file_size for i in info) > MAX_UNCOMPRESSED_BYTES:
+                raise ValueError(f"{p.name}: declares more than {MAX_UNCOMPRESSED_BYTES} bytes uncompressed")
+            for i in info:
+                with zf.open(i) as f:
+                    shape, _, dt = read_header(f, i.filename)
+                    if dt.hasobject or dt.kind not in "iUf":
+                        raise ValueError(f"{p.name}: {i.filename}: dtype {dt} is not allowed")
+                    if math.prod(shape) * dt.itemsize != i.file_size - f.tell():
+                        raise ValueError(f"{p.name}: {i.filename}: its header and its size disagree")
+    except (zipfile.BadZipFile, OSError, EOFError) as e:
+        raise ValueError(f"{p.name}: not a readable npz ({type(e).__name__})") from e
+    except ValueError as e:
+        if str(e).startswith(p.name):
+            raise
+        raise ValueError(f"{p.name}: not a readable npz ({e})") from e
+    try:
+        return np.load(p, allow_pickle=False)
+    except (ValueError, OSError) as e:
+        raise ValueError(f"{p.name}: not a readable npz") from e
+
+
+# ---- the counts of one video ------------------------------------------------------------
+def table_digest(table, every: int) -> str:
+    """sha256 of the table's CONTENT, its timing and size, and the sampling step (counts are row-indexed, and
+    fps sets both the sampling and the smoothing window)."""
+    h = hashlib.sha256(f"{FORMAT}|every={int(every)}|fps={float(table.fps)!r}|n={int(table.n_frames)}|"
+                       f"{int(table.width)}x{int(table.height)}|".encode())
+    for a, dt in ((table.frame, np.int64), (table.track_id, np.int64), (table.box, np.float64),
+                  (table.xy, np.float64), (table.conf, np.float64)):
+        h.update(np.ascontiguousarray(a, dtype=dt).tobytes())
+    return h.hexdigest()
+
+
+@dataclass(frozen=True)
+class GloveCounts:
+    """Class counts per glove read of ONE video's PoseTable, bound to it by source, frame count, row count,
+    video fingerprint and a content digest. (rows, hand) pairs are strictly increasing."""
+
+    rows: np.ndarray
+    hand: np.ndarray
+    bins: np.ndarray        # (m, N_CLASSES) int64
+    n: np.ndarray
+    contested: np.ndarray   # 0 / 1
+    source: str
+    n_frames: int
+    n_table_rows: int
+    every: int
+    table_sha256: str
+    video_fp: str = ""
+    provenance: str = ""    # sha256 of the rule constants and the code that computed these counts ("" = unknown)
+    mask_sha256: str = ""   # sha256 of the face-box file that marked reads under very large mosaics ("" = none)
+
+    def check_table(self, table) -> None:
+        if self.source != table.source:
+            raise ValueError("the glove counts and the pose table name different sources")
+        if self.n_frames != table.n_frames:
+            raise ValueError(f"the glove counts cover {self.n_frames} frames, the pose table {table.n_frames}")
+        if self.n_table_rows != len(table.frame):
+            raise ValueError("the glove counts were computed from a pose table with a different row count")
+        if self.video_fp != table.video_fp:
+            raise ValueError("the glove counts and the pose table carry different video fingerprints")
+        if self.table_sha256 != table_digest(table, self.every):
+            raise ValueError("the glove counts were computed from a pose table with different content: recompute")
+
+    def save(self, path) -> None:
+        np.savez_compressed(path, format=np.array(FORMAT), source=np.array(self.source),
+                            video_fp=np.array(self.video_fp), table_sha256=np.array(self.table_sha256),
+                            provenance=np.array(self.provenance), mask_sha256=np.array(self.mask_sha256),
+                            meta=np.array([self.n_frames, self.n_table_rows, self.every], dtype=np.int64),
+                            rows=self.rows.astype(np.int64), hand=self.hand.astype(np.int64),
+                            bins=self.bins.astype(np.int64), n=self.n.astype(np.int64),
+                            contested=self.contested.astype(np.int64))
+
+    @classmethod
+    def load(cls, path) -> "GloveCounts":
+        """Load a counts file: an INPUT file. Size capped; the zip directory and each member's NPY header are
+        read before numpy allocates anything; no pickles; exactly the known arrays, dtypes and shapes; and
+        counts that are possible (every disc pixel in exactly one class, so each row of bins sums to n)."""
+        p = Path(path)
+
+        def bad(msg):
+            raise ValueError(f"{p.name}: {msg}")
+        try:
+            size = p.stat().st_size
+        except OSError as e:
+            raise ValueError(f"{p.name}: cannot be read ({e.strerror})") from e
+        if size > MAX_FILE_BYTES:
+            bad(f"more than {MAX_FILE_BYTES} bytes")
+        try:
+            with zipfile.ZipFile(p) as zf:
+                info = zf.infolist()
+                if len(info) != len(_KEYS) or {i.filename for i in info} != {k + ".npy" for k in _KEYS}:
+                    bad("not a glove counts file (wrong arrays)")
+                if sum(i.file_size for i in info) > MAX_UNCOMPRESSED_BYTES:
+                    bad(f"declares more than {MAX_UNCOMPRESSED_BYTES} bytes uncompressed")
+                for i in info:
+                    with zf.open(i) as f:
+                        shape, _, dt = read_header(f, i.filename)
+                        if dt.hasobject or dt.kind not in "iU":
+                            bad(f"{i.filename}: dtype {dt} is not allowed")
+                        need = math.prod(shape) * dt.itemsize
+                        if need != i.file_size - f.tell():
+                            bad(f"{i.filename}: its header and its size disagree")
+        except (zipfile.BadZipFile, OSError, EOFError) as e:
+            raise ValueError(f"{p.name}: not a readable npz ({type(e).__name__})") from e
+        except ValueError as e:
+            if str(e).startswith(p.name):
+                raise
+            raise ValueError(f"{p.name}: not a readable npz ({e})") from e
+        try:
+            z = np.load(p, allow_pickle=False)
+        except (ValueError, OSError) as e:
+            raise ValueError(f"{p.name}: not a readable npz") from e
+        with z:
+            for k in ("format", "source", "video_fp", "table_sha256", "provenance", "mask_sha256"):
+                if z[k].dtype.kind != "U" or z[k].shape != ():
+                    bad(f"{k} must be one text value")
+            if str(z["format"]) != FORMAT:
+                bad("unknown format")
+            fp = str(z["video_fp"])
+            if fp and not _FP.fullmatch(fp):
+                bad("video_fp must be empty or a sha256 hex digest")
+            prov = str(z["provenance"])
+            if prov and not _FP.fullmatch(prov):
+                bad("provenance must be empty or a sha256 hex digest")
+            msk = str(z["mask_sha256"])
+            if msk and not _FP.fullmatch(msk):
+                bad("mask_sha256 must be empty or a sha256 hex digest")
+            if not _FP.fullmatch(str(z["table_sha256"])):
+                bad("table_sha256 must be a sha256 hex digest")
+            meta = z["meta"]
+            if meta.dtype != np.int64 or meta.shape != (3,) or meta[0] < 1 or meta[1] < 0 or meta[2] < 1:
+                bad("meta must be three whole numbers (frames >= 1, table rows >= 0, every >= 1)")
+            arrs = {}
+            for k in ("rows", "hand", "n", "contested"):
+                a = z[k]
+                if a.dtype != np.int64 or a.ndim != 1:
+                    bad(f"{k} must be a 1-D int64 array")
+                arrs[k] = a
+            bins = z["bins"]
+            m = len(arrs["rows"])
+            if bins.dtype != np.int64 or bins.shape != (m, N_CLASSES):
+                bad(f"bins must be an int64 array of shape ({m}, {N_CLASSES})")
+            if any(len(arrs[k]) != m for k in ("hand", "n", "contested")):
+                bad("rows, hand, n and contested differ in length")
+            rows, hand, n, con = arrs["rows"], arrs["hand"], arrs["n"], arrs["contested"]
+            if ((hand != 0) & (hand != 1)).any() or ((con != 0) & (con != 1)).any():
+                bad("hand and contested must be 0 or 1")
+            if m and (rows[0] < 0 or rows[-1] >= meta[1]):
+                bad("rows must be table row indices")
+            key = rows * 2 + hand
+            if m and (np.diff(key) <= 0).any():
+                bad("(row, hand) must be strictly increasing")
+            if (n < MIN_DISC_PX).any() or (n > MAX_REGION_PX).any() or (bins < 0).any() or (bins > MAX_REGION_PX).any():
+                bad("counts are impossible (negative, or a disc outside its size bounds)")
+            if (bins.sum(axis=1) != n).any():
+                bad("counts are impossible (a read's classes do not add up to its pixels)")
+            return cls(rows.copy(), hand.copy(), bins.copy(), n.copy(), con.copy(), str(z["source"]),
+                       int(meta[0]), int(meta[1]), int(meta[2]), str(z["table_sha256"]), fp, prov, msk)
+
+
+def compute_gloves(video, table, info=None, frames=None, provenance: str = "", masks: "FaceMasks | None" = None,
+                   stats: "dict | None" = None) -> GloveCounts:
+    """Decode `video` once and read both gloves of every table row on a sampled frame. `frames` replaces
+    the decoder with any iterator of (H, W, 3) uint8 frames (tests)."""
+    every = sample_every(table.fps)
+    if masks is not None:
+        masks.check_table(table)
+    by_frame: "dict[int, list]" = {}
+    for r in range(len(table.frame)):
+        by_frame.setdefault(int(table.frame[r]), []).append(r)
+    pick = sorted(f for f in by_frame if f % every == 0)
+    last = pick[-1] if pick else -1
+    if frames is None:
+        frames = iter_frames(video, info, max_frames=last + 1) if last >= 0 else iter(())
+    reads = []
+    seen = 0
+    want = set(pick)
+    for i, frame in enumerate(frames):
+        if i > last:
+            break
+        seen = i + 1
+        if i not in want:
+            continue
+        if frame.ndim != 3 or frame.shape[2] != 3 or frame.dtype != np.uint8 \
+                or frame.shape[:2] != (table.height, table.width):
+            raise ValueError(f"frame {i} is {frame.dtype} {frame.shape}, the table is {table.height}x{table.width}")
+        rows = by_frame[i]
+        big, every_one = masks.regions(i) if masks is not None else ((), ())
+        reads += frame_reads(frame, table, rows, rows, big, every_one, stats)
+    if seen < last + 1:
+        raise ValueError(f"the video ended after {seen} frames, the pose table has rows up to frame {last}: "
+                         "it was extracted from a different video")
+    reads.sort(key=lambda x: (x[0], x[1]))
+    m = len(reads)
+    return GloveCounts(np.array([x[0] for x in reads], dtype=np.int64), np.array([x[1] for x in reads], dtype=np.int64),
+                       np.array([x[2] for x in reads], dtype=np.int64).reshape(m, N_CLASSES),
+                       np.array([x[3] for x in reads], dtype=np.int64),
+                       np.array([int(x[4]) for x in reads], dtype=np.int64),
+                       table.source, table.n_frames, len(table.frame), every, table_digest(table, every),
+                       table.video_fp, provenance, masks.file_sha256 if masks is not None else "")
+
+
+# ---- the per-video model ------------------------------------------------------------------
+def row_descriptors(counts: GloveCounts):
+    """(rows, P, readable): table rows with at least MIN_GLOVE_PX uncontested non-skin glove pixels, their
+    class shares (DESC columns) and that pixel count."""
+    use = counts.contested == 0
+    rows = counts.rows[use]
+    if len(rows) == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros((0, DESC)), np.zeros(0, dtype=np.int64)
+    u, inv = np.unique(rows, return_inverse=True)
+    agg = np.zeros((len(u), DESC), dtype=np.int64)
+    np.add.at(agg, inv, counts.bins[use][:, :DESC])
+    readable = agg.sum(axis=1)
+    keep = readable >= MIN_GLOVE_PX
+    return u[keep], agg[keep] / readable[keep][:, None], readable[keep]
+
+
+def hellinger(S, c) -> np.ndarray:
+    """Hellinger distance of sqrt-share rows S (n, k) to a sqrt-share vector c (k,): in [0, 1]."""
+    return np.sqrt(np.maximum(0.0, ((S - c) ** 2).sum(axis=1) / 2.0))
+
+
+def two_means(P: np.ndarray):
+    """Deterministic 2-means in the Hellinger embedding: (centroids (2, k) of sqrt shares, assignment).
+    Start: the row farthest from the mean, then the row farthest from it. Clusters are then ordered so that
+    cluster 0's centroid is lexicographically larger (a fixed, meaningless naming)."""
+    S = np.sqrt(P)
+    i0 = int(np.argmax(hellinger(S, S.mean(axis=0))))
+    i1 = int(np.argmax(hellinger(S, S[i0])))
+    C = np.stack([S[i0], S[i1]])
+    a = None
+    for _ in range(KMEANS_ITERS):
+        new = np.argmin(np.stack([hellinger(S, C[0]), hellinger(S, C[1])], axis=1), axis=1)
+        if a is not None and (new == a).all():
+            break
+        a = new
+        if (a == 0).all() or (a == 1).all():   # one cluster: identical rows; the separation test refuses it
+            break
+        C = np.stack([S[a == 0].mean(axis=0), S[a == 1].mean(axis=0)])
+    if tuple(C[1]) > tuple(C[0]):
+        C = C[::-1].copy()
+        a = 1 - a
+    return C, a
+
+
+@dataclass(frozen=True)
+class GloveIdentity:
+    """Per table row: 0 or 1 (which glove cluster; the naming means nothing on its own) or -1 (unsure)."""
+
+    verdict: str
+    label: np.ndarray
+    diagnostics: dict
+
+
+def identify(table, counts: GloveCounts) -> GloveIdentity:
+    counts.check_table(table)
+    n_rows = len(table.frame)
+    label = np.full(n_rows, -1, dtype=np.int64)
+    rows, P, readable = row_descriptors(counts)
+    diag = {"reads": int(len(counts.rows)), "contested_reads": int(counts.contested.sum()),
+            "readable_rows": int(len(rows)),
+            "skin_share": (float(counts.bins[:, HUE_BINS + 3].sum() / counts.n.sum()) if len(counts.n) else None)}
+    if len(rows) < MIN_FIT_ROWS:
+        return GloveIdentity("too_few_rows", label, diag)
+    C, a = two_means(P)
+    S = np.sqrt(P)
+    d0, d1 = hellinger(S, C[0]), hellinger(S, C[1])
+    near = np.where(d0 <= d1, 0, 1)
+    dn, df = np.minimum(d0, d1), np.maximum(d0, d1)
+    margin = np.where(dn + df > 0, (df - dn) / np.where(dn + df > 0, dn + df, 1.0), 0.0)
+    raw = np.where(margin >= MARGIN_MIN, near, -1)
+    sep = float(np.sqrt(((C[0] - C[1]) ** 2).sum() / 2.0))
+    shares = [float((a == k).mean()) for k in (0, 1)]
+    diag.update({"separation": sep, "cluster_shares": shares, "raw_decided_share": float((raw >= 0).mean()),
+                 "centroid_shares": [dict(zip(CLASS_NAMES[:DESC], np.round(C[k] ** 2, 4).tolist())) for k in (0, 1)]})
+    # internal check: two people on screen together should fall into different clusters
+    frame_of = table.frame[rows]
+    area = (table.box[rows, 2] - table.box[rows, 0]) * (table.box[rows, 3] - table.box[rows, 1])
+    pairs = split = 0
+    for f in np.unique(frame_of):
+        idx = np.flatnonzero(frame_of == f)
+        if len(idx) < 2:
+            continue
+        top = idx[np.argsort(-area[idx], kind="stable")[:2]]
+        if (raw[top] < 0).any():
+            continue
+        pairs += 1
+        split += int(raw[top[0]] != raw[top[1]])
+    diag.update({"copresent_pairs": pairs, "copresent_split": (split / pairs) if pairs else None})
+    if sep < SEP_MIN or min(shares) < MIN_CLUSTER_SHARE:
+        return GloveIdentity("not_separable", label, diag)
+    if pairs < MIN_COPRESENT_FRAMES:
+        return GloveIdentity("too_few_copresent", label, diag)
+    if split / pairs < COPRESENT_SPLIT_MIN:
+        return GloveIdentity("not_separable", label, diag)
+    # smoothing within a track id, then the one-name-per-frame rule
+    half = SMOOTH_S * table.fps
+    dec = raw >= 0
+    for t in np.unique(table.track_id):
+        mine = np.flatnonzero(table.track_id == t)
+        vote = dec & (table.track_id[rows] == t)
+        vf = table.frame[rows][vote].astype(np.float64)
+        vl = raw[vote]
+        order = np.argsort(vf, kind="stable")
+        vf, vl = vf[order], vl[order]
+        ones = np.concatenate([[0], np.cumsum(vl == 1)])
+        for r in mine.tolist():
+            f = float(table.frame[r])
+            lo, hi = np.searchsorted(vf, f - half, "left"), np.searchsorted(vf, f + half, "right")
+            n = int(hi - lo)
+            if n < SMOOTH_MIN_VOTES:
+                continue
+            k1 = int(ones[hi] - ones[lo])
+            if k1 >= SMOOTH_MAJORITY * n:
+                label[r] = 1
+            elif n - k1 >= SMOOTH_MAJORITY * n:
+                label[r] = 0
+    # direct evidence wins over the window: a row whose own track has ANY confident raw decision within one
+    # sampling step that contradicts the smoothed name is unsure (an id lent to the other boxer for a moment;
+    # "the nearest one only" missed the last frame of a lend, whose nearest sample is already the old boxer),
+    # and a row needs an AGREEING raw decision within +-SUPPORT_S (no guessing across hidden gloves)
+    smoothed = label.copy()
+    ok = np.ones(n_rows, dtype=bool)
+    every = sample_every(table.fps)
+    sup = SUPPORT_S * table.fps
+    for t in np.unique(table.track_id):
+        vote = dec & (table.track_id[rows] == t)
+        vf = table.frame[rows][vote]
+        vl = raw[vote]
+        if not len(vf):
+            ok[table.track_id == t] = False
+            continue
+        order = np.argsort(vf, kind="stable")
+        vf, vl = vf[order], vl[order]
+        for r in np.flatnonzero((table.track_id == t) & (smoothed >= 0)).tolist():
+            f = int(table.frame[r])
+            lo, hi = np.searchsorted(vf, f - every, "left"), np.searchsorted(vf, f + every, "right")
+            slo, shi = np.searchsorted(vf, f - sup, "left"), np.searchsorted(vf, f + sup, "right")
+            if (vl[lo:hi] != smoothed[r]).any() or not (vl[slo:shi] == smoothed[r]).any():
+                ok[r] = False
+    label = resolve_labels(table, smoothed, ok)
+    diag["named_rows_share"] = float((label >= 0).mean()) if n_rows else None
+    return GloveIdentity("separable", label, diag)
+
+
+def resolve_labels(table, smoothed: np.ndarray, ok: np.ndarray) -> np.ndarray:
+    """Final names: the evidence filters (`ok`) applied, and ONE NAME PER FRAME judged on the smoothed names
+    BEFORE those filters. Two rows of a frame smoothed to the same name are both unsure even if a filter has
+    already removed one of them: otherwise the filter can remove the right boxer and leave the wrong one."""
+    smoothed = np.asarray(smoothed, dtype=np.int64)
+    label = np.where(np.asarray(ok, dtype=bool), smoothed, -1)
+    named = smoothed >= 0
+    key = table.frame.astype(np.int64) * 2 + np.where(named, smoothed, 0)
+    _, inv, cnt = np.unique(key[named], return_inverse=True, return_counts=True)
+    conflict = np.zeros(len(smoothed), dtype=bool)
+    conflict[np.flatnonzero(named)] = cnt[inv] > 1
+    label[conflict] = -1
+    return label
+
+def rule_digest() -> str:
+    return hashlib.sha256(json.dumps(rule_constants(), sort_keys=True).encode()).hexdigest()
