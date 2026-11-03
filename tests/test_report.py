@@ -758,11 +758,18 @@ pose = pose_yolo.PoseSequence(np.zeros((n, N_JOINTS, 2), np.float32), np.zeros((
                               np.zeros(n, bool), FPS, 1080, 1920, "IMG_1.mov", "test")
 pose.save(tmp / "IMG_1.pose.npz")
 args = ["--pose", str(tmp / "IMG_1.pose.npz"), "--classified", str(good), "--classifier", str(mpath),
-        "--reference", str(ref), "--rule", str(rule), "--rounds", "0-60,90-150", "--out-dir", str(tmp / "out")]
+        "--reference", str(ref), "--rule", str(rule), "--rounds", "0-60,90-150", "--out-dir", str(tmp / "out"),
+        "--combo-gate", str(tmp / "no-combo-gate.json")]   # pinned: a real gate result on disk must not leak in
 rc = report_punches.main(args)
-check("end to end: workbook and summary written, summary equals the library's",
+from boxingvi import combos  # noqa: E402
+cf_e2e = combos.compute(combos.group(combos.solo_punches(rows, ROUNDS), FPS), RULE["min_gap_s"])
+text_e2e, _ = report.summary(facts, bench, finder, None, combinations=(cf_e2e, None, False))
+check("end to end: workbook and summary written, summary equals the library's (with combinations)",
       rc == 0 and (tmp / "out" / "IMG_1.report.xlsx").is_file()
-      and (tmp / "out" / "IMG_1.summary.txt").read_text(encoding="utf-8").strip() == text)
+      and (tmp / "out" / "IMG_1.summary.txt").read_text(encoding="utf-8").strip() == text_e2e, text_e2e)
+check("end to end: the combinations add to the summary, they do not replace it", text_e2e.startswith(text[:200]))
+check("end to end: the workbook has a Combinations sheet",
+      "Combinations" in load_workbook(tmp / "out" / "IMG_1.report.xlsx").sheetnames)
 sidecar(pose_frames=n + 1)
 raises("a CSV classified on a pose of another length is refused", lambda: report_punches.main(args),
        match="9601-frame pose")

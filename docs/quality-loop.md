@@ -39,3 +39,4 @@ Records are in log order (some iterations live inside another feature's record).
 - 2026-10-23 — [`feat/glove-identity`](quality/glove-identity.md)
 - 2026-10-26 — [`feat/pose-watcher`](quality/pose-watcher.md)
 - 2026-10-27 — [`fix/o55-athlete-disjoint-split`](quality/o55-athlete-disjoint-split.md)
+- 2026-10-28 — [`feat/combinations`](quality/combinations.md)
