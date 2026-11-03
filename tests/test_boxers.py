@@ -475,8 +475,10 @@ refused("a PASS its own bars contradict", lambda: boxers.read_identity(p_inc, ta
 p_str, r_str = gated("strbars", "pass", result_json(True, ("yes", True, True, True)))
 refused("a bar that is not true or false", lambda: boxers.read_identity(p_str, table, tracks, r_str),
         "not this gate's result")
-refused("a gated verdict for a method with no registered gate (the linker)", lambda: gated(
-    "linkergate", "fail", FAILED, method="linker"), "no gate is registered for the method linker")
+refused("a gated verdict for a method with no registered gate (torso colour)", lambda: gated(
+    "torsogate", "fail", FAILED, method="torso-colour"), "no gate is registered for the method torso-colour")
+refused("the linker's gate is its own join check, not another method's document", lambda: gated(
+    "linkergate", "fail", FAILED, method="linker"), "not the gate pre-registered for linker")
 refused("a gate document that is not the method's own", lambda: gated(
     "wrongdoc", "fail", FAILED, doc=boxers.GATES["headgear-colour"]["document"]), "is not the gate pre-registered")
 p_hg, r_hg = gated("headgear", "fail", FAILED, method="headgear-colour",
