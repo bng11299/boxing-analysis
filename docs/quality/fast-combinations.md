@@ -121,6 +121,42 @@ Pose and alignment were checked before any tuning; nothing was scored.
   `load_video`. Tests: fastcombo_eval 98/98 (5 new V6 checks), fast_combinations 78/78; 2 mutants on the new
   branch caught (**27 of 27 in total**). Astra (one review of this commit): **SHIP**, no findings.
 
+## 2026-11-03: tuning (training videos only)
+Brendan, 11-03: "Tune on #38's branch", and via the coordinator, "Try it by Thu". main (`cd4035d`) does not
+yet hold the O55 split (`HELD_OUT_VIDEOS = V2, V5, V9`; #38 open, conflicting), and the tuning script refuses
+without it. Tuning therefore ran on a LOCAL, never-pushed merge of this branch and #38's branch
+(`local/tune-on-o55`, `c4659d5`; its only conflict, README.md, took #38's side). The tuning videos are the same
+under either split. Gate commit recorded: `246dcd5`. Held-out list recorded: V2, V3, V5, V9.
+
+- Tuned on V4, V6, V7, V8, V10 (F1 on V4, V7, V8, V10: 1,105 labelled punches); V1 excluded (alignment).
+- Run time under a minute.
+
+| Training, all 5 videos for recall by group | threshold | W / G | F1 | precision (lower bound) | recall | jab | cross | hooks | uppercuts | admissible |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Pooled baseline (V6 rule) | 3.62 | - | 0.386 | 0.276 | 0.643 | 0.580 | 0.569 | 0.689 | 0.565 | - |
+| Arm 1, chosen point | 3.3 | W 0.05 s | 0.359 | 0.240 | 0.711 | 0.701 | 0.715 | 0.658 | 0.517 | yes |
+| **Arm 2, chosen point** | **3.7** | **G 0.30 s** | **0.394** | 0.274 | 0.702 | 0.634 | 0.664 | 0.713 | 0.576 | yes |
+| Control: pooled, threshold re-tuned | 4.0 | - | 0.392 | 0.290 | 0.605 | 0.531 | 0.467 | 0.642 | 0.498 | no |
+
+- **Chosen arm: 2, the cross-hand gap** (higher training F1, as the gate requires). Rule file
+  `results/fast_combinations_rule.json`: relative, threshold 3.7, min gap 0.4 s, cross-hand gap 0.30 s.
+- Read before the held-out number exists: arm 2's chosen G is the top of its grid (0.30 s, near the
+  pooled 0.4 s), and its training F1 gain over the baseline (+0.008) is about the control's (+0.006). On
+  training, most of the F1 gain comes from the threshold. Arm 2 does raise recall (+0.06) and jab
+  recall (+0.05) at almost the same precision, which the control does not. The held-out run decides; this
+  is stated now so it cannot be read in afterwards.
+- Arm 1 confirms #22: the extension gate keeps the recall that per-hand peaks give (jab 0.70), but
+  precision falls further than recall rises.
+- Training precision is low (0.276; V10 0.126 at 696 detections on 151 labels): labels are incomplete there
+  too, as on V5+V9 (RESULTS 5d).
+- **Dry run of the held-out reproduction gates (baseline only, no arm):** `eval_pipeline_v5v9.py` with the
+  pooled rule on merged main gives 352 of 742 found and named right, type 0.811 on 434 (RESULTS 5b-5c), in
+  34 s; `eval_fast_combinations.named_counts` on the same classified files also gives 352. The held-out
+  script now passes `--extent` and `--reference` to that stage explicitly (its own defaults are relative to
+  the working folder; test added, fastcombo_eval 100/100).
+- **Not yet run:** the held-out evaluation. It needs #38 on main (the gate's held-out list), then a merge of
+  main here, from THIS worktree (its `results/` holds the tune file and will hold the started marker).
+
 ## Residuals (accepted)
 - Results files are gitignored (`results/`), so the tune JSON lives on disk only: copy its chosen point
   and the arm into the PR when tuning runs, before the held-out run.
