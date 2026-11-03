@@ -9,3 +9,14 @@ Video -> pose + overlay: `python run_ingest.py --video clip.mp4 --weights weight
 Punch labels: config `labelstudio/punch-labels.xml` (label the overlay mp4; frame checks at burned-in 100 and 2000), import `python import_labels.py --export <LS JSON export> --video results/ingest/<clip>.overlay.mp4` · Label tests: `python tests/test_labels.py`
 
 Punches in a clip: `python find_punches.py --pose results/ingest/<clip>.pose.npz [--labels data/own/<clip>.labels.json]` (per-hand wrist-speed rule, V6-tuned) · Per-hand tests: `python tests/test_hands.py`
+
+## Sparring label suggestions (pre-filled timing, no boxer, no type)
+
+Upload the numbered video to the Label Studio project, copy the task's video path (`/data/upload/...`), then:
+
+```bash
+MSYS_NO_PATHCONV=1 python scripts/suggest_sparring.py --tracks ~/comps-participant-data/glove-identity/gg1022-v2.tracks.npz --rule results/punch_finder_v6.json --video-url /data/upload/<id>/<file>.mp4 --output ~/comps-participant-data/sparring-labels/gg1022-v2.suggested.json
+```
+
+Import the JSON as a new task. Each finder peak is a one-frame `unclear` region; delete the non-punches, set type
+and boxer on the rest. The finder overcounts (~100 suggestions/min on these videos). Gate: docs/gates/sparring-per-boxer.md.
