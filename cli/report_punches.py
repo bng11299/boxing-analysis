@@ -29,7 +29,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from boxingvi import combos, report  # noqa: E402
+import json  # noqa: E402
+
+from boxingvi import boxers, combos, narrate, report  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
 
 DEFAULT_REFERENCE = Path("results/sweep-2026-09-22/seed0.json")   # the run cli/train_classifier.py reproduces
@@ -51,6 +53,9 @@ def main(argv=None) -> int:
     ap.add_argument("--combo-gate", type=Path, default=DEFAULT_COMBO_GATE,
                     help="score_combinations.py's gate result (used only if it matches this classifier, rule, gap)")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--prompt-out", action="store_true",
+                    help="also write <clip>.narration-prompt.json: a prompt for an optional LLM narrator, checked "
+                         "afterwards by narration_check.py (boxingvi.narrate); own footage only")
     a = ap.parse_args(argv)
 
     pose = PoseSequence.load(a.pose)
@@ -77,7 +82,8 @@ def main(argv=None) -> int:
     cf = combos.compute(runs, report._rule_of(side.get("rule"), "the sidecar")["min_gap_s"], mode is True)
     gate = (combos.read_gate(a.combo_gate, side.get("rule"), man["sha256"],
                              mode if isinstance(mode, bool) else None) if a.combo_gate.is_file() else None)
-    text, numbers = report.summary(facts, bench, finder, own, combinations=(cf, gate, False))
+    w = report.summary_writer(facts, bench, finder, own, combinations=(cf, gate, False))
+    text, numbers = w.text(), w.numbers
     if Counter(report.numbers_in(text)) != Counter(t for n in numbers for t in report.numbers_in(n)):
         raise RuntimeError("a number in the summary did not come from its templates")
     a.out_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +91,13 @@ def main(argv=None) -> int:
     report.write_workbook(a.out_dir / f"{clip}.report.xlsx", clip, rows, rounds, facts, bench, text, pose.fps,
                           report.cut_line(side), extra=(("Combinations", sheet),))
     (a.out_dir / f"{clip}.summary.txt").write_text(text + "\n", encoding="utf-8")
+    if a.prompt_out:
+        # participant-derived numbers never go to a cloud model (vault O63-O65): the file says so
+        local = any(boxers.faceblur._under(Path(x).resolve(), Path(r).resolve())
+                    for x in (a.pose, a.classified) for r in boxers.PARTICIPANT_ROOTS)
+        boxers.replace_bytes(a.out_dir / f"{clip}.narration-prompt.json", json.dumps(
+            narrate.build(w, "your", may_leave_machine=not local), indent=1, ensure_ascii=False).encode("utf-8"))
+        print(f"-> {clip}.narration-prompt.json" + (" (participant data: a LOCAL model only)" if local else ""))
     print(text)
     print(f"-> {a.out_dir / f'{clip}.report.xlsx'} and {clip}.summary.txt")
     return 0

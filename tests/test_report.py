@@ -518,7 +518,10 @@ check("IMG_4395 today, the sentences as written",
                      "(62%), against 49% expected by chance from how often each reading says lead hand. One-sided "
                      "exact tests of whether that is above chance give p = 0.071 (binomial) and p = 0.088 (Fisher), "
                      "neither under 0.05, so that agreement is not shown to be better than chance. The 62% agreement "
-                     "is under the 70% this report requires. In one round"), t95[:600])
+                     "is under the 70% this report requires.\n\nIn short: ")
+      and "\n\nWhat the tool saw: In one round" in t95 and "\n\nHow much to trust it: " in t95, t95[:900])
+check("IMG_4395 today: the hand check warned, so the headline names no punch type",
+      "most often" not in t95.split("\n\n")[1], t95.split("\n\n")[1])
 f06, t06 = warned("IMG_4406 today", hand_rows(20, 7, 1, 13))
 h06 = f06["hand_check"]
 check("IMG_4406 today: 33 of 41 (80.5%) against 50.4%: binomial and Fisher under 0.001, at least 70%: passes",
@@ -805,6 +808,16 @@ check("end to end: workbook and summary written, summary equals the library's (w
       rc == 0 and (tmp / "out" / "IMG_1.report.xlsx").is_file()
       and (tmp / "out" / "IMG_1.summary.txt").read_text(encoding="utf-8").strip() == text_e2e, text_e2e)
 check("end to end: the combinations add to the summary, they do not replace it", text_e2e.startswith(text[:200]))
+import contextlib  # noqa: E402
+import io as _io  # noqa: E402
+with contextlib.redirect_stdout(_io.StringIO()):
+    report_punches.main(args + ["--prompt-out"])
+_pp = tmp / "out" / "IMG_1.narration-prompt.json"
+_pr = json.loads(_pp.read_text(encoding="utf-8")) if _pp.is_file() else {}
+check("end to end: --prompt-out writes a narration prompt whose fallback is the summary itself, outside any "
+      "participant folder so it may leave the machine",
+      _pr.get("format") == "boxingvi-narration-prompt-1" and _pr.get("may_leave_machine") is True
+      and _pr.get("template_text") == text_e2e and _pr.get("facts"))
 check("end to end: the workbook has a Combinations sheet",
       "Combinations" in load_workbook(tmp / "out" / "IMG_1.report.xlsx").sheetnames)
 sidecar(pose_frames=n + 1)

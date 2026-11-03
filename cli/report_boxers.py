@@ -45,7 +45,7 @@ def boxer_text(boxer: str, identity, stats: dict, facts: dict, n_unsure: int, n_
     body, n_body = report.summary(facts, bench, finder, None, who="this boxer's",
                                   identified=(f"boxer {boxer}", identified_s / 60),
                                   combinations=None if combinations is None else (*combinations, True))
-    text, numbers = head + " " + body, n_head + n_body
+    text, numbers = head + "\n\n" + body, n_head + n_body
     if Counter(report.numbers_in(text)) != Counter(t for n in numbers for t in report.numbers_in(n)):
         raise RuntimeError("a number in the summary did not come from its templates")
     return text, numbers
