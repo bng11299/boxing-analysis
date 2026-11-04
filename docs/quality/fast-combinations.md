@@ -173,7 +173,7 @@ under either split. Gate commit recorded: `246dcd5`. Held-out list recorded: V2,
 - End to end on V5+V9: 385 vs 352 of 742 found and named right, +0.044 [+0.022, +0.067] (reported, not in the
   verdict).
 - Control: F1 0.364.
-- RESULTS rows 13a–13e and note 14. Not adopted; Future Work.
+- RESULTS rows 13a–13e and note 15. Not adopted; Future Work.
 
 ## Residuals (accepted)
 - Results files are gitignored (`results/`), so the tune JSON lives on disk only: copy its chosen point

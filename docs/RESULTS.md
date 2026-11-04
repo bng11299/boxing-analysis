@@ -73,6 +73,7 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 7g | Unexplained per exposure-minute, unmasked → masked (min 1; min 2) | 45.352 → 44.120; 45.205 → 44.066 | C14 | same | 45.35 → 44.12; 45.21 → 44.07 | #13 | match |
 | 7h | Mask cost: exposure removed; own-labelled punches hidden (min 1; min 2) | 8.7%, 104 of 2,407 (4.3%); 8.3%, 72 of 1,741 (4.1%) | C14 | same | body: 8.5%, 4.3%; log: 8.7% / 8.3%, 4.3% / 4.1% | #13, quality-loop | match (note 5) |
 | 7i | Sample rows still unexplained with skips (min-2 sample) | 29 of 40 (11 drop out) | C14 | `results/repro/olympic_completeness_credited_min2_sample_skipcheck.csv` | 29 of 40, 11 | #13 | match |
+| 7j | Olympic completeness audit, min-2 sample viewed by Brendan: rows judged a punch the labels missed (Wilson 95%) → estimated missed labels among 4,342 unexplained bursts | **7 of 40 = 0.175 [0.087, 0.319] → 760 [380, 1,387]** (28 not a punch, 4 unsure, 1 a referee; unsure dropped 7 of 36, 844 [423, 1,521]; unsure as punch 11 of 40, 1,194 [699, 1,860]) | — (viewed by hand) | `results/olympic_completeness_credited_min2_sample.csv` (gitignored) | new, 2026-11-03 | `docs/olympic-completeness-audit` | **new** (note 14) |
 | 8 | Face blur, own footage: frames with no face found | not re-run | C15 | — | 89 of 2,353 (3.8%); 843 of 2,659 (31.7%) | #21 | **not re-run: needs Brendan's OK** (note 6) |
 | 9a | Per-boxer path, Olympic, linker (#11) as the identity input (ungated): identity files written and read back through every check; finder punches identical to linked completeness | 29 of 29 videos both; 7,984 punches on A + B (= row 7c), 10,077 on credited fragments (= row 7d) | C16 | `results/repro/olympic_boxers.json` | new, 2026-10-25 | `feat/per-boxer-report` | **new** (note 9) |
 | 9b | Punches the linker identity leaves unassigned (on credited fragments in neither chain) | 3,772 of 11,756 found (32.1%) | C16 | same | new | `feat/per-boxer-report` | **new** (note 9) |
@@ -83,11 +84,11 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 12a | Punch combinations (gap 1.0 s), own footage IMG_4406 + IMG_4395, pooled: named labelled combinations recovered exactly (every punch found, matched and named right) vs the shuffled-type floor's 97.5th percentile (gate bar 1, strictly greater) | 2 of 19 (0.105) vs 0.105 (floor mean 0.020; 2,000 permutations, seed 20261028): **bar 1 FAILS** | C19 | `results/combinations_gate.json` | new, 2026-10-28 | `feat/combinations` | **new: gate FAIL** (note 12) |
 | 12b | Headline statements, found vs labels: favourite combination (bar 2); punch that starts combinations (bar 3) | IMG_4406 jab-jab within {cross-lead hook, jab-cross, jab-jab}, starter jab = jab; IMG_4395 jab-jab vs jab-cross, starter jab = jab: **bar 2 FAILS**, bar 3 passes | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
 | 12c | Why: labelled combinations with a gap under the finder's 0.4 s minimum; structure recovered (punches only, no types); combinations and punches in them, found vs labelled | IMG_4406 11 of 12, 1 of 12, 9 / 35 of 41 vs 12 / 40 of 47; IMG_4395 6 of 7, 4 of 7, 9 / 38 of 42 vs 7 / 37 of 40 | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
-| 13a | Fast combinations, held-out V2/V3/V5/V9 (1,784 labelled punches): F1 of the arm chosen on training (pooled + cross-hand gap 0.30 s, threshold 3.7) vs the pooled rule; paired 30 s block bootstrap (gate bar 1: interval excludes zero) | 0.380 vs 0.381: **−0.001 [−0.011, +0.010]: bar 1 FAILS** | C20 | `results/fast_combinations_heldout.json` | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new: gate FAIL** (note 14) |
-| 13b | Same: recall; precision (a lower bound, labels incomplete: row 5d) | recall 0.518 vs 0.488, +0.030 [+0.016, +0.045]; precision 0.300 vs 0.312, −0.012 [−0.021, −0.003]; detections 3,083 vs 2,791 | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 14) |
-| 13c | Same: recall by type group, jab (bar 2: up) and cross, hooks, uppercuts (bar 3: none down by more than 0.05) | jab 0.441 vs 0.422, +0.018 [−0.002, +0.039] (bar 2 passes); cross 0.481 vs 0.459, +0.022 [+0.003, +0.044]; hooks 0.710 vs 0.661, +0.049 [+0.008, +0.097]; uppercuts 0.544 vs 0.497, +0.047 [+0.019, +0.090] (bar 3 passes) | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 14) |
-| 13d | Same, end to end on V5+V9 (the pipeline checkpoint's own held-out videos): found AND named right (reported, not in the verdict) | 385 vs 352 of 742; +0.044 [+0.022, +0.067] | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 14) |
-| 13e | Same: control, the pooled rule with its threshold re-tuned on the same training videos (4.0); reported, not a candidate | F1 0.364, recall 0.433, precision 0.314 (baseline 0.381 / 0.488 / 0.312) | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 14) |
+| 13a | Fast combinations, held-out V2/V3/V5/V9 (1,784 labelled punches): F1 of the arm chosen on training (pooled + cross-hand gap 0.30 s, threshold 3.7) vs the pooled rule; paired 30 s block bootstrap (gate bar 1: interval excludes zero) | 0.380 vs 0.381: **−0.001 [−0.011, +0.010]: bar 1 FAILS** | C20 | `results/fast_combinations_heldout.json` | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new: gate FAIL** (note 15) |
+| 13b | Same: recall; precision (a lower bound, labels incomplete: row 5d) | recall 0.518 vs 0.488, +0.030 [+0.016, +0.045]; precision 0.300 vs 0.312, −0.012 [−0.021, −0.003]; detections 3,083 vs 2,791 | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
+| 13c | Same: recall by type group, jab (bar 2: up) and cross, hooks, uppercuts (bar 3: none down by more than 0.05) | jab 0.441 vs 0.422, +0.018 [−0.002, +0.039] (bar 2 passes); cross 0.481 vs 0.459, +0.022 [+0.003, +0.044]; hooks 0.710 vs 0.661, +0.049 [+0.008, +0.097]; uppercuts 0.544 vs 0.497, +0.047 [+0.019, +0.090] (bar 3 passes) | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
+| 13d | Same, end to end on V5+V9 (the pipeline checkpoint's own held-out videos): found AND named right (reported, not in the verdict) | 385 vs 352 of 742; +0.044 [+0.022, +0.067] | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
+| 13e | Same: control, the pooled rule with its threshold re-tuned on the same training videos (4.0); reported, not a candidate | F1 0.364, recall 0.433, precision 0.314 (baseline 0.381 / 0.488 / 0.312) | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
 
 **Suites:** all 18 green in a fresh `git clone` of main at `664a511` (no data present): analyse_clip
 113, blur 177, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99,
@@ -237,8 +238,21 @@ hand labels, one annotator; not reproducible from a clone (the answers are Olymp
       split videos). Only `train_seconds` differed. The environment was the same (Python 3.13.15,
       torch 2.13.0+cpu, 6 threads). So the run is deterministic on this split too (as note 7 showed
       for the old one), and main's changes do not move rows 1f-1i.
+14. **Row 7j (Olympic completeness audit, 2026-11-03) is the viewed sample ADR-0012 asks for.** The 40 rows are
+   the seeded simple random sample (seed 20261007, inclusion probability 0.00921 each) of the 4,342 bursts that
+   no label explains in the credited min-2 run (row 7d). Brendan watched each moment and marked it; the reviewer did
+   not view any frame (ADR-0011). Scoring is ADR-0012's, applied literally: the share judged "a punch the labels
+   missed", times 4,342, with a Wilson 95% interval from n = 40 (the finite-population correction, n/N = 0.9%,
+   is ignored). "Unsure" and the one referee row count as not a missed punch in the headline; the two other
+   readings are printed beside it. 10 rows were first judged on 2026-10-09; Brendan re-viewed them on
+   2026-11-03 and changed 5 (two old "a" codes, meaning not recorded, became 0; three "1" became 0, 0 and
+   unsure), so 7j uses only the 11-03 judgements. **Agreement with the frame-skip check (row 7i), blind:** the
+   11 rows the skip mask explains were all judged 0 or unsure, and all 7 missed punches are among the 29 rows it
+   leaves unexplained. **Limits (`docs/quality/completeness-credited.md`):** credited fragments only, possible
+   duplicates when two ids follow one person, and a referee can be a credited fragment (one was here). So 7j
+   shows that the labels miss punches inside credited fragments; it is not a bout-level count.
 
-14. **Rows 13a–13e (fast combinations, 2026-11-04) are a pre-registered FAIL.** Gate
+15. **Rows 13a–13e (fast combinations, 2026-11-04) are a pre-registered FAIL.** Gate
    `docs/gates/fast-combinations.md`, committed (`246dcd5`) before any code, tuning video or held-out number.
    - **Why it was tried:** the pooled rule allows one detection per 0.4 s from either hand, so a fast
      jab-cross is one detection (jab recall 0.32 in row 5b).
@@ -324,7 +338,7 @@ python linker_join_check.py check --data data/olympic --tracks T
 python linker_join_check.py score
 # C19 punch combinations gate (rows 12a-12c): C8's find + classify into a fresh folder, then score
 python score_combinations.py --clip IMG_4406 --clip IMG_4395 --punches-dir results/repro/own_tol0.2 --labels-dir data/own --pose-dir results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --out results/repro/combinations_gate.json
-# C20 fast combinations (rows 13a-13e; note 14): tune on training once, then the held-out run ONCE (it creates
+# C20 fast combinations (rows 13a-13e; note 15): tune on training once, then the held-out run ONCE (it creates
 #     results/fast_combinations_heldout.started first and refuses to run again; re-running it needs a new gate)
 python tune_fast_combinations.py --data data --poses results/ingest
 python eval_fast_combinations.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox
