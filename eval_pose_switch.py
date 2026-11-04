@@ -67,7 +67,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi import classify, poseswitch, punchfind  # noqa: E402
-from boxingvi.data import CLASSES, NATIVE_FPS, load_corpus, split_by_video, to_arrays  # noqa: E402
+from boxingvi.data import CLASSES, NATIVE_FPS, load_corpus, split_pipeline, to_arrays  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
 from boxingvi.stats import bootstrap_gap_ci  # noqa: E402
 from classify_punches import span_peak  # noqa: E402
@@ -229,7 +229,9 @@ def main(argv=None) -> int:
 
     # Gate 1: the reported model and input path, on the corpus's own held-out clips.
     held = (man.get("held_out") or {})
-    _, val = split_by_video(load_corpus(a.data))
+    # The checkpoint's own held-out clips: scoring it on the athlete-disjoint set
+    # would score it on V3, which it trained on.
+    _, val = split_pipeline(load_corpus(a.data))
     held_out = sorted({c.source for c in val})
     if not set(videos) <= set(held_out) or len(set(videos)) != len(videos):
         raise SystemExit(f"--videos must be distinct held-out videos ({held_out}), got {videos}")
@@ -300,7 +302,8 @@ def main(argv=None) -> int:
         "the per-clip cut (Y_clip) was CHOSEN looking at these videos' numbers and at V6's second half "
         "(ADR-0014, 2026-10-13): this is no longer a clean test of it",
         "held-out videos are coaches' YouTube footage at 24-30 fps, not phone footage",
-        "the video-disjoint split may not be athlete-disjoint (O55)",
+        "V5 and V9 are each a person seen in no other video (O55): athlete-disjoint; gate 1 re-scores the "
+        "checkpoint on V2/V5/V9, and V2 is NOT (its instructor trains in V3)",
         "YOLO keeps one person per frame; other-person clips are counted, and scored in all_seen"]
     for line in summary_lines(report):
         print(line)

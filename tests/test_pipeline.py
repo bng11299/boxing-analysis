@@ -212,12 +212,116 @@ corpus = [_clip(v, i % data.N_CLASSES) for i, v in enumerate(
 tr, va = data.split_by_video(corpus)
 check("held-out videos go to validation",
       {c.source for c in va} == set(data.HELD_OUT_VIDEOS))
-check("training excludes them", {c.source for c in tr} == {"V1", "V3"})
+check("training excludes them", {c.source for c in tr} == {"V1"})
 check("no video straddles the split",
       not ({c.source for c in tr} & {c.source for c in va}))
 check("every clip is accounted for", len(tr) + len(va) == len(corpus))
 raises("absent held-out video is an error",
        lambda: data.split_by_video(corpus, held_out=("V99",)))
+
+# O55: the people on screen, as Brendan's 2026-10-27 skim recorded them. Pinned
+# here so a change to the map is a visible, reviewed change.
+check("the person map covers exactly the ten videos",
+      set(data.PERSON_OF_VIDEO) == set(data.VIDEOS))
+check("V1/V6 are one person and V2/V3 another; the other six are each alone",
+      sorted({tuple(sorted((v for v in data.VIDEOS if data.person_of(v) == p),
+                           key=data._group_order))
+              for p in data.PERSON_OF_VIDEO.values()})
+      == sorted([("V1", "V6"), ("V2", "V3"), ("V4",), ("V5",), ("V7",), ("V8",),
+                 ("V9",), ("V10",)]))
+check("the headline hold-out is the old one plus V3, nothing else",
+      set(data.HELD_OUT_VIDEOS) == set(data.PIPELINE_HELD_OUT_VIDEOS) | {"V3"})
+for _bad in ("V11", "v2", "V2 ", "", None, 2):
+    raises(f"person_of refuses unknown video id {_bad!r}", lambda b=_bad: data.person_of(b))
+try:
+    data.person_of("V11")
+except ValueError as e:
+    check("... and says the id is unknown rather than guessing", "unknown video id" in str(e))
+else:
+    check("... and says the id is unknown rather than guessing", False, "no exception raised")
+# V11 is held out but absent from the corpus: only the held-out pre-check can catch it.
+try:
+    data.split_by_video(corpus, held_out=("V2", "V3", "V11"))
+except ValueError as e:
+    check("an unknown held-out id is refused before splitting", "unknown video id 'V11'" in str(e), str(e))
+else:
+    check("an unknown held-out id is refused before splitting", False, "no exception raised")
+try:
+    data.split_by_video(corpus, held_out="V2")
+except ValueError as e:
+    check("a bare string hold-out is refused as a string, not read letter by letter",
+          "not the string 'V2'" in str(e), str(e))
+else:
+    check("a bare string hold-out is refused as a string, not read letter by letter", False, "no exception")
+def _reassign_v3():
+    data.PERSON_OF_VIDEO["V3"] = "V3"   # would make V2 and V3 separate people
+
+
+raises("the person map cannot be changed at run time", _reassign_v3, TypeError)
+check("... and V3 is still V2's person", data.person_of("V3") == "V2+V3")
+raises("an unknown video in the corpus is refused even when it is not held out",
+       lambda: data.split_by_video(corpus + [_clip("V11")]))
+raises("a clip with no video id is refused, not treated as its own person",
+       lambda: data.split_by_video(corpus + [_clip("")]))
+# The leak O55 found: V2 held out while V3, the same instructor, trains.
+raises("the old V2/V5/V9 hold-out is refused: it splits V2+V3",
+       lambda: data.split_by_video(corpus, held_out=data.PIPELINE_HELD_OUT_VIDEOS))
+try:
+    data.split_by_video(corpus, held_out=("V2", "V5", "V9"))
+except ValueError as e:
+    check("... and the refusal names the person and both sides",
+          "V2+V3" in str(e) and "V3 in training" in str(e) and "V2 held out" in str(e)
+          and "O55" in str(e), str(e))
+else:
+    check("... and the refusal names the person and both sides", False, "no exception raised")
+_with_v6 = corpus + [_clip("V6"), _clip("V6")]
+raises("holding out V6 while V1 trains is refused",
+       lambda: data.split_by_video(_with_v6, held_out=("V6",)))
+raises("holding out V3 alone while V2 trains is refused",
+       lambda: data.split_by_video(corpus, held_out=("V3",)))
+_tr6, _va6 = data.split_by_video(_with_v6, held_out=("V1", "V6"))
+check("holding out a whole person is allowed", {c.source for c in _va6} == {"V1", "V6"})
+# The check is on the split returned: if V3 is not in the corpus, holding out
+# V2 alone puts nobody on both sides, so it is allowed.
+_no_v3 = [c for c in corpus if c.source != "V3"]
+_tr3, _va3 = data.split_by_video(_no_v3, held_out=("V2",))
+check("a person whose other video is absent does not straddle anything",
+      {c.source for c in _va3} == {"V2"} and "V3" not in {c.source for c in _tr3})
+# Exhaustive: over every hold-out drawn from the nine corpus videos,
+# split_by_video refuses exactly the sets that cut a person in two, and
+# whatever it returns never has a person on both sides.
+import itertools  # noqa: E402
+_nine = [v for v in data.VIDEOS if v != "V6"]
+_all9 = [_clip(v, i % data.N_CLASSES) for i, v in enumerate(_nine * 2)]
+_ok_sets = _refused = 0
+_wrong = []
+for _r in range(1, len(_nine)):
+    for _held in itertools.combinations(_nine, _r):
+        _cuts = any(data.person_of(v) == data.person_of(w)
+                    for v in _held for w in _nine if w not in _held)
+        try:
+            _t, _v = data.split_by_video(_all9, held_out=_held)
+        except ValueError:
+            _refused += 1
+            if not _cuts:
+                _wrong.append(("refused", _held))
+            continue
+        _ok_sets += 1
+        if _cuts or ({data.person_key(c) for c in _t} & {data.person_key(c) for c in _v}):
+            _wrong.append(("allowed", _held))
+check("every one of the 510 hold-outs: refused iff it cuts a person, never leaky",
+      not _wrong and _ok_sets + _refused == 2 ** 9 - 2 and _refused > 0,
+      f"{_wrong[:3]} ({_ok_sets} allowed, {_refused} refused)")
+
+# The pipeline checkpoint's split stays reproducible, and says what it is.
+_trp, _vap = data.split_pipeline(corpus)
+check("split_pipeline holds out V2/V5/V9 and trains on V1 and V3",
+      {c.source for c in _vap} == {"V2", "V5", "V9"}
+      and {c.source for c in _trp} == {"V1", "V3"})
+check("split_pipeline is documented as not athlete-disjoint",
+      "NOT athlete-disjoint" in (data.split_pipeline.__doc__ or ""))
+raises("split_pipeline still refuses a corpus missing a held-out video",
+       lambda: data.split_pipeline([c for c in corpus if c.source != "V9"]))
 # The guard that stops anyone applying the official split it cannot support.
 raises("subject split refuses clips with no subject id",
        lambda: data.split_by_subject(corpus))
@@ -753,6 +857,81 @@ check("pooled group ids line up with pooled labels",
       len(_gall) == len(_yall) == len(_real_like)
       and [g for g in dict.fromkeys(_gall.tolist())]
       == [v for f in _f for v in f])
+
+# O55: on real data the folds group by person, not video.
+_pf3 = data.group_folds(_real_like, 3, data.person_key)
+check("person folds on the real sizes are the ones the run will use",
+      _pf3 == [("V1+V6",), ("V2+V3", "V8", "V10"), ("V4", "V5", "V7", "V9")], str(_pf3))
+check("the person folds are label-blind too",
+      data.group_folds(_relabelled, 3, data.person_key) == _pf3)
+_psplits = data.cv_splits(_real_like, 3, data.person_key)
+check("no person is on both sides of any person fold",
+      all(not ({data.person_key(c) for c in tr} & {data.person_key(c) for c in te})
+          for _h, tr, te in _psplits))
+check("V2 and V3 are always tested together",
+      all(({"V2", "V3"} <= {c.source for c in te}) or not ({"V2", "V3"} & {c.source for c in te})
+          for _h, _tr, te in _psplits))
+raises("person folds refuse a clip from an unknown video",
+       lambda: data.group_folds(_vclips({"V1": 3, "V2": 3, "V11": 3}), 2, data.person_key))
+# Many folds on few persons: with k = 8 every person is a fold of its own,
+# and 9 is more folds than the 8 persons in nine videos.
+check("k = number of persons gives one person per fold",
+      sorted(len(f) for f in data.group_folds(_real_like, 8, data.person_key)) == [1] * 8)
+raises("more folds than persons is refused (9 videos, 8 persons)",
+       lambda: data.group_folds(_real_like, 9, data.person_key))
+_spy_calls.clear()
+run_baseline.run_arms = _spy_arms
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        _pp, _py, _pg_ids, _pfolds = run_baseline.run_cv(
+            _real_like, argparse.Namespace(cv=3), None, data.person_key)
+finally:
+    run_baseline.run_arms = _real_arms
+_pspy = [({data.person_of(v) for v in tr}, {data.person_of(v) for v in te})
+         for tr, te, _a, _b in _spy_calls]
+check("run_arms is never given a person on both sides when CV groups by person",
+      len(_pspy) == 3 and all(not (tr & te) for tr, te in _pspy))
+check("... and the fold records name persons",
+      [f["test_groups"] for f in _pfolds] == [list(f) for f in _pf3])
+
+# Wiring: main() on real data (loader stubbed) must hand the person split to the
+# models, in both modes. A sentinel stops each run once the split is known.
+class _Stop(Exception):
+    pass
+
+
+_seen = {}
+
+
+def _stop_arms(train, test, a, spec):
+    _seen["single"] = ({c.source for c in train}, {c.source for c in test})
+    raise _Stop
+
+
+def _stop_cv(clips, a, spec, key):
+    _seen["cv_key"] = key
+    raise _Stop
+
+
+_saved = (data.load_corpus, data.discover_layout, run_baseline.run_arms, run_baseline.run_cv)
+data.load_corpus = lambda root, include_v6=False: list(_real_like)
+data.discover_layout = lambda root: {}
+run_baseline.run_arms, run_baseline.run_cv = _stop_arms, _stop_cv
+try:
+    for _argv in (["--data", "."], ["--data", ".", "--cv", "3"]):
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_baseline.main(_argv + ["--out", str(Path(tempfile.gettempdir()) / "never.json")])
+        except _Stop:
+            pass
+finally:
+    data.load_corpus, data.discover_layout, run_baseline.run_arms, run_baseline.run_cv = _saved
+check("main() on real data trains without V2/V3/V5/V9 and tests on exactly them",
+      _seen.get("single") == ({"V1", "V4", "V7", "V8", "V10"}, {"V2", "V3", "V5", "V9"}),
+      str(_seen.get("single")))
+check("main() --cv on real data groups folds by person",
+      _seen.get("cv_key") is data.person_key, str(_seen.get("cv_key")))
+
 check("the checkpoint's sha256 survives into every fold record and the pooled row",
       all(f["models"]["st-gcn++ pretrained"]["pretrained_from"]["sha256"] == "c6e0-fake"
           for f in _folds)

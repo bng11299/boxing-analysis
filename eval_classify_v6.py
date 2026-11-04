@@ -37,8 +37,8 @@ width level and the choice of rule were made looking at the first half
 (run_punch_extent.py); the second half is the clean number. Paired bootstrap intervals on the punches both readings read.
 
 Limits, stated in the results: V6 has only hooks and uppercuts (no jabs or
-crosses), one athlete, and the same channel as training video V1, so its numbers
-may be optimistic about a new athlete (ISSUES-LOG O55). Its skeletons are
+crosses), one athlete, and the same person as training video V1 (ISSUES-LOG O55): not
+athlete-disjoint, so its numbers may be optimistic about a new athlete. Its skeletons are
 AlphaPose, as in training: nothing here measures the YOLO11-pose switch.
 """
 
@@ -189,7 +189,7 @@ def main(argv=None) -> int:
                   "the per-clip cut (F, G) was CHOSEN looking at this file's second-half numbers and at V5/V9 "
                   "(ADR-0014, 2026-10-13): they are no longer a clean test of it",
                   "V6 has hooks and uppercuts only: no jabs or crosses",
-                  "one athlete, same channel as training video V1 (O55): may be optimistic",
+                  "one athlete, the same person as training video V1 (O55): not athlete-disjoint, may be optimistic",
                   "AlphaPose skeletons as in training: says nothing about the YOLO11-pose switch",
                   "the finder's rule was tuned on V6's first half, and the extent rule's width level and form "
                   "were chosen looking at it: the second half is the clean number"]}

@@ -207,7 +207,7 @@ import pandas as pd  # noqa: E402, F811
 import torch  # noqa: E402
 
 from boxingvi import classify  # noqa: E402
-from boxingvi.data import CLASSES, NATIVE_FPS, VIDEOS, load_corpus, split_by_video, to_arrays  # noqa: E402
+from boxingvi.data import CLASSES, NATIVE_FPS, VIDEOS, load_corpus, split_pipeline, to_arrays  # noqa: E402
 from boxingvi.stgcnpp import STGCNPP  # noqa: E402
 
 e2e = Path(tempfile.mkdtemp())
@@ -251,7 +251,7 @@ torch.save(STGCNPP().state_dict(), ck)
 mpath = e2e / "clf.json"
 classify.write_manifest(mpath, ck, GEOM, 50, {})
 m_, man_ = classify.load_classifier(mpath)
-_, val_ = split_by_video(load_corpus(data_))
+_, val_ = split_pipeline(load_corpus(data_))
 xv_, yv_ = to_arrays(val_)
 g1 = eps.scores(yv_, eps.predict(m_, man_, list(xv_)))   # gate 1 is not under test: let it pass
 classify.write_manifest(mpath, ck, GEOM, 50, {"note": "random init, test only",
