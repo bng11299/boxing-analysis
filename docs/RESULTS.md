@@ -84,6 +84,11 @@ Commands are in the "Commands" section (C0–C15), written as run from a clean c
 | 12a | Punch combinations (gap 1.0 s), own footage IMG_4406 + IMG_4395, pooled: named labelled combinations recovered exactly (every punch found, matched and named right) vs the shuffled-type floor's 97.5th percentile (gate bar 1, strictly greater) | 2 of 19 (0.105) vs 0.105 (floor mean 0.020; 2,000 permutations, seed 20261028): **bar 1 FAILS** | C19 | `results/combinations_gate.json` | new, 2026-10-28 | `feat/combinations` | **new: gate FAIL** (note 12) |
 | 12b | Headline statements, found vs labels: favourite combination (bar 2); punch that starts combinations (bar 3) | IMG_4406 jab-jab within {cross-lead hook, jab-cross, jab-jab}, starter jab = jab; IMG_4395 jab-jab vs jab-cross, starter jab = jab: **bar 2 FAILS**, bar 3 passes | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
 | 12c | Why: labelled combinations with a gap under the finder's 0.4 s minimum; structure recovered (punches only, no types); combinations and punches in them, found vs labelled | IMG_4406 11 of 12, 1 of 12, 9 / 35 of 41 vs 12 / 40 of 47; IMG_4395 6 of 7, 4 of 7, 9 / 38 of 42 vs 7 / 37 of 40 | C19 | same | new, 2026-10-28 | `feat/combinations` | **new** (note 12) |
+| 13a | Fast combinations, held-out V2/V3/V5/V9 (1,784 labelled punches): F1 of the arm chosen on training (pooled + cross-hand gap 0.30 s, threshold 3.7) vs the pooled rule; paired 30 s block bootstrap (gate bar 1: interval excludes zero) | 0.380 vs 0.381: **−0.001 [−0.011, +0.010]: bar 1 FAILS** | C20 | `results/fast_combinations_heldout.json` | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new: gate FAIL** (note 15) |
+| 13b | Same: recall; precision (a lower bound, labels incomplete: row 5d) | recall 0.518 vs 0.488, +0.030 [+0.016, +0.045]; precision 0.300 vs 0.312, −0.012 [−0.021, −0.003]; detections 3,083 vs 2,791 | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
+| 13c | Same: recall by type group, jab (bar 2: up) and cross, hooks, uppercuts (bar 3: none down by more than 0.05) | jab 0.441 vs 0.422, +0.018 [−0.002, +0.039] (bar 2 passes); cross 0.481 vs 0.459, +0.022 [+0.003, +0.044]; hooks 0.710 vs 0.661, +0.049 [+0.008, +0.097]; uppercuts 0.544 vs 0.497, +0.047 [+0.019, +0.090] (bar 3 passes) | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
+| 13d | Same, end to end on V5+V9 (the pipeline checkpoint's own held-out videos): found AND named right (reported, not in the verdict) | 385 vs 352 of 742; +0.044 [+0.022, +0.067] | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
+| 13e | Same: control, the pooled rule with its threshold re-tuned on the same training videos (4.0); reported, not a candidate | F1 0.364, recall 0.433, precision 0.314 (baseline 0.381 / 0.488 / 0.312) | C20 | same | new, 2026-11-04 | `feat/fast-combinations` (#40) | **new** (note 15) |
 
 **Suites:** all 18 green in a fresh `git clone` of main at `664a511` (no data present): analyse_clip
 113, blur 177, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99,
@@ -247,6 +252,37 @@ hand labels, one annotator; not reproducible from a clone (the answers are Olymp
    duplicates when two ids follow one person, and a referee can be a credited fragment (one was here). So 7j
    shows that the labels miss punches inside credited fragments; it is not a bout-level count.
 
+15. **Rows 13a–13e (fast combinations, 2026-11-04) are a pre-registered FAIL.** Gate
+   `docs/gates/fast-combinations.md`, committed (`246dcd5`) before any code, tuning video or held-out number.
+   - **Why it was tried:** the pooled rule allows one detection per 0.4 s from either hand, so a fast
+     jab-cross is one detection (jab recall 0.32 in row 5b).
+   - **The two arms:**
+     - arm 1: per-hand peaks, counted only while the wrist moves away from its shoulder;
+     - arm 2: the pooled rule with a shorter gap between punches of different hands.
+   - **Tuning, training only.** Videos: V4, V7, V8 and V10 for F1, V6 for the hook and uppercut recall
+     checks. V1 was excluded by the alignment gate: its shipped skeletons sit about 0.2 frame heights from the
+     YOLO person at every offset within ±12 frames, against about 0.008 for aligned videos (like O61).
+     - Arm 2 was chosen: gap 0.30 s, the top of its grid; threshold 3.7.
+     - Training F1: arm 2 0.394, pooled baseline 0.386, arm 1 0.359. The control (threshold re-tuned) got
+       0.392, so on training most of arm 2's gain came from the threshold. This was recorded before the
+       held-out run.
+   - **The held-out run (once):** the held-out videos are V2/V3/V5/V9 from the athlete-disjoint split
+     (#38); V2's and V3's pose files are swapped per O61. Before scoring the arm, the baseline reproduced
+     rows 5a–5c exactly: 686 / 742 / 434, jabs 84 of 264, and 352 found and named right.
+   - **Verdict:**
+     - bars 2 (jab recall up) and 3 (no group down by more than 0.05) pass;
+     - bar 1 (F1 up, with an interval excluding zero) fails. Arm 2 finds more punches of every type (recall
+       +0.030), but its extra detections cost as much precision as they add recall, so F1 is flat.
+   - **End to end (V5+V9):** 33 more labelled punches are found and named right (+0.044, interval above
+     zero). This is reported but is not part of the verdict.
+   - **Per video:** F1 rises on V5 (0.706 → 0.738) and V9 (0.371 → 0.399) and falls on V2 (0.115 → 0.105) and
+     V3 (0.412 → 0.400). V2's labels cover little of its footage (precision 0.069).
+   - **Consequences:**
+     - Not adopted: the pooled rule stays the pipeline's finder, so rows 0, 4, 4r, 5a–5d, 6a–6h, 7c, 7d, 7f–7i, 9b,
+       9d and 12a–12c are unchanged.
+     - Nothing is tuned further; it goes to Future Work.
+     - The end-to-end gain is the reason to revisit it with a gate that scores the end-to-end number first.
+
 ## Commands
 
 From the repo root, PowerShell, with the venv's `python`.
@@ -302,6 +338,10 @@ python linker_join_check.py check --data data/olympic --tracks T
 python linker_join_check.py score
 # C19 punch combinations gate (rows 12a-12c): C8's find + classify into a fresh folder, then score
 python score_combinations.py --clip IMG_4406 --clip IMG_4395 --punches-dir results/repro/own_tol0.2 --labels-dir data/own --pose-dir results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --out results/repro/combinations_gate.json
+# C20 fast combinations (rows 13a-13e; note 15): tune on training once, then the held-out run ONCE (it creates
+#     results/fast_combinations_heldout.started first and refuses to run again; re-running it needs a new gate)
+python tune_fast_combinations.py --data data --poses results/ingest
+python eval_fast_combinations.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox
 # C15 face blur, own footage only (row 8; not run here, note 6); CLIP = IMG_4406, IMG_4395
 python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
 ```

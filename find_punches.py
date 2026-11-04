@@ -42,7 +42,15 @@ def load_rule(path: Path) -> dict:
     c = json.loads(path.read_text(encoding="utf-8"))["chosen"]
     if c["variant"] not in punchfind.VARIANTS:
         raise ValueError(f"{path}: unknown rule variant {c['variant']!r}")
-    return {"variant": c["variant"], "threshold": float(c["threshold"]), "min_gap_s": float(c["min_gap_s"])}
+    rule = {"variant": c["variant"], "threshold": float(c["threshold"]), "min_gap_s": float(c["min_gap_s"])}
+    # An optional `finder` block names an arm of docs/gates/fast-combinations.md. Without one the
+    # rule is the pooled rule and this dict is exactly what it always was (sidecars compare it).
+    if "finder" in c:
+        try:
+            rule["finder"] = punchfind.parse_finder(c["finder"], rule["min_gap_s"])
+        except ValueError as e:
+            raise ValueError(f"{path}: {e}") from None
+    return rule
 
 
 def _frame(v, what: str) -> int:
@@ -88,12 +96,19 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     rule = load_rule(a.rule)
+    if a.per_hand and "finder" in rule:
+        raise ValueError(f"--per-hand cannot be combined with a rule that names its own finder "
+                         f"({rule['finder']['mode']}, in {a.rule.name})")
+    per_hand_out = a.per_hand or punchfind.rule_per_hand(rule)
     pose = PoseSequence.load(a.pose)
     clip = a.pose.name.split(".")[0]
     raw = pose.to_track(usable_only=False)            # every detected frame, with confidence
     track = punchfind.bridge(raw, int(round(punchfind.BRIDGE_S * pose.fps)))
     sig = punchfind.wrist_signal(track, rule["variant"])
-    det, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"], per_hand=a.per_hand)
+    if "finder" in rule:
+        det, hands = punchfind.detect_rule(track, sig, rule)
+    else:
+        det, hands = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"], per_hand=a.per_hand)
     row = {int(f): i for i, f in enumerate(track.frame_ids)}
     observed = set(int(f) for f in raw.frame_ids)
     valid = punchfind.hand_valid(track)
@@ -104,7 +119,8 @@ def main(argv=None) -> int:
     per_hand = punchfind.signal_coverage(raw, bridge_s=0.0, span=whole)
     bridged = punchfind.signal_coverage(track, span=whole)
     print(f"{clip}: {len(pose)} frames @ {pose.fps:.3f} fps; rule {rule['variant']} > "
-          f"{rule['threshold']:.2f} body lengths/s, min gap {rule['min_gap_s']} s (tuned on V6)")
+          f"{rule['threshold']:.2f} body lengths/s, min gap {rule['min_gap_s']} s"
+          + (f", finder {rule['finder']}" if "finder" in rule else " (tuned on V6)"))
     print(f"  share of all {len(pose)} frames with a speed signal: both-wrists frame rule {old:.1%} | "
           f"per hand L {per_hand['left']:.1%} R {per_hand['right']:.1%} | "
           f"per hand + dropouts bridged L {bridged['left']:.1%} R {bridged['right']:.1%}")
@@ -125,7 +141,7 @@ def main(argv=None) -> int:
     # Which finder made the list, beside it rather than in it: the CSV's header is read downstream.
     (a.out_dir / f"{clip}.punches.json").write_text(json.dumps({
         "clip": clip, "csv_sha256": hashlib.sha256(out.read_bytes()).hexdigest(), "rule": rule,
-        "per_hand": a.per_hand}, indent=1, allow_nan=False), encoding="utf-8")
+        "per_hand": per_hand_out}, indent=1, allow_nan=False), encoding="utf-8")
     print(f"  -> {out} (+ .json: the rule, pooled or per hand)"
           + (f"  ({n_interp} peak(s) on an interpolated frame, flagged)" if n_interp else ""))
 
@@ -144,7 +160,7 @@ def main(argv=None) -> int:
             # stays where there are detections (none is a labelled punch); with none it is 0/0.
             s = s | {"recall": None, "f1": None, "count_ratio": None,
                      "precision": s["precision"] if s["n_detected"] else None}
-        result = {"clip": clip, "rule": rule, "per_hand": a.per_hand, "tolerance_frames": tol,
+        result = {"clip": clip, "rule": rule, "per_hand": per_hand_out, "tolerance_frames": tol,
                   "point_labels": n_points, "point_tolerance_frames": point_tol, "unclear_means": a.unclear,
                   "score": s}
         if not_punch:

@@ -351,6 +351,11 @@ def _rule_of(d, what: str) -> dict:
                 or (isinstance(v, int) and abs(v) > 1e6) or not math.isfinite(v)):   # int bound: no float overflow
             raise ValueError(f"{what}: rule {k} {str(v)[:20]!r} is not a number")
         out[k] = float(v)
+    # An arm of docs/gates/fast-combinations.md is another finder even with the same three numbers:
+    # its block takes part in the comparison, so the pooled rule's score is never lent to it.
+    if "finder" in d:
+        from .punchfind import parse_finder
+        out["finder"] = parse_finder(d["finder"], out["min_gap_s"])
     return out
 
 
