@@ -157,6 +157,24 @@ under either split. Gate commit recorded: `246dcd5`. Held-out list recorded: V2,
 - **Not yet run:** the held-out evaluation. It needs #38 on main (the gate's held-out list), then a merge of
   main here, from THIS worktree (its `results/` holds the tune file and will hold the started marker).
 
+## 2026-11-04: the held-out run (once): FAIL
+- #38 merged into main at `0115b7a` (held out V2, V3, V5, V9). Main merged here at `88a0148`, with no conflicts.
+- Suites on the merge: fast_combinations 78, fastcombo_eval 100, hands 99, report 291, classify 299, e2e 74,
+  analyse_clip 113, pipeline 351, poseswitch 30. All green; no marker left by the tests.
+- `eval_fast_combinations.py` ran ONCE from this worktree (77 s; marker
+  `results/fast_combinations_heldout.started` created).
+- All four held-out videos aligned (V2 on the V3-link pose 1.71, V3 on the V2-link pose 1.81, V5 3.15, V9
+  2.55). Both reproduction gates passed before the arm was scored (686 / 742 / 434, jabs 84/264; 352 named right).
+- **Verdict: FAIL.**
+  - Bar 1, F1 0.380 vs 0.381, −0.001 [−0.011, +0.010]: fails.
+  - Bar 2, jab recall 0.441 vs 0.422: passes.
+  - Bar 3, cross / hooks / uppercuts all up: passes.
+- Recall +0.030 [+0.016, +0.045]; precision −0.012 [−0.021, −0.003].
+- End to end on V5+V9: 385 vs 352 of 742 found and named right, +0.044 [+0.022, +0.067] (reported, not in the
+  verdict).
+- Control: F1 0.364.
+- RESULTS rows 13a–13e and note 14. Not adopted; Future Work.
+
 ## Residuals (accepted)
 - Results files are gitignored (`results/`), so the tune JSON lives on disk only: copy its chosen point
   and the arm into the PR when tuning runs, before the held-out run.
