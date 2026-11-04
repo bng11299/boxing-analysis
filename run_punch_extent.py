@@ -27,7 +27,7 @@ What V6's first half WAS used for, so the second half is the clean number: the
 width level (0.5, from 0.5 / 0.6 / 0.7) and the choice of this rule over a
 threshold walk were made looking at the first half only.
 
-Limits: V6 is one athlete, hooks and uppercuts only, AlphaPose at 24 fps, and its
+Limits: V6 is one athlete -- the same person as training video V1 (O55) -- hooks and uppercuts only, AlphaPose at 24 fps, and its
 labelled spans run nearly twice as long as the training clips of the same types
 (0.67 s against 0.3-0.4 s), so an extent built from the training clips is
 expected to come up short of them. The extent of a jab or a cross is checked on
@@ -46,7 +46,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi import classify, punchfind  # noqa: E402
-from boxingvi.data import HELD_OUT_VIDEOS, load_corpus, load_v6_spans, load_v6_track, split_by_video  # noqa: E402
+from boxingvi.data import PIPELINE_HELD_OUT_VIDEOS, load_corpus, load_v6_spans, load_v6_track, split_pipeline  # noqa: E402
 from classify_punches import span_peak  # noqa: E402
 
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
     if rule["variant"] != geom.variant:
         raise SystemExit("the finder's rule and the classifier's window use different wrist-speed variants")
 
-    train, _ = split_by_video(load_corpus(a.data))
+    train, _ = split_pipeline(load_corpus(a.data))   # the classifier checkpoint's training side
     ratios = classify.training_extent_ratios(train, geom.variant, punchfind.WIDTH_FRAC)
     print(f"from {ratios['n_clips']} training clips with a whole speed peak ({ratios['n_censored']} cut by the "
           f"clip's edge, left out): a punch runs {ratios['lead_widths']:.2f} peak-widths before its peak "
@@ -135,7 +135,7 @@ def main(argv=None) -> int:
 
     out = {"rule": "extent = [peak - lead_widths * width, peak + tail_widths * width]; width = time the punching "
                    "wrist holds >= frac of its peak speed",
-           **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(HELD_OUT_VIDEOS),
+           **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(PIPELINE_HELD_OUT_VIDEOS),
            "tested_on": "V6", "fps": track.fps, "v6": {}, "v6_clip_cut": clip._asdict(),
            "pipeline_cut": "per clip: every punch read over the median of the clip's own punch extents"}
     for name, w in (("first_half", tuple(r["tune_window"])), ("second_half", tuple(r["test_window"]))):
@@ -171,7 +171,8 @@ def main(argv=None) -> int:
     out["first_half_was_used_for"] = "choosing the width level (0.5 of 0.5/0.6/0.7) and this rule over a threshold walk"
     out["limits"] = ["the per-clip cut was chosen looking at V6's second half and at V5/V9 (ADR-0014, 2026-10-13): "
                      "this gate is no longer an independent test of it",
-                     "V6: one athlete, hooks and uppercuts only, AlphaPose at 24 fps",
+                     "V6: one athlete, the same person as training video V1 (O55: not athlete-disjoint), hooks and "
+                     "uppercuts only, AlphaPose at 24 fps",
                      "V6's labelled spans run nearly twice as long as training clips of the same types",
                      "the extent of a jab or cross has not been checked against a label here"]
 

@@ -14,12 +14,17 @@ initial deliverable, and it depends on nothing else in the project succeeding.
 | Pipeline | Built, validated, and **run on the real corpus** (2026-09-02) |
 | Tests | Plain-script suites in `tests/`, weighted toward the loader and feature trust boundaries |
 | Real corpus | Obtained 2026-09-02. **It is not what the paper describes** — see below |
-| Reported results | **Current numbers: [`docs/RESULTS.md`](docs/RESULTS.md).** The first baselines below are kept as reported in September 2026. Video-disjoint split, **not** the paper's official one |
+| Reported results | **Current numbers: [`docs/RESULTS.md`](docs/RESULTS.md)**, on the athlete-disjoint split V2/V3/V5/V9 (O55). The first baselines below are kept as reported in September 2026, on the older video-disjoint V2/V5/V9 split. **Not** the paper's official split |
 
 ## First baselines
 
 Six punch classes, 4,757 clips from the nine pre-segmented videos, 30 epochs,
 seed 0, CPU. Held out V2/V5/V9 (976 clips, 20.5%).
+
+> **Superseded 2026-10-27 (O55).** V2 and V3 show the same instructor, so this
+> split is not athlete-disjoint. Current numbers are on the athlete-disjoint
+> hold-out V2/V3/V5/V9 in [docs/RESULTS.md](docs/RESULTS.md). The table below is
+> kept as the record of the first run.
 
 | Arm | Model | Accuracy | Macro F1 |
 |---|---|---:|---:|
@@ -105,9 +110,11 @@ Consequences baked into the code rather than left to memory:
 - `split_by_subject` **refuses** real clips and says why. The official split
   cannot be applied, and the guard exists so nobody quietly substitutes a
   clip-level split, which leaks athletes across folds.
-- `split_by_video` holds out whole videos instead — weaker than
-  subject-disjoint, but the strongest guarantee the release supports. The
-  held-out set was fixed on label distribution alone, before any model was fit.
+- `split_by_video` holds out whole videos instead, and refuses any hold-out
+  that puts one person on both sides (`data.PERSON_OF_VIDEO`: V1/V6 and V2/V3
+  are one instructor each, O55). The original V2/V5/V9 set was fixed on label
+  distribution alone, before any model was fit; V3 joined it on 2026-10-27
+  because it shows V2's instructor.
 - The missing third channel is synthesised as an explicit **validity mask**, not
   a fabricated confidence. This matters: 46–70% of every clip is zero-padding,
   and the feature extractor reads that channel to drop it.

@@ -738,7 +738,7 @@ def main(argv=None) -> int:
         "(see label_completeness_audit)",
         "the audit is one judge (a reviewer, from frame strips), blind to which strips were labelled; its controls "
         "measure that judge on known punches",
-        "the video-disjoint split may not be athlete-disjoint (O55)"]
+        "V5 and V9 are each a person seen in no other video (O55): athlete-disjoint for this checkpoint"]
     out = a.out_dir / "pipeline_v5v9.json"
     out.write_text(json.dumps(report, indent=1, allow_nan=False, default=float), encoding="utf-8")
 

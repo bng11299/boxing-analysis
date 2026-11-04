@@ -258,7 +258,7 @@ CV_INTERVAL_NOTE = (
     "CV intervals are a paired clip-level bootstrap on pooled out-of-fold "
     "predictions from K different models. They ignore within-video correlation "
     "and between-fold training variance, so they are too narrow; read them "
-    "with the per-group gaps and sign test, which treat the group (video, or "
+    "with the per-group gaps and sign test, which treat the group (person, or "
     "subject for synthetic fixtures) as the unit. The sign test is itself "
     "optimistic: groups in one fold are scored by the same model, so they are "
     "not independent, and the effective sample size lies between K and the "
@@ -302,8 +302,8 @@ def run_cv(clips, a, spec, key):
     Out-of-fold predictions are concatenated in fold order, with labels and
     group ids concatenated in the same order, and every pooled metric and
     interval is computed on that set: each clip scored once, by a model that
-    never saw its video. Folds inherit split_by_video's caveat: an athlete who
-    appears in two videos can straddle a fold.
+    never saw its group. On real data the groups are persons
+    (data.person_key), so no athlete straddles a fold (O55).
     """
     from boxingvi.data import cv_splits
 
@@ -437,8 +437,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--stgcnpp-epochs", type=int, default=None,
                     help="epochs for the ST-GCN++ arm (default: --epochs)")
     ap.add_argument("--cv", type=int, default=0, metavar="K",
-                    help="leave-videos-out K-fold cross-validation over every "
-                         "video (label-blind folds; see data.group_folds) "
+                    help="leave-persons-out K-fold cross-validation over every "
+                         "person (videos grouped by data.PERSON_OF_VIDEO; "
+                         "label-blind folds, see data.group_folds) "
                          "instead of the single held-out split. 0 (default) "
                          "keeps the single split, so earlier runs reproduce")
     return ap
@@ -488,25 +489,27 @@ def main(argv: list[str] | None = None) -> int:
         split_desc = "subject-disjoint S1-S15 / S16-S20 (synthetic fixtures)"
     else:
         from boxingvi.data import (HELD_OUT_VIDEOS, discover_layout,
-                                   load_corpus, split_by_video)
+                                   load_corpus, person_key, split_by_video)
         print(json.dumps(discover_layout(a.data), indent=2))
         if a.layout_only:
             raise SystemExit("--layout-only requested; stopping after the probe")
         clips = load_corpus(a.data, include_v6=a.include_v6)
-        group_key = (lambda c: c.source)
+        # Persons, not videos: V1/V6 and V2/V3 are one instructor each (O55).
+        group_key = person_key
         if not a.cv:
             train, val = split_by_video(clips)
         # Stated in full, and carried into the results file, because the
         # difference between this and the paper's split is the single most
         # misreadable thing about any number produced here.
         split_desc = (
-            "video-disjoint, held out " + "/".join(HELD_OUT_VIDEOS)
+            "athlete-disjoint (persons from data.PERSON_OF_VIDEO, O55), "
+            "held out " + "/".join(HELD_OUT_VIDEOS)
             + " -- NOT the paper's official subject-disjoint S1-S15 / S16-S20 "
               "split, which the release does not carry the subject ids to "
               "reproduce (ISSUES-LOG O10)"
         )
     if a.cv:
-        unit = "subjects" if a.synthetic else "videos"
+        unit = "subjects" if a.synthetic else "persons"
         split_desc = (
             f"leave-{unit}-out {a.cv}-fold cross-validation over all "
             f"{len({group_key(c) for c in clips})} {unit}; folds assigned from "
@@ -532,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         xtr, _ = to_arrays(train)
         _, y_eval = to_arrays(val)
-        disjoint = "subject-disjoint" if a.synthetic else "video-disjoint"
+        disjoint = "subject-disjoint" if a.synthetic else "athlete-disjoint"
         print(f"train {len(train)} clips / val {len(val)} clips  "
               f"({disjoint})  x={xtr.shape}")
         results = run_arms(train, val, a, spec)
@@ -563,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
         if folds:
             # A pooled interval can exclude zero on the strength of one large
             # fold (V1 is 39% of the corpus), so the direction is also checked
-            # fold by fold and video by video, on both metrics. Videos sharing
+            # fold by fold and group by group, on both metrics. Groups sharing
             # a fold share a model, so they are not fully independent either;
             # see CV_INTERVAL_NOTE.
             from boxingvi.stats import METRICS, per_group_gaps
@@ -602,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
             v, va = vg["macro_f1"], vg["accuracy"]
             print(f"  {key}: per-fold macro-F1 "
                   + " ".join(f"{x:+.3f}" for x in fold_gaps[key]["macro_f1"]["gaps"])
-                  + f" | videos macro-F1 +{v['positive']}/-{v['negative']}/={v['ties']}"
+                  + f" | groups macro-F1 +{v['positive']}/-{v['negative']}/={v['ties']}"
                   f" p={v['sign_test_p']:.2g}; accuracy +{va['positive']}/"
                   f"-{va['negative']}/={va['ties']} p={va['sign_test_p']:.2g}")
 
@@ -646,6 +649,9 @@ def main(argv: list[str] | None = None) -> int:
             "k": a.cv,
             "folds": folds,
             "fold_gaps": fold_gaps,
+            # The key keeps its old name so earlier CV files still read; its
+            # groups are persons on real data (see "group_by").
+            "group_by": "subject" if a.synthetic else "person",
             "video_gaps": video_gaps,
             # Clip-level resampling treats clips as independent; clips from one
             # video are not. With nine videos a video-level bootstrap is too
