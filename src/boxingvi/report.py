@@ -62,7 +62,7 @@ from pathlib import Path
 import numpy as np
 
 from .classify import class_side, hand_agreement, read_manifest
-from .data import CLASSES, HELD_OUT_VIDEOS
+from .data import CLASSES, PIPELINE_HELD_OUT_VIDEOS
 from .stats import binomial_greater_p, fisher_greater_p
 
 CLASSIFIED_HEADER = ["frame", "time_s", "hand", "peak_speed_bl_per_s", "peak_on_interpolated_frame",
@@ -331,7 +331,7 @@ def benchmark_reliability(reference: Path, manifest: dict) -> dict:
     videos = ref.get("val_videos")
     if not (isinstance(videos, list) and videos and all(isinstance(v, str) and _DIGITS.sub("", v) == "V"
                                                          for v in videos)):
-        videos = list(HELD_OUT_VIDEOS)
+        videos = list(PIPELINE_HELD_OUT_VIDEOS)   # the classifier checkpoint's split
     return {"types": table, "side_accuracy": float(c[same].sum() / c.sum()),
             "accuracy": float(np.trace(c) / c.sum()), "n": int(c.sum()), "videos": videos}
 

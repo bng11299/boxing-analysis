@@ -1,10 +1,13 @@
 """Does the random forest beat ST-GCN because of the data, or the model?
 
 M1 found random-forest at 0.510 macro-F1 against ST-GCN's 0.407 on 3,781
-training clips. Two readings fit that: engineered kinematic features genuinely
-suit this task, or 217k parameters are starved at this corpus size. They differ
-in what they predict as training data grows, so this sweeps the training set
-and reports both arms at each size.
+training clips (the old V2/V5/V9 split). Two readings fit that: engineered
+kinematic features genuinely suit this task, or 217k parameters are starved at
+this corpus size. They differ in what they predict as training data grows, so
+this sweeps the training set and reports both arms at each size.
+
+It now runs the athlete-disjoint split (data.HELD_OUT_VIDEOS, O55: 2,970
+training clips), and the output records which videos were held out.
 
 A rising ST-GCN curve that has not flattened says the gap is a data-size
 artifact and the comparison should be stated as such. Two flat curves say the
@@ -109,6 +112,7 @@ def main() -> int:
     a.out.write_text(json.dumps(
         {"fracs": fracs, "seeds": a.seeds, "epochs": a.epochs,
          "n_train_full": len(train), "n_val": len(val),
+         "val_videos": sorted({c.source for c in val}),
          "include_v6": bool(a.include_v6),
          "elapsed_seconds": round(time.time() - t_start, 1),
          "runs": rows, "summary": summary}, indent=2), encoding="utf-8")
