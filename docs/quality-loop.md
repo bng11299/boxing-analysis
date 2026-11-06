@@ -46,3 +46,4 @@ Records are in log order (some iterations live inside another feature's record).
 - 2026-10-22 — [`chore/deface-env`](quality/deface-env.md)
 - 2026-11-12 — [`claude/demo-ui-e10778`](quality/demo-ui.md)
 - 2026-11-03 — [`feat/scouting-summary`](quality/scouting-summary.md)
+- 2026-11-05 — [`feat/offline-run`](quality/offline-run.md)
