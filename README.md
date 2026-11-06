@@ -138,6 +138,84 @@ Consequences baked into the code rather than left to memory:
 
 [ADR-0001](docs/adr/0001-repository-layout.md) records why the scripts live in `cli/`.
 
+## Run it yourself
+
+From a clean clone to a report for one clip. Nothing here needs an account, an
+API key or a language model, and once step 2 is done nothing touches the network.
+Windows PowerShell shown; Python 3.13 and `ffmpeg` on PATH.
+
+**1. Install.**
+
+```powershell
+git clone <this repo>; cd boxing-comps
+.\scripts\setup-env.ps1          # venv, CPU torch, the pose step; ends ENVIRONMENT OK
+```
+
+**2. Fetch the two pinned third-party checkpoints** (the only downloads; each is kept
+only if its sha256 matches the pin):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\fetch_weights.py
+```
+
+**3. Prove the chain works offline**, before any real data: a synthetic clip
+goes through solo and two-boxer analysis with every network call refused. The
+numbers it prints say nothing about boxing.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\offline_smoke.py --allow-synthetic
+.\.venv\Scripts\python.exe tests\test_offline.py      # the same, inside a fresh git clone
+```
+
+**4. Build the four model files from BoxingVI**, once. The corpus is on Google Drive
+behind a sign-in, so you download it yourself (see *Getting the data*) into `data/`.
+Each command below writes one file that `analyse_clip.py` reads by default:
+
+| File | Made by | Time (CPU) |
+|---|---|---|
+| `results/punch_finder_v6.json` (punch-finder rule) | `python run_punch_finder.py --data data --video data/rgb/V6.mp4` | minutes |
+| `results/sweep-2026-09-22/seed0.json` (reference reliability) | `python run_baseline.py --data data --stgcnpp both --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth --stgcnpp-epochs 20 --seed 0 --out results/sweep-2026-09-22/seed0.json` | ~35 min |
+| `weights/classifier/stgcnpp-boxingvi-seed0.{pt,json}` (punch classifier) | `python train_classifier.py --data data --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth` (saves only if it reproduces the reference) | ~35 min |
+| `results/punch_extent.json` (punch-length rule) | `python run_punch_extent.py --data data --classifier weights/classifier/stgcnpp-boxingvi-seed0.json` | minutes |
+
+`run_punch_finder.py` needs V6's source video in `data/rgb/` (a YouTube link in the
+release's `RGB_videos/` spreadsheet). All four files are gitignored: they come from
+BoxingVI, whose licence grants use, not redistribution.
+
+**5. Analyse a clip.** You give the stance; the tool never guesses one.
+
+```powershell
+python analyse_clip.py --video my_clip.mp4 --stance orthodox      # add --device cuda:0 on a GPU
+```
+
+Outputs land in `results/analyse/`: `X.pose.npz`, `X.punches.csv`,
+`X.classified.csv` + `.json`, `X.report.xlsx`, `X.summary.txt`, `X.overlay.mp4`.
+
+**Two boxers in one clip.** Track the people, say which track ids are which boxer
+(read them off the tracked overlay), then analyse:
+
+```powershell
+python run_ingest.py --video bout.mp4 --track --weights weights/yolo11m-pose.pt --weights-sha256 29b17eaf3a3117cbea906090dbedf9159f7c6a49db58ec8b99ed2dfde1cf6eb2
+python make_identity.py --tracks results/ingest/bout.tracks.npz --a 1 4 --b 2
+python analyse_clip.py --two-boxer --video bout.mp4 --tracks results/ingest/bout.tracks.npz --identity results/ingest/bout.identity.csv --stance-a orthodox --stance-b southpaw
+```
+
+The identity you give is recorded as `by-hand, ungated`, and each boxer's report
+says so in its first sentence.
+
+**Optional: a reworded summary from Gemini.** The default summary is a fixed
+template. `--narrate gemini` (solo clips only) sends the report's own sentences,
+never video, frames or pose, to Gemini and keeps the reply only if every number
+in it comes from those sentences. The key is read from the environment and
+nowhere else. If there is no key, the call fails, or the reply fails the check,
+you get the template and a one-line reason. Clips under a participant folder are
+never sent.
+
+```powershell
+$env:GEMINI_API_KEY = "<your key>"
+python analyse_clip.py --video my_clip.mp4 --stance orthodox --narrate gemini
+```
+
 ## Getting the data
 
 Only `Skeleton_data/` and `Annotation_files/` are needed (~50 MB). Skip
