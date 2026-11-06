@@ -1,6 +1,6 @@
 ## label-moments -- 2026-10-27: a labelling window for the glove-identity gate CSVs
 
-Branch `feat/label-moments` from `main` (`8b25ebf`). Independent of #31: it edits the CSVs #31's `template`
+Branch `feat/label-moments` from `main` (`d0bc628`). Independent of #31: it edits the CSVs #31's `template`
 writes and #31's `parse_labels` reads, and imports nothing from that branch.
 
 ### Setup
@@ -54,7 +54,7 @@ original shown, a name typed into `# A:`, labels written outside `~/comps-partic
   a traceback with paths (fix: caught, generic message).
 
 ### Iteration 2 -- fixes, test gate, re-review
-- Fixes (`9bea291`): an answer needs the previous answer's key released (a release followed by a press
+- Fixes (`9d67751`): an answer needs the previous answer's key released (a release followed by a press
   within 60 ms is auto-repeat, which covers Windows press-only and X11 release+press repeat); a failed decode
   clears the picture and accepts only `?`; canonical ASCII times only, other `splitlines` breaks refused;
   rows must equal `glovescore.label_times` exactly, from the decoded frame count of `video.probe`'s timing
@@ -68,7 +68,7 @@ original shown, a name typed into `# A:`, labels written outside `~/comps-partic
   frame-accuracy test.
 - Real facts re-run: #31 compatibility as before; `--check` on the three real pairs ok, so all three have
   regular frame timing and their measured frame counts give exactly 70/61/62 grid rows, as #31 wrote.
-- Re-review (code-reviewer, same context, on `9bea291`): **SHIP**; all seven of its findings closed, no new
+- Re-review (code-reviewer, same context, on `9d67751`): **SHIP**; all seven of its findings closed, no new
   blocking issue; it re-ran the suite (152 / 0 / 1). Two nits, both taken (iteration 3).
 
 ### Iteration 3 -- the reviewer's nits, a rendered look, the exit gate

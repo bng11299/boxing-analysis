@@ -1,6 +1,6 @@
 ## `feat/frame-skips` -- 2026-10-09
 
-Branch from `feat/completeness-credited` (b912027, PR #12 untouched).
+Branch from `feat/completeness-credited` (d83fdd5, PR #12 untouched).
 
 **The finding (Brendan; confirmed numerically on GH069681).** The Olympic GoPro files have perfectly regular packet timestamps (every
 interval 20 ms; `probe` reports no VFR), but the camera drops CAPTURED frames: what is on screen jumps forward in one frame while the
@@ -34,7 +34,7 @@ classifying was not used for anything.)
    malformed or mismatched framechange file stops the whole run with exit 2 and writes nothing.
 
 **Deviations from the brief (and why).** (a) `--skips-measure` and `--skipcheck` are added: "before and after" needs the near-skip counts
-of the b912027 behaviour, and the existing JSONs do not contain them; the measure run reproduces every pre-existing number (below), so it
+of the d83fdd5 behaviour, and the existing JSONs do not contain them; the measure run reproduces every pre-existing number (below), so it
 is also a regression check on the real data. (b) The framechange file stores the fingerprint of the VIDEO FILE it decoded (always
 present), and the run checks it against the video and, when the table has one, against the table's `video_fp`; the brief said "the table's
 video_fp if present", which is the weaker half of that. (c) A synthetic "dropped frame" in the tests is a dropped STRETCH (the pattern
@@ -73,7 +73,7 @@ pooled (one every 1.9 s), per video 22.1 (GH089681) to 50.4 (GH128416) per minut
 these running at once beside another job on the same machine; GH069681 alone, 13,800 frames, took 147 s). Two videos were measured twice
 by two of the parallel processes (a race on the output name; Iteration 3 corrects the claim that this was harmless: both writers happened to produce the same content and neither failed, but the shared temporary name was a bug, now fixed).
 
-| Quantity (`--credited`) | min 1, b912027 | min 1, `--skips` | min 2, b912027 | min 2, `--skips` |
+| Quantity (`--credited`) | min 1, d83fdd5 | min 1, `--skips` | min 2, d83fdd5 | min 2, `--skips` |
 |---|---|---|---|---|
 | bursts | 10,077 | 9,685 | 6,227 | 6,029 |
 | unexplained | 7,318 | 6,903 | 4,342 | 4,117 |
@@ -90,7 +90,7 @@ by two of the parallel processes (a race on the output name; Iteration 3 correct
 | unexplained share / base rate | 3.20x | 0.16x | 3.15x | 0.19x |
 | explained share / base rate | 1.59x | 0.25x | 1.59x | 0.30x |
 
-The "b912027" columns are from `--skips-measure` and equal the pre-existing `olympic_completeness_credited.json` / `_min2.json` in
+The "d83fdd5" columns are from `--skips-measure` and equal the pre-existing `olympic_completeness_credited.json` / `_min2.json` in
 every burst, label, exposure and rate (compared programmatically): no burst was lost to a re-implementation. The pooled near-skip
 excess before the fix is real and general (15% of unexplained bursts against a 5% base rate, in 29 videos, not only GH069681's 14%),
 and within 2 frames of a skip it is gone after.
@@ -218,7 +218,7 @@ Explained bursts per 1,000 exposure frames by distance to the nearest skip, `--c
 The unexplained 0-2 bin of "no skips" and "cut" is the skip-made excess of Iteration 1; the explained rows are not gated. The
 explained 3-5 cell of the final design is low (0.76x and 0.67x) on 41 and 24 bursts.
 
-**Before / after (`--credited`; "no skips" = b912027, reproduced by `--skips-measure`).**
+**Before / after (`--credited`; "no skips" = d83fdd5, reproduced by `--skips-measure`).**
 | Quantity | min 1 no skips | min 1 cut | min 1 mask (final) | min 2 no skips | min 2 cut | min 2 mask (final) |
 |---|---|---|---|---|---|---|
 | bursts | 10,077 | 9,685 | 8,969 | 6,227 | 6,029 | 5,589 |
@@ -322,7 +322,7 @@ higher rate and a mildly higher near-skip rate than Iteration 2 reported:
 | explained | 2,603 | 2,655 | 1,786 | 1,819 |
 | exposure minutes | 147.37 | 147.37 | 88.07 | 88.07 |
 | **unexplained per exposure minute** | **43.20** | **44.12** | **43.18** | **44.07** |
-| (no skips, b912027) | 45.35 | 45.35 | 45.21 | 45.21 |
+| (no skips, d83fdd5) | 45.35 | 45.35 | 45.21 | 45.21 |
 | bursts per exposure minute | 60.86 | 62.14 | 63.46 | 64.72 |
 | `possible_duplicates` | 123 | 127 | 52 | 54 |
 

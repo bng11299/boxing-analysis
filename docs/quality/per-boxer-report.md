@@ -1,6 +1,6 @@
 ## per-boxer-report -- 2026-10-25: one report per boxer from an explicit identity input
 
-Branch `feat/per-boxer-report` from `origin/main` (`bddef45`). Design record: vault ADR-0016 (proposed).
+Branch `feat/per-boxer-report` from `origin/main` (`e227111`). Design record: vault ADR-0016 (proposed).
 
 ### Setup
 **Task.** The plan's Phase 2 deliverable: from a two-boxer video, one report per boxer (what they throw, how
@@ -52,7 +52,7 @@ or participant-derived output is written outside the encrypted participant folde
   Residual, accepted: the tracks file is hashed by path after it is loaded (a local check-then-use window on a
   single-user machine; the report stage re-hashes and re-runs the finder).
 
-### Iteration 1 -- review gate (Astra, read-only, effort medium, fresh clone at `4ff4b60`): FIX FIRST, all fixed
+### Iteration 1 -- review gate (Astra, read-only, effort medium, fresh clone at `388c46c`): FIX FIRST, all fixed
 Astra confirmed no solo-path regression and no number reaching a summary outside `report._Writer`; the warning
 leads every fail / ungated summary. Four blocking findings, each checked against the code before fixing:
 | # | Finding | Fix | Test |
@@ -69,7 +69,7 @@ internally consistent, not that the gate was actually run (it is not signed).
 ### Iteration 2 -- test gate
 `tests/test_boxers.py` 163 passed, 0 failed. Olympic re-run on the fixed code: identical aggregates.
 
-### Iteration 2 -- review gate (Astra, read-only, effort medium, fresh clone at `d5c0090`): SHIP
+### Iteration 2 -- review gate (Astra, read-only, effort medium, fresh clone at `bf71e40`): SHIP
 R1-R4 confirmed closed, with variants: unsure segments and hand-written adjacent same-track segments (R1); the
 glove document absent from main fails closed until #31 merges (R2); the identity writer and the workbook use the
 link-safe write (R4). One new finding, low, non-blocking, verified against `classify.read_extent` and fixed: a
@@ -80,11 +80,11 @@ privilege); that case is covered statically and by the hard-link test.
 
 ### Exit -- all gates green
 - **Test gate:** `tests/test_boxers.py` 164 passed; every existing suite unchanged and green.
-- **Reproduce gate:** a fresh clone at `d5c0090` with no `data/` or `results/` ran all 20 Python suites and the
+- **Reproduce gate:** a fresh clone at `bf71e40` with no `data/` or `results/` ran all 20 Python suites and the
   machine scripts green, with the same counts as the working tree (analyse_clip 113, appearance 171, blur 177,
   boxers 163, classify 297, completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99, headgear 140,
   ingest 185, labels 50, linking 266, olympic 29, pipeline 314, poseswitch 30, render_punches 66, report 289,
-  tracks 100, machine scripts 38). The last commit, `4d71b37`, touched only `boxers.py` and its test; a fresh
+  tracks 100, machine scripts 38). The last commit, `6e91869`, touched only `boxers.py` and its test; a fresh
   clone at it ran the two suites that import that module: boxers 164, analyse_clip 113.
 - **Review gate:** Astra, two rounds on fresh clones: FIX FIRST (4 blocking, fixed), then SHIP (1 low, fixed).
 - **Security gate:** own pass plus Astra R2-R4; closed: claimed-PASS without evidence, non-ValueError escapes,

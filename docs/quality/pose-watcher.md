@@ -1,6 +1,6 @@
 ## pose-watcher -- 2026-10-26: pose on the laptop, started from the desktop
 
-Branch `feat/pose-watcher` from `origin/main` (`8b25ebf`).
+Branch `feat/pose-watcher` from `origin/main` (`d0bc628`).
 
 ### Setup
 **Task.** The desktop has no pose step (`setup-env.ps1 -NoPose`), so a new own-footage clip needed someone at
@@ -28,7 +28,7 @@ scheduled task. Trust boundary: every synced file (written by the other machine,
 threats: (1) a partial or wrong-recording pose read as this clip's; (2) participant footage picked up and
 derived files written into a synced folder.
 
-### Iteration 1 -- build, test gate, review gate (code-reviewer, read-only, commit `83e3212`): FIX FIRST
+### Iteration 1 -- build, test gate, review gate (code-reviewer, read-only, commit `41640b0`): FIX FIRST
 - Built `pose_watcher.py`, `wait_for_pose.py` and `scripts/install-pose-watcher.ps1`, plus `tests/test_pose_watcher.py`
   and seven tests in `tests/test_machine_scripts.ps1`.
 - Own finding while testing: Syncthing copies the source's mtime, so an mtime-age settle passes a clip the moment
@@ -43,7 +43,7 @@ derived files written into a synced folder.
 - Not taken: a second manual watcher exiting 0 instead of 1. The task has `MultipleInstances IgnoreNew`, and a
   manual run should report that it did nothing.
 
-### Iteration 2 -- fixes (`33049c9`), test gate
+### Iteration 2 -- fixes (`d1d69f2`), test gate
 - `run_one` does everything inside its try; a vanished clip logs and is left for later (no `.failed`); the
   `.failed` write has its own guard; `poll` catches per clip as a last line; `main` refuses staging and ingest on
   different volumes (`same_device`); settle is timed by the watcher's clock from first sight of the current
@@ -57,10 +57,10 @@ derived files written into a synced folder.
   `wait_for_pose` to `analyse_clip --skip-ingest` without running the pose model on the desktop (predictor call
   count unchanged), and the summary reports the clip's 0:20 of footage.
 
-### Iteration 2 -- review gate (code-reviewer, read-only, round 2 on `33049c9`): SHIP
+### Iteration 2 -- review gate (code-reviewer, read-only, round 2 on `d1d69f2`): SHIP
 R1-R3 confirmed closed, with variants: a clip deleted after pose ran reads as "changed", not a crash; a
 PermissionError on the first stat now writes `.failed`; `wait_for_pose` resets `last` on a failed stat, so one
-good stat cannot count as two agreeing. One new suggestion, taken in `1732ae1`: when neither the pose nor its
+good stat cannot count as two agreeing. One new suggestion, taken in `0490e3a`: when neither the pose nor its
 `.failed` can be written (an ingest folder made read-only after start), the clip was re-run on the GPU every
 pass. It is now left alone after `MAX_UNRECORDED` (3) such failures, until the watcher restarts (test added: 68).
 
@@ -78,7 +78,7 @@ between the two machines, both of them Brendan's; the fingerprint hashes the end
 
 ### Exit -- all gates green
 - **Test gate:** `test_pose_watcher` 68 passed; `test_machine_scripts.ps1` 45 (38 + 7); everything else unchanged.
-- **Reproduce gate:** a fresh clone at `1732ae1`, with no `data/` or `results/`, ran all 21 Python suites and the
+- **Reproduce gate:** a fresh clone at `0490e3a`, with no `data/` or `results/`, ran all 21 Python suites and the
   machine scripts green: analyse_clip 113, appearance 171, blur 177, boxers 167, classify 297,
   completeness_credited 95, e2e 74, env 36, frame_skips 222, hands 99, headgear 140, ingest 185, labels 50,
   linking 266, olympic 29, pipeline 314, poseswitch 30, pose_watcher 68, render_punches 66, report 289, tracks 100,

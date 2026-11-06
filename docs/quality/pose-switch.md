@@ -95,13 +95,13 @@ before the results file was written.
   unchanged (0.889 / 0.826 on 742), but its selection copies the old `seen and seen_all` filter
   and must drop the `seen` half to stay the same selection as this file.
 - **Review:** self-review restored macro F1 in the printed pooled lines (still in the JSON).
-  **Astra (Codex), one read-only review of 46ba71c..5d86b9c, effort medium: SHIP.** Both
+  **Astra (Codex), one read-only review of c9d9c67..84bb245, effort medium: SHIP.** Both
   findings FIXED with line evidence; the new tests judged not vacuous; no new defect. One
   non-blocking note, the #20 gate 4 selection above (its `eval_pipeline_v5v9.py:565`, checked by
   hand). It could not run the tests (no Python on its PATH), so its verdict rests on reading.
 - **Security:** no new input path; `aggregate` / `summary_lines` are pure over rows the gated
   loaders built; the test runs the CLI by argument list in `mkdtemp`. No findings.
-- **Gate reproduce:** fresh clone of 5d86b9c: pipeline 260, classify 202, hands 38, ingest 109,
+- **Gate reproduce:** fresh clone of 84bb245: pipeline 260, classify 202, hands 38, ingest 109,
   labels 50, env 36, poseswitch 29, machine scripts 38, all passing; the same counts as the
   worktree.
 

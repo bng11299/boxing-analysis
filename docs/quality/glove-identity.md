@@ -3,7 +3,7 @@
 Glove-colour boxer identity for participant sparring footage (both boxers in black, gloves of different
 colours). `src/boxingvi/gloves.py` (the rule), `src/boxingvi/glovescore.py` (the gate's scoring),
 `glove_identity.py` (roles / compute / template / freeze / score / gate), `tests/test_gloves.py`. Stacked on
-`feat/appearance-identity` (#29). Gate `docs/gates/glove-identity.md`, committed `0e95deb` before any rule
+`feat/appearance-identity` (#29). Gate `docs/gates/glove-identity.md`, committed `ee04122` before any rule
 code. **No study frame has been read:** intake stopped at consent scope (vault ISSUES-LOG O65), so every number
 below is synthetic and none is a result.
 
@@ -60,7 +60,7 @@ integrity, scoring TEST with a rule changed after seeing it.
   `np.load` (a local file swapped in between is out of scope); the rule constants are first-principles
   guesses, untested on any real glove.
 
-### Iteration 2 -- review gate (Astra, read-only, effort medium, on a fresh clone of `6c05b7a`): FIX FIRST, 5 blockers + 4 should-fix, all fixed
+### Iteration 2 -- review gate (Astra, read-only, effort medium, on a fresh clone of `7c66e55`): FIX FIRST, 5 blockers + 4 should-fix, all fixed
 - **B1 freeze boundary too narrow:** only the three glove files were pinned, so a change to `headgear.wilson` after
   the freeze passed. Now the freeze and the TEST check cover `src/boxingvi/` whole and the CLI (`git status` /
   `git diff --quiet <commit>`).
@@ -97,7 +97,7 @@ integrity, scoring TEST with a rule changed after seeing it.
   (digest vs provenance, scored-record vs claim, edited score vs schema, name in a message vs scrub); each
   test now defeats the other guard first.
 
-### Iteration 3 -- review gate (Astra, second round, on a fresh clone of `8efc7bd`): FIX FIRST; 5 of 9 fixed, 4 partly, 3 new; all fixed
+### Iteration 3 -- review gate (Astra, second round, on a fresh clone of `c1a4223`): FIX FIRST; 5 of 9 fixed, 4 partly, 3 new; all fixed
 - **B1/B2 partly (blocker): untracked code.** After a freeze, an untracked `src/boxingvi/appearance/__init__.py`
   shadows `appearance.py`, and `git diff` never sees it; the code digest hashed top-level files only. Now:
   `git_same` also needs `git status --porcelain --untracked-files=all` empty for `src/boxingvi` and the CLI
@@ -121,13 +121,13 @@ integrity, scoring TEST with a rule changed after seeing it.
   record steps.
 - **Test:** 210 / 210. **Mutants: 43 of 44 killed;** the survivor is still the redundant 75% majority.
 
-### Iteration 3 review (Astra, third round, on a fresh clone of `27717ec`): **SHIP**
+### Iteration 3 review (Astra, third round, on a fresh clone of `7e591fe`): **SHIP**
 All six open items FIXED (B1, B2, S1, NEW-1, NEW-2, NEW-3); no new finding. Astra could not run Python in its
 sandbox in any round ("Access is denied"), so its three reviews are static; the runtime evidence is the
 suites and mutants above, all run here and reproduced in a fresh clone.
 
 ### Exit
-- **Gates:** test 210 / 210 (fresh clone of `27717ec`: identical; blur 177, headgear 140, appearance 171, linking
+- **Gates:** test 210 / 210 (fresh clone of `7e591fe`: identical; blur 177, headgear 140, appearance 171, linking
   266, tracks 79, pipeline 314, all unchanged from before the branch); mutants 43 / 44 (survivor: the redundant
   majority guard); review: Astra FIX FIRST -> FIX FIRST -> SHIP; security: every finding above closed.
 - **Residual risks, accepted:**
@@ -165,7 +165,7 @@ suites and mutants above, all run here and reproduced in a fresh clone.
   masked frames the counts are unchanged; plus loader negatives and CLI refusals (no `--faceboxes`, another
   original, unmasked counts). **Mutants: 49 of 50 killed** (the 6 new ones all; the survivor is still the redundant majority). The full re-run found one more guard masked by a new one: the unregistered-video refusal was being made by the face-box frame-count check, so that test now passes matching face boxes and only registration can refuse it.
 
-### Iteration 5 -- review gate (Astra, on a fresh clone of `01ee446`): FIX FIRST, 1 blocker + 1 should-fix, both fixed
+### Iteration 5 -- review gate (Astra, on a fresh clone of `3a2bb14`): FIX FIRST, 1 blocker + 1 should-fix, both fixed
 - **Blocker: the face boxes were bound to the original, not to the detector run that drew the mosaics.** A file
   made from the right original with another threshold or model passed every check and could omit large
   squares the blur actually drew. **Fix:**
@@ -193,7 +193,7 @@ suites and mutants above, all run here and reproduced in a fresh clone.
   `--out-dir` is `results/ingest`, a Syncthing folder. For participant footage both were set by hand. A guard
   in `run_ingest.py` is a follow-up, not in this PR.
 
-### Iteration 6 -- no FAIL-CASE video exists (gate addendum `60a3e29`, 2026-10-26)
+### Iteration 6 -- no FAIL-CASE video exists (gate addendum `da1ab71`, 2026-10-26)
 - Brendan watched all three blurred copies: every pair of boxers wears different-colour gloves. The addendum
   (committed before any glove count, label or score) makes DEV the smallest original sha256 of all three, both
   others TEST, bars 1-3 on EACH (never pooled), and bar 4 NOT TESTABLE (`None`, never `True`).
@@ -204,7 +204,7 @@ suites and mutants above, all run here and reproduced in a fresh clone.
 - **Tests:** 272 / 272 (17 new: verdict unit cases incl. never-pooled and a baseline that failed on one video;
   roles none / 0 / NONE; gate flag-mode refusals both ways; three cross-format manifest refusals).
   **Mutants: 3 of 3 killed** (bar 4 reported True; pooled `or` instead of `and`; roles not hash-ordered).
-- **Full mutant re-run over iterations 1-5 (57 mutants, after `02f9af9`): 56 of 57 killed**; the survivor is still
+- **Full mutant re-run over iterations 1-5 (57 mutants, after `f19a382`): 56 of 57 killed**; the survivor is still
   the redundant 75% majority. The run found two more guards masked by newer ones, both now isolated in tests only
   (no rule file changed, so the freeze is unaffected):
   - the unregistered-video refusal was being made by the blur-report output check (the default report describes
@@ -215,7 +215,7 @@ suites and mutants above, all run here and reproduced in a fresh clone.
   Tests 273 / 273.
 
 ### Gate result (2026-10-27): FAIL
-Frozen at `cc48822` (rule digest `65909195f855`), no change after DEV, each TEST scored once. TEST: separable,
+Frozen at `301e5bd` (rule digest `65909195f855`), no change after DEV, each TEST scored once. TEST: separable,
 28 of 44 decided, 28 right, unsure 0.36 (bars 1 and 2 fail, bar 3 passes). TEST2: not separable, 0 of 50.
 DEV: not separable, 0 of 59. Bar 4 not testable. About 51% of the pixels read were skin. Full tables: the gate
 result comment on PR #31 (2026-10-28) and `docs/RESULTS.md` "Pre-registered negatives" N2. Future Work.

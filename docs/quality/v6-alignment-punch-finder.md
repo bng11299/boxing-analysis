@@ -1,4 +1,4 @@
-## `feat/v6-alignment-punch-finder` (`1947b42` + fixes) — 2026-09-28
+## `feat/v6-alignment-punch-finder` (`e75aa42` + fixes) — 2026-09-28
 
 **Why.** The V6 alignment gate and the wrist-speed punch finder were committed
 without running this loop. The headline (recall 0.741, F1 0.571) rests on the gate,

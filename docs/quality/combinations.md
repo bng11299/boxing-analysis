@@ -3,7 +3,7 @@
 Punch combinations in the solo and per-boxer reports (vault ADR-0019): `src/boxingvi/combos.py` (grouping,
 the summary sentences, the gate's scoring, the guarded reader of its result), `score_combinations.py` (the gate),
 `report.summary(..., combinations=...)`, `report_punches.py` and `report_boxers.py` (wiring and a Combinations
-sheet), `tests/test_combos.py`. Gate `docs/gates/combinations.md`, committed `909486e` before any combination
+sheet), `tests/test_combos.py`. Gate `docs/gates/combinations.md`, committed `b5134ad` before any combination
 code or number. Design chosen by Brendan before the build: gap 1.0 s, unnamed punches as `?`, a pre-registered
 gate on the two labelled own clips, both reports.
 
@@ -31,7 +31,7 @@ memory blow-up or a traceback instead of a refusal.
   CLI refusals); `test_report.py` 291/291 and `test_boxers.py` 167/167 after updating the solo end-to-end check
   (the summary must now equal the library's WITH combinations, and still start with the old text) and the
   per-boxer sheet list (Identity and Combinations). Full suite: see iteration log below.
-- **Gate result (real data, after the code was committed `b68e121`).** C8's commands regenerated the detections
+- **Gate result (real data, after the code was committed `5d931ea`).** C8's commands regenerated the detections
   into `results/combinations/own_tol0.2` with `results/punch_finder_v6.json` and `results/punch_extent.json` (the
   same rule values as `results/repro/`); they reproduce RESULTS 6a/6b exactly (35/47, 35/41; 35/40, 35/42; type
   0.857 and 0.600 of 35, floors 0.314 and 0.371). Score: exact recall 2 of 19 (0.105) vs floor 97.5th percentile
@@ -41,7 +41,7 @@ memory blow-up or a traceback instead of a refusal.
   recall was printed only as "2 of 19" beside "11% by chance", hiding that they are equal: now "2 of 19 labelled
   combinations exactly (11%)". The per-boxer sentence said each combination "is one person's punches", stronger
   than the evidence (swaps within a track are unmeasured): now it claims only that a wrong join between tracks
-  cannot merge two people's punches. Both in `1ac1da2`.
+  cannot merge two people's punches. Both in `48695a2`.
 - **Finding for Brendan (not changed: the rule is pre-registered).** At about one punch a second of
   shadowboxing, the 1.0 s gap chains 85-90% of punches into combinations (longest 9 and 14 punches).
 - **Gate security (changed files only).** No queries, subprocesses, network, secrets or deserialisation beyond
@@ -85,11 +85,11 @@ Review: `codex-companion task`, read-only, effort medium (brief and output in th
    count, ties kept), and lower counts follow as "followed by ..." (test).
 - **Gate test.** `test_combos.py` 158/158. Result re-scored with the new format: identical numbers, FAIL,
   `results/combinations_gate.json` sha256 `36cd434090e8...`; both own reports re-rendered and read.
-- **Gate reproduce.** Fresh `git clone` of the repo, branch tip `ad9bed5` checked out, no `data/` or `results/`:
+- **Gate reproduce.** Fresh `git clone` of the repo, branch tip `3718e91` checked out, no `data/` or `results/`:
   all 24 Python suites and the machine-script suite green, 3,685 checks (analyse_clip 113, appearance 171,
   blur 177, boxers 167, classify 297, combos 158, completeness_credited 95, e2e 74, env 36, frame_skips 222,
   gloves 273, hands 99, headgear 140, ingest 185, labels 50, linking 266, olympic 29, pipeline 314, pose_watcher
   68, poseswitch 30, render_punches 66, report 291, ring 219, tracks 100, machine scripts 45). The working-tree
-  run at `87b23b4` (before the review fixes) was green on the same suites.
+  run at `f977c4b` (before the review fixes) was green on the same suites.
 - **Exit: all gates green.** Residuals: the gate FAILS (reported, not hidden); the result is void after a finder
   change (PR #40) and must be re-scored under a new dated gate section; ADR-0019 is uncommitted in the vault.

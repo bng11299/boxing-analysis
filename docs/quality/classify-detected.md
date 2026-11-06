@@ -53,7 +53,7 @@ discarded it, so `run_stgcnpp` gained `save_to`.
 - **Test:** 100 checks; B1 reverted fails 2, ties-to-even 1, every new guard >= 1. One
   equivalent mutant: removing the manifest size check still refuses an oversized manifest,
   because the bounded read truncates it to invalid JSON.
-- **Gate reproduce:** clean clone of `6fa5540`: classify 100, pipeline 260, hands 38,
+- **Gate reproduce:** clean clone of `0000000`: classify 100, pipeline 260, hands 38,
   labels 50, ingest 109 -- the working tree's numbers.
 
 ### Iteration 3 -- real data (2026-10-09)
@@ -204,7 +204,7 @@ on; (4) own footage re-run; (5) suites green in a clean clone.
   the censoring rule and the too-few fallback are unmeasured; intervals resample punches
   independently.
 
-### Iteration 8 -- Codex's two findings (2026-10-21, `e2459d5`)
+### Iteration 8 -- Codex's two findings (2026-10-21, `d2e05cb`)
 Acceptance: (1) the under-5 fallback reads exactly `cut_window`'s frames, checked by the frames
 read, not the stored length; (2) a repeated (frame, hand) CSV row is refused; (3) decide and
 record whether threshold and local-peak checks belong here; (4) no row the finder emits is
@@ -236,11 +236,11 @@ refused; (5) suites green here and in a clean clone; one Astra review.
   read through `cut_span`" (fails the 7-rate check).
 - **Real-world facts, own footage at 59.946 fps** (outputs to scratch; finder re-run with this
   branch): IMG_4406 and IMG_4395, 41 and 42 finder rows, all accepted by the new checks;
-  classified CSVs **byte-identical** to `49473f9`. Their first 4 rows alone (the fallback): 9
+  classified CSVs **byte-identical** to `c6f9160`. Their first 4 rows alone (the fallback): 9
   frames per punch before and after, the length-only fix 8; 7 of 8 types unchanged, one
   low-confidence punch moved (rear hook 0.53 -> rear uppercut 0.36).
 - **Gates:** test green (221/260/38/109/50/36 + 38 PowerShell), the same counts in a clean clone
-  at `e2459d5`. Review (self): one overstated comment fixed. Security: changed files only; the
+  at `d2e05cb`. Review (self): one overstated comment fixed. Security: changed files only; the
   CSV boundary and manifest checks are stricter and fail closed; the duplicate set is bounded by
   MAX_ROWS; errors name file, line and frame only.
 - **Astra (Codex, read-only, effort medium): FIX FIRST, both items in stacked branches, none in

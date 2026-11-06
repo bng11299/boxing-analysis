@@ -1,7 +1,7 @@
 # Quality loop: `feat/ring-mask` (ring-floor filter, Olympic Boxing)
 
 Started 2026-10-27. Gate: [`docs/gates/ring-floor-filter.md`](../gates/ring-floor-filter.md), committed in
-`ddf6399` before any floor was clicked, any margin chosen or any held-out number computed. Olympic Boxing is
+`d150f65` before any floor was clicked, any margin chosen or any held-out number computed. Olympic Boxing is
 research-use only: every number here is an aggregate; no frame, crop or per-person position leaves `results/`.
 
 ## Before the build: why the brief's pixel mask was not built (development videos only)
@@ -31,12 +31,12 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   videos whose baseline failed; the gate says every metric pools over the compared videos. Fixed: a baseline
   failure is in no arm; a video that fails only when filtered stays in the filter's cost and fails G3c.
   Regression tests added (161 checks).
-- **Astra review 1** (Codex, read-only, effort medium, on `ddf6399`): **FIX FIRST**, 5 blocking + 2 should-fix.
+- **Astra review 1** (Codex, read-only, effort medium, on `d150f65`): **FIX FIRST**, 5 blocking + 2 should-fix.
   Astra could not start Python in its sandbox ("Access is denied"), so its findings are source-derived.
 
   | # | Finding | Severity | Resolution |
   |---|---|---|---|
-  | 1 | Baseline-failed videos still counted in G2/G3a and the dev margin choice | BLOCKING | already fixed in `6abd33f` (self-review); tests |
+  | 1 | Baseline-failed videos still counted in G2/G3a and the dev margin choice | BLOCKING | already fixed in `c9478dd` (self-review); tests |
   | 2 | Stillness file: duplicate keys load (last wins), `samples` != 24 and `max_px < motion_px` accepted | BLOCKING | duplicate-key hook, `samples == 24`, `0 <= motion <= max`, top-level keys exact; tests |
   | 3 | Videos left out for camera motion before fingerprints are checked: a stale entry silently drops a video | BLOCKING | fingerprints of stillness (all videos) checked first; floors for the kept ones; test |
   | 4 | `[A, B, B, ...]` reads 0 px, contradicting the gate's "moves in the first ~12% -> left out" | BLOCKING | behaviour is the stated short-segment limit; gate wording corrected in a dated amendment; tests pin both cases |
@@ -46,10 +46,10 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
 
   175 checks pass after the fixes.
 - Added in iteration 1 on LESSONS 2026-10-25: a sweep of every floor field (11) and stillness field (9) x 8
-  wrong-type values; all 160 combinations behave (`cde3291`, 177 checks). Full suite: 21 of 21 Python suites green.
+  wrong-type values; all 160 combinations behave (`44f3f39`, 177 checks). Full suite: 21 of 21 Python suites green.
 
 ## Iteration 2
-- **Astra review 2** (on `ea42d7b`): **FIX FIRST**, 6 findings, all on failure paths; Astra confirmed fixes
+- **Astra review 2** (on `ec5539a`): **FIX FIRST**, 6 findings, all on failure paths; Astra confirmed fixes
   1, 3, 4, 5 and 7 of review 1 correct. Source-derived again (Python blocked in its sandbox).
 
   | # | Finding | Resolution |
@@ -64,7 +64,7 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   187 checks pass after the fixes.
 
 ## Iteration 3
-- **Astra review 3** (on `c092a51`): **FIX FIRST**, 4 blocking + 3 should-fix; source-derived again.
+- **Astra review 3** (on `46a1e5b`): **FIX FIRST**, 4 blocking + 3 should-fix; source-derived again.
 
   | # | Finding | Resolution |
   |---|---|---|
@@ -78,8 +78,8 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
 
   193 checks pass after the fixes.
 ## Iteration 4
-- Fresh clone at `ac91dfb`: all 21 Python suites green (3,313 checks; `test_ring` 193).
-- **Astra review 4** (on `ac91dfb`): **FIX FIRST**, 4 blocking + 1 should-fix; source-derived.
+- Fresh clone at `1abe451`: all 21 Python suites green (3,313 checks; `test_ring` 193).
+- **Astra review 4** (on `1abe451`): **FIX FIRST**, 4 blocking + 1 should-fix; source-derived.
 
   | # | Finding | Resolution |
   |---|---|---|
@@ -91,16 +91,16 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
 
   201 checks pass after the fixes.
 ## Iteration 5
-- **Astra review 5** (on `ac7ecdc`): **did not complete.** Codex hit its usage limit (retry after 21:26) after one
+- **Astra review 5** (on `dafcf98`): **did not complete.** Codex hit its usage limit (retry after 21:26) after one
   note: when every filtered arm fails, G3b was never computed (reported unmeasured) although attribution counts
   exist. Fixed: G3b's credited shares are computed before any early return, over every video whose baseline ran;
   tests for both cases (credits kept -> G3b measured and passing; credits lost -> 0% and failing). 204 checks.
 - A complete review of the final commit is still owed; it is not counted as passed.
-- Fresh clone at `e787657`: all 21 Python suites green (3,124 checks; `test_ring` 204; first recorded as 3,324, an
+- Fresh clone at `4986a5a`: all 21 Python suites green (3,124 checks; `test_ring` 204; first recorded as 3,324, an
   addition error corrected 2026-10-27 from the per-suite counts). The machine scripts were not
   touched by this branch and were not re-run.
 
-## Security gate (secure-software-assurance defaults), at `e787657`
+## Security gate (secure-software-assurance defaults), at `4986a5a`
 - Trust boundaries: the floor file and the stillness file (size cap, strict UTF-8 JSON, duplicate keys, NaN/Infinity
   and 10**400 refused, exact key sets, a sweep of every field x 8 wrong-type values); video files through the
   existing `probe` caps; tables through the existing strict `PoseTable.load`; labels through the strict CVAT loader.
@@ -151,7 +151,7 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
   uncredited ids rises (24.3% -> 26.5%). Design numbers only; not evidence.
 
 ## Iteration 7: Astra review 6, the first complete review of the final code (2026-10-27)
-- Run on `e73d6e6` (the earlier attempt hit the Codex limit; retried after 21:26). Python would not start in its
+- Run on `2baa2ca` (the earlier attempt hit the Codex limit; retried after 21:26). Python would not start in its
   sandbox ("Access is denied"), so its findings are source-derived. **No path found by which the held-out run
   starts while `FROZEN_MARGIN_PX` is unset.** Outcome FIX FIRST, three findings, all fixed with tests:
 
@@ -164,5 +164,5 @@ research-use only: every number here is an aggregate; no frame, crop or per-pers
 - **Effect on the reported stop: none.** The real dev run used the full grid (finding 1 needs `--margin`); no real
   video's motion is near 20 px (nearest 15.9 and 26.3; finding 2); every real entry is within its diagonal
   (finding 3). Tests: 219.
-- **Fresh clone at `8c2e02e`** (the final code): all 21 Python suites green, 3,139 checks (`test_ring` 219; every
-  other suite unchanged from `e787657`). The machine scripts were not touched by this branch and were not re-run.
+- **Fresh clone at `be567af`** (the final code): all 21 Python suites green, 3,139 checks (`test_ring` 219; every
+  other suite unchanged from `4986a5a`). The machine scripts were not touched by this branch and were not re-run.

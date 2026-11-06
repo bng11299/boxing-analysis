@@ -1,6 +1,6 @@
 # Quality loop: `feat/fast-combinations` (2026-10-28)
 
-Gate first: `docs/gates/fast-combinations.md`, committed `246dcd5` before any code, any tuning video choice
+Gate first: `docs/gates/fast-combinations.md`, committed `d6f2e84` before any code, any tuning video choice
 or any held-out number. No arm has been tuned or scored yet: tuning waits for the O55 split (#38) and for
 pose on the training videos (GPU laptop).
 
@@ -77,7 +77,7 @@ number reaches tuning, or a second held-out run is made after seeing the first.
   freeze returns the original path): 5 of 5 caught.
 
 ## Iteration 3
-- **Fresh clone at `a849e21`:** 14 suites, all exit 0 (fast_combinations 78, fastcombo_eval 91, hands 99,
+- **Fresh clone at `0f7352a`:** 14 suites, all exit 0 (fast_combinations 78, fastcombo_eval 91, hands 99,
   report 289, classify 297, e2e 74, analyse_clip 113, pipeline 314, boxers 167, completeness_credited 95,
   frame_skips 222, linking 266, render_punches 66, ring 219).
 - **Review (Astra, round 3): FIX FIRST**, 2 blocking:
@@ -91,7 +91,7 @@ number reaches tuning, or a second held-out run is made after seeing the first.
      file to the last, the tests run from a temp working directory, every call passes temp outputs, and
      a final check asserts the checkout's `results/` is unchanged and no real marker exists.
 - **Tests:** fastcombo_eval 93/93. **Mutation:** shared run folder: caught. **Total 25 of 25.**
-- **Fresh clone at `614b947` (final):** fast_combinations 78, fastcombo_eval 93, hands 99, report 289,
+- **Fresh clone at `0b93f67` (final):** fast_combinations 78, fastcombo_eval 93, hands 99, report 289,
   classify 297, e2e 74, analyse_clip 113, pipeline 314; the same numbers as the working tree; no
   `results/` folder created in the clone.
 - **Cap reached (3 iterations).** Round 3's two fixes are verified by tests, a mutant and the fresh clone,
@@ -115,18 +115,18 @@ Pose and alignment were checked before any tuning; nothing was scored.
   every offset in +-12 frames (aligned videos: ~0.008), across all five fifths of the video. Not a small
   shift: like O61, the skeletons are not from the video the link gives, or the download is another cut (the
   link carries `&t=709s`). No offset was searched for; using V1 with a found offset would change the gate.
-- **Bug found on the real data, fixed (`5473b70`):** V6 ships one continuous skeleton, not clips, so
+- **Bug found on the real data, fixed (`5247cdc`):** V6 ships one continuous skeleton, not clips, so
   `held_out_clips` refused it. `v6_ground_truth` builds a <= 25-frame alignment window per span from the
   continuous skeleton, so V6 takes the same gate. The stubbed tuning test could not catch this: it stubs
   `load_video`. Tests: fastcombo_eval 98/98 (5 new V6 checks), fast_combinations 78/78; 2 mutants on the new
   branch caught (**27 of 27 in total**). Astra (one review of this commit): **SHIP**, no findings.
 
 ## 2026-11-03: tuning (training videos only)
-Brendan, 11-03: "Tune on #38's branch", and via the coordinator, "Try it by Thu". main (`cd4035d`) does not
+Brendan, 11-03: "Tune on #38's branch", and via the coordinator, "Try it by Thu". main (`8cfb53d`) does not
 yet hold the O55 split (`HELD_OUT_VIDEOS = V2, V5, V9`; #38 open, conflicting), and the tuning script refuses
 without it. Tuning therefore ran on a LOCAL, never-pushed merge of this branch and #38's branch
-(`local/tune-on-o55`, `c4659d5`; its only conflict, README.md, took #38's side). The tuning videos are the same
-under either split. Gate commit recorded: `246dcd5`. Held-out list recorded: V2, V3, V5, V9.
+(`local/tune-on-o55`, `c13afea`; its only conflict, README.md, took #38's side). The tuning videos are the same
+under either split. Gate commit recorded: `d6f2e84`. Held-out list recorded: V2, V3, V5, V9.
 
 - Tuned on V4, V6, V7, V8, V10 (F1 on V4, V7, V8, V10: 1,105 labelled punches); V1 excluded (alignment).
 - Run time under a minute.
@@ -158,7 +158,7 @@ under either split. Gate commit recorded: `246dcd5`. Held-out list recorded: V2,
   main here, from THIS worktree (its `results/` holds the tune file and will hold the started marker).
 
 ## 2026-11-04: the held-out run (once): FAIL
-- #38 merged into main at `0115b7a` (held out V2, V3, V5, V9). Main merged here at `88a0148`, with no conflicts.
+- #38 merged into main at `30d79e6` (held out V2, V3, V5, V9). Main merged here at `80c2e85`, with no conflicts.
 - Suites on the merge: fast_combinations 78, fastcombo_eval 100, hands 99, report 291, classify 299, e2e 74,
   analyse_clip 113, pipeline 351, poseswitch 30. All green; no marker left by the tests.
 - `eval_fast_combinations.py` ran ONCE from this worktree (77 s; marker

@@ -1,7 +1,7 @@
 ## `feat/appearance-identity` -- 2026-10-22
 
 Can appearance keep two boxers apart where pose failed? Gate: `docs/gates/appearance-identity.md` (committed
-`c1b8b9c` before the design). Base: `origin/main` (has #13) + `feat/corner-colour` merged for its harness;
+`57093fb` before the design). Base: `origin/main` (has #13) + `feat/corner-colour` merged for its harness;
 `feat/identity-continuity` not merged (it cost coverage, 65% -> 38%).
 
 ### Evidence that chose the route (2026-10-22, before the gate)
@@ -50,7 +50,7 @@ unsure 19. kam2 1 / 2, kam4 97 / 106. Wall 330 s for 38,137 frames.
 
 Tests: `tests/test_headgear.py` 137 checks (synthetic only, mostly negative); 17 of 17 hand-made mutants caught.
 
-### Held-out result (frozen `9d18ca6`, run once, 2,209 s): G1 FAILS
+### Held-out result (frozen `122163b`, run once, 2,209 s): G1 FAILS
 277 / 333 decided co-present credited pairs opposite = **83.2%** (Wilson [0.788, 0.868]; video bootstrap
 [0.756, 0.880], 0 of 10,000 draws dropped) on all 23 manifest videos, none missing or failed. Bars: share 0.90 no,
 100 pairs yes, lower bound 0.80 no. kam4 269 / 307 (87.6%, Wilson [0.835, 0.908]); kam2 8 / 26 (30.8%: when kam2
@@ -71,7 +71,7 @@ Astra confirmed the recorded FAIL is trustworthy: both bars fail independently, 
 | 2b | the content digest rounded keypoints and confidences to float32 (0.299999999 and 0.300000001 hash alike, either side of MIN_CONF) | hash as float64 (lossless for float32 and float64 tables) | digest test both ways; mutant caught |
 | 4b | a tiny member's NPY header could still declare 10^10 elements | every member's NPY header read first: dtype int or text only, declared bytes must equal the bytes held | zip-bomb member refused with np.load trapped; mutant caught |
 
-Tests 140 checks; 19 of 19 mutants caught. Fresh clone of `9d18ca6` from GitHub: test_headgear 137, test_appearance
+Tests 140 checks; 19 of 19 mutants caught. Fresh clone of `122163b` from GitHub: test_headgear 137, test_appearance
 171, test_linking 266, test_tracks 79, test_olympic 29, test_pipeline 314, all pass, clean tree.
 
 ### Security gate

@@ -69,7 +69,7 @@ per-hand finder option, measured against the pooled rule on own footage AND V6; 
   format change that the output branch reads); a hand-specific local peak for the point perfect-
   finder reading.
 
-### Iteration 3 (review of 9d10d86 by the code-reviewer agent and by Codex: 3 blocking) -- 2026-10-21
+### Iteration 3 (review of 014762a by the code-reviewer agent and by Codex: 3 blocking) -- 2026-10-21
 **Iteration 2 got two things wrong, and this corrects the record:**
 - **"They agree everywhere, so '2 of 7' stands as exact" did not follow.** The "lower bound" was the
   framing count under ONE maximum punch matching, the greedy's. Which detections a maximum matching
@@ -112,7 +112,7 @@ per-hand finder option, measured against the pooled rule on own footage AND V6; 
   and the printed line;
 - the sidecar's negative cases.
 
-**Mutants (round 1, on 4e45764; each applied to a copy of the tree; both suites run):**
+**Mutants (round 1, on 8a5acdf; each applied to a copy of the tree; both suites run):**
 
 | # | mutant | killed |
 |---|---|---|
@@ -155,7 +155,7 @@ final code. Every finder and type number reproduces iteration 2 exactly:
 
 **Review: FIX FIRST** (code-reviewer agent, 1 blocking). See iteration 4.
 
-### Iteration 4 (review of 4e45764: FIX FIRST, 1 blocking) -- 2026-10-21
+### Iteration 4 (review of 8a5acdf: FIX FIRST, 1 blocking) -- 2026-10-21
 - **What the reviewer checked and found correct:**
   - **Soundness, by brute force.** 6,000 random instances, enumerating every punch matching. The
     instances covered 0-7 detections with duplicates, points and drags, overlapping spans, spans
@@ -194,19 +194,19 @@ final code. Every finder and type number reproduces iteration 2 exactly:
   | M17 | classify: RecursionError from a nested sidecar not caught | yes (classify crashes: RecursionError) |
   | M18 | classify: sidecar rule not checked | yes (classify 1) |
   | M19 | find_punches: precision 0, not null, with no detections and no punches | yes (hands 1) |
-- **Final review (c60fa9b): SHIP**, no blocking findings. Its re-runs of M5, M17, M18 and M19
+- **Final review (c271d20): SHIP**, no blocking findings. Its re-runs of M5, M17, M18 and M19
   reproduced the results above. Left open (non-blocking):
   - find_punches still reports precision 0.0 via `score()` when punches are labelled but nothing was
     detected (0/0, as in the framing-only case). Override it in the report, not in `score()`.
   - `find_punches.load_rule` accepts NaN/Infinity (no `parse_constant`); this predates the range.
   - an always-true `sx is not None` conjunct in one classify check.
   - this entry's misquote of iteration 2, corrected above.
-- **Merge state.** PR #22 is CONFLICTING with its base after #14's fixes (e2459d5, 9f33f3d). A trial
+- **Merge state.** PR #22 is CONFLICTING with its base after #14's fixes (d2e05cb, 5b1488f). A trial
   merge in a throwaway clone conflicts in `classify_punches.py` and this log. Not merged here: no
   gate needed it. At the stack step, keep #22's per-hand peak check, #14's duplicate-row guard
   (threshold and local-peak checks), and `classify.read_clip_window` at both read sites.
 
-### Iteration 5 -- merging #14's fixes in (2026-10-21, base `9f33f3d`)
+### Iteration 5 -- merging #14's fixes in (2026-10-21, base `5b1488f`)
 Brendan asked for the conflict to be resolved here, keeping #22's per-hand peak check, #14's
 duplicate-row guard, and `classify.read_clip_window` at both read sites. Merged (not rebased, so
 no force-push).
@@ -256,7 +256,7 @@ no force-push).
     (3 + 2 calls).
 - **Tests:** hands 73, classify 262 (232 + 19 from #14 + 11 new), pipeline 260, labels 50, ingest
   109, env 36.
-- **Review of the merge (82ff682, code-reviewer agent): SHIP**, no blocking findings. It diffed the
+- **Review of the merge (979ee07, code-reviewer agent): SHIP**, no blocking findings. It diffed the
   merge against both parents: nothing was lost except the deliberate lines. It found the X11
   survivor and the incomplete cost statement above, both fixed in the follow-up commit. Left open:
   - applying #14's pooled check when the sidecar says pooled (above; done in iteration 6);
@@ -312,7 +312,7 @@ classify_punches also applies #14's pooled check. Otherwise it keeps the own-han
 - **Real data:** the stricter check accepted every row of the pooled finder's real output. That is
   41 rows on IMG_4406 and 42 on IMG_4395, at both point tolerances, each with a verified
   `per_hand: false` sidecar, so the check ran. Every number in iteration 3's table is unchanged.
-- **Review of b9bebaf (code-reviewer agent): FIX FIRST, 1 blocking, a test gap; the code was
+- **Review of f3f5eba (code-reviewer agent): FIX FIRST, 1 blocking, a test gap; the code was
   correct.**
   - **Nothing tested that a row on a plateau is accepted.** `find_peaks` reports the middle of a
     flat top, whose neighbour is EQUAL. So `>` to `>=` in any of the four neighbour clauses would
@@ -341,8 +341,8 @@ classify_punches also applies #14's pooled check. Otherwise it keeps the own-han
     - **No genuine output is affected:** `find_peaks` never reports row 0.
   - **Noted, not changed:** both checks accept a row on a track's or segment's first or last row,
     which the finder never emits. Tightening that is possible but out of scope.
-- **Re-review of 88c8ea3: FIX FIRST**, for the overclaiming test name above; Q1-Q4 confirmed killed.
-- **Re-review of 89fc9dc: SHIP**, no blocking findings.
+- **Re-review of 7f2dafc: FIX FIRST**, for the overclaiming test name above; Q1-Q4 confirmed killed.
+- **Re-review of f971dfd: SHIP**, no blocking findings.
   - W1 and W2 killed. Removing either last-row guard (`i + 1 < len(...)`) crashes the suite with
     IndexError on the new `[3, 6]` row-1 cases.
   - The test names and this entry now claim only what the tests show.

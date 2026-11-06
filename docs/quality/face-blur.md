@@ -162,7 +162,7 @@ so the guard is mosaicked whenever the face is.
   non-full plan (500 noisy-skeleton scenes); face points confidently on the chest
   still leave the head covered; the random test also scatters face points confidently
   anywhere in the box. 114 checks; 15,000 extra scenes with 0 faces left; every other
-  suite green; a clean clone of `b7a6e88` gives the same counts.
+  suite green; a clean clone of `08ec430` gives the same counts.
 - **Review: SHIP.** All eight earlier leak probes (B1-B3, N1, N2, P1-P3) closed. The
   reviewer found no guard rule dominated, so all are kept. Residuals, now in the
   operator notes: a person never detected, and a box that consistently leaves out the
@@ -195,7 +195,7 @@ so the guard is mosaicked whenever the face is.
 - **Accepted residual (Brendan's decision):** a mid-frame body-shaped box whose head
   reaches below the top third + pad, with no face patch.
 - **Test:** 121 checks; 15,000 extra scenes, 0 faces left; every other suite green; a
-  clean clone of `284cbc5` gives the same counts.
+  clean clone of `c5728ed` gives the same counts.
 - **Real check (own footage, final code, `edge_frac` 0.01 in both reports):** mode and
   whole-frame counts are unchanged (IMG_4395: 26.9%; IMG_4406: 16.4%). All 12 frames
   were re-extracted and looked at: **no face recognisable.** The floor on a mid-frame
@@ -228,7 +228,7 @@ so the guard is mosaicked whenever the face is.
   - The factors were checked against a 3-D head model (frontal 1.09-1.41x the true
     width), not against real heads.
 - **Test:** 134 checks; 15,000 extra scenes with 0 faces left; every other suite green; a
-  clean clone of `446d42d` gives the same counts.
+  clean clone of `eae5b3d` gives the same counts.
 - **Real check, own footage, det-conf 0.10 vs 0.25:**
 
   | Clip | Whole-frame blur | Nobody found | Textured area mosaicked (mean / median) |
