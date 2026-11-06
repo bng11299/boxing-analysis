@@ -11,6 +11,11 @@ pose, YOLO11-pose against the pinned weights hash), find_punches.py, classify_pu
 overlay. For a clip X, every output lands in --out-dir as X.pose.npz, X.punches.csv,
 X.classified.csv, X.classified.json, X.report.xlsx, X.summary.txt and X.overlay.mp4.
 
+Nothing in the chain uses the network. The one exception is opt-in: --narrate gemini sends the
+report's own sentences (never video, frames or pose) to Gemini for a reworded summary, with the
+key from GEMINI_API_KEY only, and keeps the template summary if there is no key, the call fails
+or the reply fails boxingvi.narrate's fact check. Participant footage is never sent.
+
 The stages run in a fresh staging folder inside --out-dir, so a stage can only ever
 read what an earlier stage wrote in THIS run. A stage that fails stops the chain and
 --out-dir is left exactly as it was (a pose the model has just extracted is kept in the
@@ -389,6 +394,9 @@ def main(argv=None, predict=None) -> int:
     ap.add_argument("--reference", type=Path, default=report_punches.DEFAULT_REFERENCE)
     ap.add_argument("--rounds", help="round boundaries in seconds, e.g. 0-180,240-420")
     ap.add_argument("--no-overlay", action="store_true", help="skip the overlay video")
+    ap.add_argument("--narrate", choices=report_punches.NARRATE_MODES, default="template",
+                    help="the written summary: template (default, offline) or gemini (optional; GEMINI_API_KEY "
+                         "from the environment, reply fact-checked, the template kept on any failure)")
     a = ap.parse_args(argv)
 
     clip = a.video.stem
@@ -457,7 +465,8 @@ def main(argv=None, predict=None) -> int:
 
         run_stage("report_punches", report_punches.main,
                   ["--pose", _abs(pose_path), "--classified", _abs(classified), "--classifier", _abs(a.classifier),
-                   "--reference", _abs(a.reference), "--rule", _abs(a.rule), "--out-dir", _abs(staging)]
+                   "--reference", _abs(a.reference), "--rule", _abs(a.rule), "--out-dir", _abs(staging),
+                   f"--narrate={a.narrate}"]
                   + ([f"--rounds={a.rounds}"] if a.rounds else []), is_main=True)
         _expect(staged("report.xlsx"), "report_punches")
         _expect(staged("summary.txt"), "report_punches")

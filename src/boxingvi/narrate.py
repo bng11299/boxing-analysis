@@ -57,6 +57,20 @@ def _tokens(text: str) -> Counter:
     return Counter(_TOKEN.findall(text))
 
 
+def _fact_tokens(fact: dict) -> Counter:
+    """The numbers a fact may lend a sentence: those in its text that its templates produced (`numbers`). A digit
+    that reached the text any other way (a label, a clip name, text planted to steer the model) lends nothing."""
+    nums = fact.get("numbers")
+    budget = Counter(n for n in nums if isinstance(n, str)) if isinstance(nums, list) else Counter()
+    out: Counter = Counter()
+    for tok in _TOKEN.findall(str(fact.get("text", ""))):
+        core = tok[:-1] if tok.endswith("%") else tok
+        if budget[core] > 0:
+            budget[core] -= 1
+            out[tok] += 1
+    return out
+
+
 def _safe(text: str) -> str:
     """JSON-quoted, with angle brackets escaped, so no data line can close or open a prompt delimiter."""
     return json.dumps(text, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
@@ -172,7 +186,7 @@ def _item(x, kind: str, ids: dict, problems: list) -> "dict | None":
     if unknown:
         problems.append(f"{where}: cites {unknown[:3]}, which are not facts it was given")
         return None
-    have = sum((_tokens(ids[c]["text"]) for c in cited), Counter())
+    have = sum((_fact_tokens(ids[c]) for c in cited), Counter())
     wrote = _tokens(text)
     extra = sorted((wrote - have).elements())
     if extra:
