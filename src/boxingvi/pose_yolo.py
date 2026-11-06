@@ -451,6 +451,9 @@ def load_yolo(weights, sha256: "str | None", device: str = "cpu"):
                          "(compute one with: python cli/run_ingest.py --hash-weights <file>)")
     if sha256_file(p) != sha256.lower():
         raise ValueError(f"{p.name} does not match the pinned sha256; not loading it")
+    # The pipeline runs offline: without this, ultralytics resolves DNS at import and sends usage events while
+    # it predicts. Read once, when ultralytics is first imported, so it is set before that import.
+    os.environ["YOLO_OFFLINE"] = "1"
     try:
         from ultralytics import YOLO  # lazy: heavy, and not needed to test this module
     except ImportError as e:
