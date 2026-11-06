@@ -113,6 +113,12 @@ def render_overlay(video: Path, pose: PoseSequence, classified_csv: Path, out: P
                                                min_conf=OVERLAY_MIN_CONF, info=info)
 
 
+def participant_video(video: Path) -> bool:
+    """True when the video lies under a participant root (resolved, so `..` and links cannot step around it)."""
+    v = Path(video).resolve()
+    return any(boxers.faceblur._under(v, Path(r).resolve()) for r in boxers.PARTICIPANT_ROOTS)
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with Path(path).open("rb") as f:
@@ -398,6 +404,10 @@ def main(argv=None, predict=None) -> int:
                     help="the written summary: template (default, offline) or gemini (optional; GEMINI_API_KEY "
                          "from the environment, reply fact-checked, the template kept on any failure)")
     a = ap.parse_args(argv)
+    if a.narrate == "gemini" and participant_video(a.video):
+        # report_punches sees only the staged files, so the source video is checked here (vault O63-O65)
+        print("narration: participant footage never leaves this machine; template kept")
+        a.narrate = "template"
 
     clip = a.video.stem
     if not _CLIP_NAME.fullmatch(clip):

@@ -73,7 +73,7 @@ def _reply_text(raw: bytes) -> "str | None":
 
 
 def narrate_with_gemini(prompt: dict, model: str = DEFAULT_MODEL, timeout: float = TIMEOUT_S,
-                        post=_post) -> "tuple[str | None, str]":
+                        post=None) -> "tuple[str | None, str]":
     """(narrated text or None, reason). None means: keep the template. `post` is injectable for tests."""
     try:
         if not isinstance(prompt, dict) or prompt.get("format") != narrate.FORMAT:
@@ -86,7 +86,7 @@ def narrate_with_gemini(prompt: dict, model: str = DEFAULT_MODEL, timeout: float
         if key is None:
             return None, f"no usable {ENV_KEY} in the environment; template kept"
         try:
-            raw = post(ENDPOINT.format(model=model), request_body(prompt), key, timeout)
+            raw = (post or _post)(ENDPOINT.format(model=model), request_body(prompt), key, timeout)
         except urllib.error.HTTPError as e:     # status code only: the body may echo the request
             code = e.code if isinstance(e.code, int) else 0
             return None, f"Gemini refused the request (HTTP {code}); template kept"
