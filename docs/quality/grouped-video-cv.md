@@ -1,7 +1,7 @@
 ## `main..feat/grouped-video-cv` — 2026-09-22
 
 **Why.** Closes residual risk #7 above. Git history shows the ST-GCN++ settings
-were committed (`14d61b4`, 20:04) before the only ST-GCN++ run (finished 21:41),
+were committed (`82318d2`, 20:04) before the only ST-GCN++ run (finished 21:41),
 and the operator recalls no tuning on validation. But every design decision so
 far was still checked against V2/V5/V9, so a single held-out split cannot serve
 as the test set. `--cv K`: leave-videos-out folds, assigned from clip counts only.
@@ -53,9 +53,9 @@ picked to flatter a result.
 
 - **Why:** iteration 2's fixes were never re-reviewed, and no gate reproduction
   was recorded.
-- **Clean clone:** cloned from GitHub at `bc00dbf`, the suite gave 179/0, which
+- **Clean clone:** cloned from GitHub at `7add784`, the suite gave 179/0, which
   matches iteration 2's count.
-- **Review** (fresh code-reviewer subagent, on `main..bc00dbf`): FIX FIRST.
+- **Review** (fresh code-reviewer subagent, on `main..7add784`): FIX FIRST.
   **No leakage found.** It checked the scaler, features, class weights, floors,
   epochs, the pretrained head and seeds. It checked the sign test against a
   brute-force binomial, and the alignment of pooled predictions. But:

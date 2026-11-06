@@ -81,7 +81,7 @@ harness now edits code lines only and the corrected run is the one reported.)
 All nine suites pass at this commit: pipeline 260, ingest 124, env 36, labels 50, hands 38, olympic 33, tracks 79,
 linking 266, appearance 171.
 
-### TEST RESULT (run after the freezing commit 0ea8472; 25 test videos, nothing tuned afterwards)
+### TEST RESULT (run after the freezing commit e1697c1; 25 test videos, nothing tuned afterwards)
 Extraction on the 25 test videos in four parallel shards (633-753 s each; about 12.5 min), then the pooled check from
 the colours files. **The gate FAILS.**
 | | decided co-present credited pairs | opposite | same | opposite share |

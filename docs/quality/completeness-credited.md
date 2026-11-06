@@ -1,7 +1,7 @@
 ## `feat/completeness-credited` -- 2026-10-09
 
 The completeness test on CREDITED fragments only, no linking (`completeness.find_bursts_credited`,
-`olympic_completeness.py --credited [--min-punches N]`). Branch from `feat/boxer-linking` (1d67459).
+`olympic_completeness.py --credited [--min-punches N]`). Branch from `feat/boxer-linking` (329060f).
 
 - **Decision (ADR-0012 Option 2, Brendan, 2026-10-09):** two-boxer identity is parked until W9. Pose-only linking swaps boxers and
   absorbs spectators, and two corner-colour attempts failed their non-circular gate (torso colour does not separate the boxers in

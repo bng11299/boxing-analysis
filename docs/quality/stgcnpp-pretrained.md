@@ -16,7 +16,7 @@ into a repo that later goes public.
 
 ### Iteration 1
 
-- **Test:** 133 → 142 passing at `18f01be`. New: scratch − RF interval present
+- **Test:** 133 → 142 passing at `ebfd1a3`. New: scratch − RF interval present
   and correctly oriented; `--seed` parsed; random forest and ST-GCN++
   deterministic under a fixed seed; a spec with no sha256 refused at the CLI;
   `torch.load` handed the hashed in-memory bytes (a spy). The spy test **fails
@@ -47,7 +47,7 @@ into a repo that later goes public.
   2 tests; deleting the tensor-type check fails 1.
 - **Numbers:** none of these changes touches training, prediction or the bootstrap.
   The loader returns the same tensors (`copy.copy` was a no-op). The seed sweep ran
-  from `18f01be`, and its reproduction result stands for this head.
+  from `ebfd1a3`, and its reproduction result stands for this head.
 
 ### Residual risk, accepted and recorded
 

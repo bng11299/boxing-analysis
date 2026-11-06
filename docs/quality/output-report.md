@@ -178,7 +178,7 @@ Threat sketch unchanged (files on disk between tools; reliability borrowed from 
   `_count` (int64 overflow on a confusion cell, pre-existing). Fixed: exact int/float
   comparison, bounded counts (<= 10^9); tests added. Message for a pre-10-21 score said
   "classified again since" when the truth is "never recorded"; split.
-- **Review (Astra / Codex, read-only, effort medium, on `d3975ef`): SHIP.** All four findings
+- **Review (Astra / Codex, read-only, effort medium, on `167692f`): SHIP.** All four findings
   CLOSED, each cited to file:line; the stacked-branch list confirmed for #17, #18 and #19
   (#21/#24/#25 were outside its brief; `git diff --stat` shows they do not touch these files).
   One nit, confirmed by reading: `read_classified(..., fps=-(10**400))` overflowed, because the
@@ -214,5 +214,5 @@ published real figures unchanged when the real CSVs go through the stricter read
   binomial 0.071, Fisher 0.088, warns; IMG_4406 33 of 41 (80.5%) against 50.4%, binomial 0.00007,
   Fisher 0.00005, passes -- iteration 6's numbers exactly. The full reports cannot be regenerated
   until `train_classifier.py` and `classify_punches.py --labels` are re-run (iteration 7).
-- **Review (Astra / Codex, read-only, effort medium, one review of the #17/#18/#19 merges): SHIP all.** Merge OK on each branch, no adaptation defects; it checked that the shared checks are identical to feat/output-report's on all three (confirmed here: no changed line). Its sandbox could not run Python, so its verdict is from reading plus the results above; fresh clones of 2e2059f, f2412e8 and a2f90be reproduce every count.
+- **Review (Astra / Codex, read-only, effort medium, one review of the #17/#18/#19 merges): SHIP all.** Merge OK on each branch, no adaptation defects; it checked that the shared checks are identical to feat/output-report's on all three (confirmed here: no changed line). Its sandbox could not run Python, so its verdict is from reading plus the results above; fresh clones of 28a2a86, 0b492c0 and 549dab2 reproduce every count.
 

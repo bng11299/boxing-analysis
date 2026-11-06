@@ -183,7 +183,7 @@ fails it), then the fix. Nothing was re-tracked and no existing `.npz` was rewri
 
 ### Iteration 5 -- Astra 6 second review (2026-10-07; verdict FIX FIRST: 1 blocking, 5 not)
 
-Reviewed `eed8ea0..35da53d`. 35da53d (a reviewer, after the round-2 fixes) had already changed `boxer_segments` to bridge holes of
+Reviewed `a9204be..2d5f244`. 2d5f244 (a reviewer, after the round-2 fixes) had already changed `boxer_segments` to bridge holes of
 up to `BRIDGE_S` inside ONE id and to split only at an id change or a longer hole; that stays.
 
 | # | Finding | Fix | Evidence |
@@ -219,7 +219,7 @@ up to `BRIDGE_S` inside ONE id and to split only at an id change or a longer hol
 | R4 `n/a` formatting removed (`None:.1f`) | test_linking | caught (the run crashes on the new test) | zero-identity video |
 | R6 pooled from rounded shares | test_linking | caught, 2 | 5 / 11 = 0.4545 |
 
-**Numbers, before (35da53d) -> after (29 Olympic videos, default parameters; `results/*.json`, gitignored)**
+**Numbers, before (2d5f244) -> after (29 Olympic videos, default parameters; `results/*.json`, gitignored)**
 | Quantity | Before | After |
 |---|---|---|
 | bursts / unexplained | 7,984 / 5,772 | 7,984 / 5,766 (the optimal assignment explains 6 more) |

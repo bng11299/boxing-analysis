@@ -67,7 +67,7 @@ nothing real.
   Seven real files identical to `np.load` (values and dtypes). Other suites unchanged:
   pipeline 260, classify 202, report 130, labels 50, env 36, hands 38, machine scripts 38.
 - **Review (own re-read of the final diff):** no new findings.
-- **Reproduce:** a clean clone at d435520 (no `results/`, no `data/`) gives the same numbers
+- **Reproduce:** a clean clone at 2778f35 (no `results/`, no `data/`) gives the same numbers
   in every suite, and the ingest check list matches the working tree line for line.
 - **Residual, accepted:** a legitimate file at the cap still costs up to ~410 MB (float32)
   or ~820 MB (float64) to load; that is the cap's stated price. A zero-frame pose loads,

@@ -29,7 +29,7 @@ leak, where an athlete straddles train and test and inflates the headline (this 
 
 - **Build:** `PERSON_OF_VIDEO`, `person_of`, `person_key`, an athlete-disjoint `split_by_video`,
   `split_pipeline`, and `HELD_OUT_VIDEOS` set to V2/V3/V5/V9. `run_baseline` uses `person_key`. The
-  pipeline consumers moved to `split_pipeline`. Commit `b65a043`.
+  pipeline consumers moved to `split_pipeline`. Commit `4a08e05`.
 - **Test gate:** green. Pipeline 314 → 348, all 20 Python suites and the machine-script suite pass.
   Mutation check in a throwaway copy, with three mutants (person check disabled; old hold-out
   restored; `run_baseline` back to the video key): all three killed (4, import-time and 1 failures).
@@ -59,12 +59,12 @@ leak, where an athlete straddles train and test and inflates the headline (this 
   wrong on first run (it called `__setitem__` on the mappingproxy, which has no such attribute);
   rewritten as a real item assignment, which raises `TypeError`.
 - **Review (self, on the iteration-2 diff):** one wording fix (learning_curve docstring order). No
-  logic change touched what `run_baseline.py` computes, so the sweep run at `b65a043` stands.
+  logic change touched what `run_baseline.py` computes, so the sweep run at `4a08e05` stands.
 - **Security:** unchanged; the new checks only narrow what is accepted.
 
 ## Results (step 4 of the task)
 
-Three seeds at `b65a043`. Headline ST-GCN++ pretrained 0.7722 / 0.6331 (old split 0.8118 / 0.7082).
+Three seeds at `4a08e05`. Headline ST-GCN++ pretrained 0.7722 / 0.6331 (old split 0.8118 / 0.7082).
 Interpretability gap +0.135 / +0.159 / +0.124 macro F1, every CI excludes zero. Floors re-run with it.
 RESULTS.md rows 1f–1i and note 13 say why the old rows changed, and that the drop is not the leak's
 size (less training data, different test mix). Real-world check: the run's own `val_videos` /
@@ -72,29 +72,29 @@ size (less training data, different test mix). Real-world check: the run's own `
 
 ## Merge with main (2026-11-02)
 
-- **Merge:** `origin/main` merged in at `3f7d04c` (no force-push). The two conflicts were both in
+- **Merge:** `origin/main` merged in at `53e3aba` (no force-push). The two conflicts were both in
   docs. The quality-loop index keeps every line. In RESULTS.md, main keeps note 10 and the O55 note
   became 13 (#41 and #42 take 11 and 12).
 - **Test gate:** all 24 suites green on the merged branch, including main's new gloves (273),
   pose_watcher (68) and ring (219) suites. Pipeline 351, classify 299, machine scripts 45. Main's
   Olympic `HELD_OUT_VIDEOS` lives in `olympic_ring.py` and does not touch the classifier split.
-- **Headline re-run:** three seeds at `3f7d04c`. Every result field is identical to the `b65a043`
+- **Headline re-run:** three seeds at `53e3aba`. Every result field is identical to the `4a08e05`
   run (only `train_seconds` differs). Real-world check: `val_videos` reads V2/V3/V5/V9,
   `train_videos` reads V1/V4/V7/V8/V10, and the log reads "train 2970 clips / val 1787 clips". The
   3-seed mean is still 0.7722 / 0.6331.
-- **Second merge** (`9c1b92a`, after #37, #41 and #42 landed): one docs conflict (the quality-loop
+- **Second merge** (`b072df9`, after #37, #41 and #42 landed): one docs conflict (the quality-loop
   index), with both lines kept. None of the incoming Python references the split functions.
   `report.py` still uses `PIPELINE_HELD_OUT_VIDEOS`. All 24 Python suites (including combos 158 and
   report 291) and the machine scripts (45) are green. No classifier input changed, so the headline
   re-run above stands.
-- **Third merge** (`c3b3420`, 2026-11-03, after #35 and #39 landed): again one docs conflict (the
+- **Third merge** (`958c398`, 2026-11-03, after #35 and #39 landed): again one docs conflict (the
   quality-loop index), with all three lines kept. Measured against the merge-base, none of main's
   additions (label-moments, linker join-check) reference the split functions. RESULTS note 13
   stays unique, and main's row 11a and N4 came in intact. All 27 Python suites are green (pipeline
   351, classify 299, plus the new identity_measured 49, label_moments 169 and linker_join_check
   152), and so are the machine scripts (45). label_moments skips one check because this Windows
   account cannot create symlinks; that test is unrelated to the split.
-- **Fourth merge** (`ae548df`, after #44 release-readiness landed): one conflict, the README
+- **Fourth merge** (`c23aff0`, after #44 release-readiness landed): one conflict, the README
   "Reported results" row. Both intents are kept: main's pointer to RESULTS.md as the current
   numbers and its note that the first baselines are as reported in September, plus the
   athlete-disjoint V2/V3/V5/V9 split. Main's new README sections (reproducing, licence, Olympic
@@ -104,7 +104,7 @@ size (less training data, different test mix). Real-world check: the run's own `
 
 ## Exit: all gates green
 
-- **Reproduce:** fresh `git clone` of `7de4c8d` (no `data/`): all 20 Python suites and the machine
+- **Reproduce:** fresh `git clone` of `f3a78a4` (no `data/`): all 20 Python suites and the machine
   scripts pass with the same counts as the working tree (pipeline 351, classify 299, report 289,
   poseswitch 30, machine scripts 38, …).
 - **Residual risks accepted:** the pipeline checkpoint and rows 0, 1b, 1c, 4 and 4r stay on a split

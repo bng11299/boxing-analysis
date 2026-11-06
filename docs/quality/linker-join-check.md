@@ -1,6 +1,6 @@
 ## feat/linker-join-check -- 2026-10-28: hand-checked linker joins (option A), the tool
 
-Gate: `docs/gates/linker-join-check.md`, committed `ec52160` BEFORE any code, sample or answer (bar agreed by Brendan
+Gate: `docs/gates/linker-join-check.md`, committed `271ac81` BEFORE any code, sample or answer (bar agreed by Brendan
 2026-10-28: three-way verdict against p\*, n = 100; ADR-0018 in the vault). Stacked on PR #35 (`feat/label-moments`)
 to reuse its window.
 
@@ -58,7 +58,7 @@ memory; no clip is written to disk.
   pinned to the sample's sha256; `verify` shows no S / D / U split (no interim peeking); messages name checks, not
   paths. Finding 3 above was mine too. Residual: `check_out_dir` trusts two fixed roots, not git's ignore rules.
 
-### Iteration 2 (`d7d16c6`)
+### Iteration 2 (`8b4c320`)
 - GATE test: 149 passed (new negative tests: edited p\*, positions, seed, n, totals, strata, median, target, camera;
   second window refused; truncated decode; foreign results/ folder; clip plays before the still; no gap length in
   any caption; real-time durations). #35: 169 passed, 1 skipped.
@@ -80,7 +80,7 @@ what decodes (whole-clip rule; constant-rate GoPro footage, unlikely). The check
 of the window yet: the first `check --dry` on the 23 videos is the real-data smoke test, before Brendan's session.
 
 ### Exit
-- Gate reproduce: fresh clone of `origin/feat/linker-join-check` at `2f5d0a5`, same interpreter: test_linker_join_check
+- Gate reproduce: fresh clone of `origin/feat/linker-join-check` at `3b49b65`, same interpreter: test_linker_join_check
   151 passed / 0 failed / 0 skipped, test_label_moments 169 / 0 / 1 -- the same numbers as the working tree.
 - All gates green: tests (151 + 169), review (Astra FIX FIRST -> fixed; code-reviewer SHIP twice), security (own
   pass; the lock-open and Refused-reason leaks fixed).
@@ -103,7 +103,7 @@ p\* and verdict; `Identity.measured` holds only those recomputed numbers. `olymp
 records the verdict. `report_boxers.py` changes one line (the `header` call); PR #42 edits the lines around it,
 so whichever merges second resolves a one-line conflict.
 
-### Iteration 1 (`7d2eb37`)
+### Iteration 1 (`2efbfac`)
 - GATE test: test_identity_measured 39 passed; test_boxers 168 (one check re-pointed: "linker" was its example of
   a method with NO registered gate; the property is kept with `torso-colour`, plus a new check that the linker's
   gate is its own document); test_linker_join_check 151.
@@ -116,7 +116,7 @@ so whichever merges second resolves a one-line conflict.
   overflowed. Nits: bool / float counts, wilson95 in the nothing-decided branch, a traceback from olympic_boxers.
 - GATE security (own): NaN refused at parse (test added); the rest as the review.
 
-### Iteration 2 (`a4be8a7`)
+### Iteration 2 (`c0baa11`)
 - All of the above fixed: gate manifest, counts from `answers.csv` (pinned to the sample) with n from the sample,
   verdict agreement in the header, strict typing, clean refusal.
 - GATE test: test_identity_measured 48 passed (new: foreign videos refused; 10,000 consistent answers refused;
@@ -130,4 +130,4 @@ so whichever merges second resolves a one-line conflict.
 - **Residuals accepted** (none reaches a number the report quotes): another complete answers.csv pinned to the same
   sample with the same totals (answers moved between rows) would pass, and the result's per-stratum / per-camera /
   minutes fields are not re-derived; `GATES["linker"]["manifest"]` is a test override living in module config
-  (None = the real 23; nothing in production sets it); `AnswerFile.load`'s size check is stat-then-read.- Gate reproduce: fresh clone of `origin/feat/linker-join-check` at `b1e4446`: test_identity_measured 49 / 0, test_linker_join_check 152 / 0 / 0, test_boxers 168 / 0, test_label_moments 169 / 0 / 1 skipped -- the same as the working tree.
+  (None = the real 23; nothing in production sets it); `AnswerFile.load`'s size check is stat-then-read.- Gate reproduce: fresh clone of `origin/feat/linker-join-check` at `a2a822b`: test_identity_measured 49 / 0, test_linker_join_check 152 / 0 / 0, test_boxers 168 / 0, test_label_moments 169 / 0 / 1 skipped -- the same as the working tree.
