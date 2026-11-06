@@ -31,13 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import json  # noqa: E402
 
-from boxingvi import boxers, combos, narrate, report  # noqa: E402
+from boxingvi import boxers, combos, gemini, narrate, report  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
 
 DEFAULT_REFERENCE = Path("results/sweep-2026-09-22/seed0.json")   # the run cli/train_classifier.py reproduces
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
 DEFAULT_COMBO_GATE = Path("results/combinations_gate.json")        # score_combinations.py writes it
 DEFAULT_OUT = Path("results/reports")
+NARRATE_MODES = ("template", "gemini")
 
 
 def main(argv=None) -> int:
@@ -56,6 +57,10 @@ def main(argv=None) -> int:
     ap.add_argument("--prompt-out", action="store_true",
                     help="also write <clip>.narration-prompt.json: a prompt for an optional LLM narrator, checked "
                          "afterwards by narration_check.py (boxingvi.narrate); own footage only")
+    ap.add_argument("--narrate", choices=NARRATE_MODES, default="template",
+                    help="template (default, offline) or gemini: optional, needs GEMINI_API_KEY in the environment; "
+                         "the reply is fact-checked and the template is kept on any failure")
+    ap.add_argument("--gemini-model", default=gemini.DEFAULT_MODEL, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
 
     pose = PoseSequence.load(a.pose)
@@ -86,19 +91,25 @@ def main(argv=None) -> int:
     text, numbers = w.text(), w.numbers
     if Counter(report.numbers_in(text)) != Counter(t for n in numbers for t in report.numbers_in(n)):
         raise RuntimeError("a number in the summary did not come from its templates")
+    # participant-derived numbers never go to a cloud model (vault O63-O65)
+    # every input that contributes a number to the prompt (resolved: relative paths and links followed)
+    local = any(boxers.faceblur._under(Path(x).resolve(), Path(r).resolve())
+                for x in (a.pose, a.classified, a.score, a.combo_gate) if x is not None
+                for r in boxers.PARTICIPANT_ROOTS)
+    prompt = narrate.build(w, "your", may_leave_machine=not local)
+    if a.narrate == "gemini":
+        narrated, why = gemini.narrate_with_gemini(prompt, model=a.gemini_model)
+        print(f"narration: {why}")
+        if narrated is not None:
+            text = narrated
     a.out_dir.mkdir(parents=True, exist_ok=True)
     sheet = combos.sheet(runs, lambda p: p["unit"] + 1)
     report.write_workbook(a.out_dir / f"{clip}.report.xlsx", clip, rows, rounds, facts, bench, text, pose.fps,
                           report.cut_line(side), extra=(("Combinations", sheet),))
     (a.out_dir / f"{clip}.summary.txt").write_text(text + "\n", encoding="utf-8")
     if a.prompt_out:
-        # participant-derived numbers never go to a cloud model (vault O63-O65): the file says so
-        # every input that contributes a number to the prompt (resolved: relative paths and links followed)
-        local = any(boxers.faceblur._under(Path(x).resolve(), Path(r).resolve())
-                    for x in (a.pose, a.classified, a.score, a.combo_gate) if x is not None
-                    for r in boxers.PARTICIPANT_ROOTS)
         boxers.replace_bytes(a.out_dir / f"{clip}.narration-prompt.json", json.dumps(
-            narrate.build(w, "your", may_leave_machine=not local), indent=1, ensure_ascii=False).encode("utf-8"))
+            prompt, indent=1, ensure_ascii=False).encode("utf-8"))
         print(f"-> {clip}.narration-prompt.json" + (" (participant data: a LOCAL model only)" if local else ""))
     print(text)
     print(f"-> {a.out_dir / f'{clip}.report.xlsx'} and {clip}.summary.txt")
