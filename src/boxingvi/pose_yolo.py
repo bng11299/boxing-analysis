@@ -27,6 +27,9 @@ import re
 import struct
 import zipfile
 import zlib
+
+# The pipeline runs offline. Set at import as well as before loading, in case ultralytics is imported elsewhere first.
+os.environ["YOLO_OFFLINE"] = "1"
 from dataclasses import dataclass
 from pathlib import Path
 

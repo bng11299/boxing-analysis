@@ -174,6 +174,26 @@ def main(argv=None) -> int:
               rc == 0 and (out_g / "SMOKE01.summary.txt").read_text(encoding="utf-8") == summary)
         check("solo --narrate gemini with no key: says why it kept the template", "GEMINI_API_KEY" in so)
 
+        # participant footage with a key set: never sent (the source video is checked, not just the staged files)
+        from boxingvi import gemini
+        proot = tmp / "participant-root"
+        proot.mkdir()
+        pvid = shutil.copy(vid, proot / "SMOKE01.mp4")
+        sent = []
+        old_post, old_roots = gemini._post, boxers.PARTICIPANT_ROOTS
+        gemini._post = lambda *x, **y: sent.append(1) or b""
+        boxers.PARTICIPANT_ROOTS = (proot,)
+        os.environ["GEMINI_API_KEY"] = "AIzaSMOKE_not_a_real_key_0123456789"
+        try:
+            k["i"] = 0
+            rc, so, se = run(["--video", str(pvid), "--stance", "orthodox", "--out-dir", str(proot / "out"),
+                              "--no-overlay", "--weights", str(fake_weights), "--narrate", "gemini", *files], predict)
+        finally:
+            gemini._post, boxers.PARTICIPANT_ROOTS = old_post, old_roots
+            os.environ.pop("GEMINI_API_KEY", None)
+        check("participant video + --narrate gemini + a key: nothing sent, template kept",
+              rc == 0 and sent == [] and "never leaves" in so, (so + se)[-1500:])
+
     print("two boxers: tracks + identity -> per-boxer punches, reports and summaries")
     w2 = 320
     xa, xb = body(80, (2, 5, 8, 11, 14), (3.5, 9.5, 16)), body(240, (3, 12), (4, 13, 17.5))
