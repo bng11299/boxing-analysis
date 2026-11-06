@@ -27,7 +27,7 @@ What V6's first half WAS used for, so the second half is the clean number: the
 width level (0.5, from 0.5 / 0.6 / 0.7) and the choice of this rule over a
 threshold walk were made looking at the first half only.
 
-Limits: V6 is one athlete, hooks and uppercuts only, AlphaPose at 24 fps, and its
+Limits: V6 is one athlete -- the same person as training video V1 (O55) -- hooks and uppercuts only, AlphaPose at 24 fps, and its
 labelled spans run nearly twice as long as the training clips of the same types
 (0.67 s against 0.3-0.4 s), so an extent built from the training clips is
 expected to come up short of them. The extent of a jab or a cross is checked on
@@ -46,7 +46,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from boxingvi import classify, punchfind  # noqa: E402
-from boxingvi.data import HELD_OUT_VIDEOS, load_corpus, load_v6_spans, load_v6_track, split_by_video  # noqa: E402
+from boxingvi.data import PIPELINE_HELD_OUT_VIDEOS, load_corpus, load_v6_spans, load_v6_track, split_pipeline  # noqa: E402
 from classify_punches import span_peak  # noqa: E402
 
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
@@ -83,6 +83,17 @@ def paired_gain(a, b, spans, n_boot: int = 2000, seed: int = 0) -> dict:
             "excludes_zero": bool(lo > 0 or hi < 0), "n_boot": n_boot}
 
 
+def matched_inside(det, spans, fps: float, window: "tuple[int, int]") -> "list[tuple[int, int]]":
+    """(span, detection) pairs for the spans inside `window`, each read at the detection
+    the matching attributes to it. Nearest attribution (punchfind.match_nearest), as
+    eval_classify_v6.py's readings: the greedy punchfind.match hands an overlapping
+    combination's one detection to whichever span ends first, and the overlap is then
+    measured against the wrong span. classify.GATED_CUT names this attribution, so a rule
+    file gated under the greedy one is refused."""
+    return [(si, di) for si, di in punchfind.match_nearest(det, spans, int(round(TOL_S * fps)))
+            if window[0] <= spans[si].start and spans[si].end <= window[1]]
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, required=True)
@@ -98,7 +109,7 @@ def main(argv=None) -> int:
     if rule["variant"] != geom.variant:
         raise SystemExit("the finder's rule and the classifier's window use different wrist-speed variants")
 
-    train, _ = split_by_video(load_corpus(a.data))
+    train, _ = split_pipeline(load_corpus(a.data))   # the classifier checkpoint's training side
     ratios = classify.training_extent_ratios(train, geom.variant, punchfind.WIDTH_FRAC)
     print(f"from {ratios['n_clips']} training clips with a whole speed peak ({ratios['n_censored']} cut by the "
           f"clip's edge, left out): a punch runs {ratios['lead_widths']:.2f} peak-widths before its peak "
@@ -124,7 +135,7 @@ def main(argv=None) -> int:
 
     out = {"rule": "extent = [peak - lead_widths * width, peak + tail_widths * width]; width = time the punching "
                    "wrist holds >= frac of its peak speed",
-           **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(HELD_OUT_VIDEOS),
+           **ratios, "ratios_from": "BoxingVI training side; held out " + "/".join(PIPELINE_HELD_OUT_VIDEOS),
            "tested_on": "V6", "fps": track.fps, "v6": {}, "v6_clip_cut": clip._asdict(),
            "pipeline_cut": "per clip: every punch read over the median of the clip's own punch extents"}
     for name, w in (("first_half", tuple(r["tune_window"])), ("second_half", tuple(r["test_window"]))):
@@ -139,8 +150,9 @@ def main(argv=None) -> int:
     # As the pipeline runs: anchored at the finder's own detections, second half only.
     det, dh = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
     w = tuple(r["test_window"])
-    m = [(si, di) for si, di in punchfind.match(det, spans, int(round(TOL_S * track.fps)))
-         if w[0] <= spans[si].start and spans[si].end <= w[1]]
+    # Sorted by span index (match_nearest's order); paired_gain resamples by position, so its interval also
+    # moved with the change from the greedy's span-end order, not only with the attribution.
+    m = matched_inside(det, spans, track.fps, w)
     if m:
         sp = [spans[si] for si, _ in m]
         e = [ext(int(det[di]), int(dh[di])) for _, di in m]
@@ -159,7 +171,8 @@ def main(argv=None) -> int:
     out["first_half_was_used_for"] = "choosing the width level (0.5 of 0.5/0.6/0.7) and this rule over a threshold walk"
     out["limits"] = ["the per-clip cut was chosen looking at V6's second half and at V5/V9 (ADR-0014, 2026-10-13): "
                      "this gate is no longer an independent test of it",
-                     "V6: one athlete, hooks and uppercuts only, AlphaPose at 24 fps",
+                     "V6: one athlete, the same person as training video V1 (O55: not athlete-disjoint), hooks and "
+                     "uppercuts only, AlphaPose at 24 fps",
                      "V6's labelled spans run nearly twice as long as training clips of the same types",
                      "the extent of a jab or cross has not been checked against a label here"]
 

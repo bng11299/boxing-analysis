@@ -27,14 +27,18 @@ same labelled punches, by the same saved classifier:
 F - B and G - C are what the per-clip window buys over the old one; D - F and
 E - G what sizing each punch on its own adds (on V6, nothing measurable either
 way); A - F what cutting still costs;
-F - G the finder's timing and its unlabelled detections. Reported on all of V6 and
-on its second half alone, because the extent rule's width level and the choice of
-rule were made looking at the first half (run_punch_extent.py); the second half
-is the clean number. Paired bootstrap intervals on the punches both readings read.
+F - G the finder's timing and its unlabelled detections. Which detection a labelled
+punch is read at in C, E and G is decided by punchfind.match_nearest (`finder_pairs`):
+among the matchings with the most hits, the one with the least total distance from
+each detection to its span's middle.
+
+Reported on all of V6 and on its second half alone, because the extent rule's
+width level and the choice of rule were made looking at the first half
+(run_punch_extent.py); the second half is the clean number. Paired bootstrap intervals on the punches both readings read.
 
 Limits, stated in the results: V6 has only hooks and uppercuts (no jabs or
-crosses), one athlete, and the same channel as training video V1, so its numbers
-may be optimistic about a new athlete (ISSUES-LOG O55). Its skeletons are
+crosses), one athlete, and the same person as training video V1 (ISSUES-LOG O55): not
+athlete-disjoint, so its numbers may be optimistic about a new athlete. Its skeletons are
 AlphaPose, as in training: nothing here measures the YOLO11-pose switch.
 """
 
@@ -69,6 +73,15 @@ def corpus_clip(track, s) -> "np.ndarray | None":
     if hi - lo < 2:
         return None
     return pad_or_trim(_with_validity_channel((track.xy[lo:hi] / np.array(SOURCE_SIZE)).astype(np.float32)))
+
+
+def finder_pairs(det, spans, fps: float) -> "dict[int, int]":
+    """Labelled span -> the finder's detection that readings C, E and G read it at.
+
+    Nearest attribution (punchfind.match_nearest), not punchfind.match's greedy: 212 of
+    V6's 685 spans overlap the next one, and the greedy hands a combination's one
+    detection to whichever span ends first. The count is the same either way."""
+    return dict(punchfind.match_nearest(det, spans, int(round(TOL_S * fps))))
 
 
 def block(preds: dict, y: dict, keep) -> dict:
@@ -117,14 +130,14 @@ def main(argv=None) -> int:
     sig = punchfind.wrist_signal(track, geom.variant)
     row = {int(f): i for i, f in enumerate(track.frame_ids)}
     det, dh = punchfind.detect(track, sig, rule["threshold"], rule["min_gap_s"])
-    pairs = dict(punchfind.match(det, spans, int(round(TOL_S * track.fps))))
+    pairs = finder_pairs(det, spans, track.fps)
 
     def extent_window(peak: int, hand: int):
         e = classify.punch_extent(track, sig, peak, hand, ex, geom)
         return classify.cut_span(track, e.start, e.end, geom, torso).keypoints
 
     def clip_window(peak: int, c: classify.ClipCut):
-        return classify.cut_span(track, *classify.clip_window(peak, c, track.fps), geom, torso).keypoints
+        return classify.read_clip_window(track, peak, c, geom, torso)[0].keypoints
 
     # The labelled punches' peaks (a perfect finder), and every punch the finder detected (the pipeline).
     peaks = {}
@@ -168,7 +181,7 @@ def main(argv=None) -> int:
     lo, hi = r["test_window"]
     second = {j for j, s in enumerate(spans) if lo <= s.start and s.end <= hi}
     result = {"video": "V6", "n_labelled": len(spans), "classifier_sha256": man["sha256"],
-              "geometry": asdict(geom), "extent": ex, "finder_matched": len(pairs),
+              "geometry": asdict(geom), "extent": ex, "finder_matched": len(pairs), "finder_attribution": "nearest",
               "clip_cut_from_labelled_punches": cut_labelled._asdict(),
               "clip_cut_from_finder_detections": {**cut_finder._asdict(), "n_detections": int(len(det))},
               "all": block(preds, y, set(y)), "second_half": {"window": [lo, hi], **block(preds, y, second)},
@@ -176,7 +189,7 @@ def main(argv=None) -> int:
                   "the per-clip cut (F, G) was CHOSEN looking at this file's second-half numbers and at V5/V9 "
                   "(ADR-0014, 2026-10-13): they are no longer a clean test of it",
                   "V6 has hooks and uppercuts only: no jabs or crosses",
-                  "one athlete, same channel as training video V1 (O55): may be optimistic",
+                  "one athlete, the same person as training video V1 (O55): not athlete-disjoint, may be optimistic",
                   "AlphaPose skeletons as in training: says nothing about the YOLO11-pose switch",
                   "the finder's rule was tuned on V6's first half, and the extent rule's width level and form "
                   "were chosen looking at it: the second half is the clean number"]}

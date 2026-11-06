@@ -29,10 +29,15 @@ reports rather than guesses, and remains the first thing to run on new data.
 from __future__ import annotations
 
 import json
+import math
+import os
 from dataclasses import dataclass
+from types import MappingProxyType
 from pathlib import Path
 
 import numpy as np
+
+from .npyread import read_data, read_header
 
 # COCO-17, the order AlphaPose emits.
 KEYPOINTS = [
@@ -124,7 +129,8 @@ def split_by_subject(clips: list[Clip]) -> tuple[list[Clip], list[Clip]]:
                 "these clips carry no subject id, so the official "
                 "S1-S15 / S16-S20 split cannot be applied -- the release does "
                 "not ship subject identifiers (ISSUES-LOG O10). Use "
-                "split_by_video() and report the split as video-disjoint."
+                "split_by_video() and report the split as athlete-disjoint by video "
+                "(PERSON_OF_VIDEO, O55), not subject-disjoint."
             )
         raise ValueError(f"unrecognised subject ids: {unknown}")
     train = [c for c in clips if c.subject in set(TRAIN_SUBJECTS)]
@@ -154,7 +160,57 @@ def _read_alphapose_json(path: Path) -> np.ndarray:
     return np.stack(out)
 
 
-SKELETON_READERS = {".json": _read_alphapose_json, ".npy": lambda p: np.load(p)}
+# The two layouts the release ships, read from the headers of all ten files on
+# 2026-10-20: nine (N, 25, 17, 2) clip arrays and V6's (46497, 1, 17, 3) per-frame
+# pose, every one '<f8' in .npy format 1.0. Channels may be 2 or 3 in a clip array
+# (`_with_validity_channel` takes either). Name -> (shape test, what it expects).
+_NPY_LAYOUTS = {
+    "clips": (lambda s: len(s) == 4 and s[1:3] == (MAX_FRAMES, N_JOINTS) and s[3] in (2, 3),
+              f"(N, {MAX_FRAMES}, {N_JOINTS}, 2 or 3)"),
+    "v6": (lambda s: len(s) == 4 and s[1:] == (1, N_JOINTS, 3), f"(F, 1, {N_JOINTS}, 3)"),
+}
+
+
+def load_corpus_npy(path: Path, layouts: "tuple[str, ...]") -> np.ndarray:
+    """Load a corpus .npy, refusing it from its header before anything is allocated.
+
+    The corpus is third-party data, so this is the trust boundary. `np.load`
+    allocates whatever shape a header claims and only then finds the data missing:
+    a 128-byte V6.npy claiming 2M frames cost 816 MB before a ValueError (measured
+    2026-10-20). Here the header is read through a byte cap, then checked -- a plain
+    float dtype of at most 8 bytes (never object, so nothing is ever unpickled),
+    integer dims matching one of `layouts` (keys of `_NPY_LAYOUTS`), and promised
+    bytes no more than the file holds after its header -- and only then is one
+    buffer of exactly that size filled. A file that cannot be opened raises OSError;
+    anything wrong inside it, ValueError.
+
+    Any float of at most 8 bytes is accepted (float16 too: it is a coordinate, just
+    coarse). The byte order is the file's, as with `np.load`; every consumer converts
+    (`to_arrays`, `_with_validity_channel`, `load_v6_track`), which is what makes the
+    downstream arrays native.
+    """
+    p = Path(path)
+    with open(p, "rb") as fh:
+        shape, fortran, dtype = read_header(fh, p.name)
+        if (dtype.kind != "f" or dtype.hasobject or dtype.fields is not None
+                or dtype.subdtype is not None or dtype.itemsize > 8):
+            raise ValueError(f"{p.name}: dtype {dtype.str!r}; corpus keypoints are "
+                             "floats of at most 8 bytes")
+        if (not all(type(d) is int and d >= 0 for d in shape)  # (True, ...) parses
+                or not any(_NPY_LAYOUTS[k][0](shape) for k in layouts)):
+            want = " or ".join(_NPY_LAYOUTS[k][1] for k in layouts)
+            raise ValueError(f"{p.name}: expected {want}, got {shape}")
+        need = dtype.itemsize * math.prod(shape)  # Python ints: cannot overflow
+        room = os.fstat(fh.fileno()).st_size - fh.tell()
+        if need > room:
+            raise ValueError(f"{p.name}: header promises {need:,} bytes of data; "
+                             f"the file holds {room:,} after its header")
+        return read_data(fh, shape, fortran, dtype, p.name)
+
+
+# A loose .npy under Skeleton_data is one of the two layouts the release ships.
+SKELETON_READERS = {".json": _read_alphapose_json,
+                    ".npy": lambda p: load_corpus_npy(p, ("clips", "v6"))}
 
 
 def discover_layout(root: Path) -> dict:
@@ -217,13 +273,37 @@ _LABEL_ALIASES = {
 
 VIDEOS = tuple(f"V{i}" for i in range(1, 11))
 
-# Held out for validation. Chosen ONCE, on label distribution alone and before
-# any model was fit: 979 clips (20.5%, against the paper's 20.3% train/val
-# ratio) with every one of the six classes represented at least 51 times. It is
-# a video-disjoint split standing in for a subject-disjoint one, which is the
-# closest approximation the release permits. It is NOT the official split and
+# Who is on screen in each video. The release carries no subject ids (vault
+# ISSUES-LOG O10), so this is the stand-in: Brendan watched all ten videos on
+# 2026-10-27 (ISSUES-LOG O55) and found one instructor per video, with two
+# people appearing twice -- V1/V6 (one coach) and V2/V3 (another). A person's
+# id is the videos they appear in, so every results file says which videos
+# were grouped without a lookup. This map is the ONLY place that knowledge
+# lives; every split that claims to be athlete-disjoint goes through it.
+PERSON_OF_VIDEO = MappingProxyType({
+    "V1": "V1+V6", "V6": "V1+V6",
+    "V2": "V2+V3", "V3": "V2+V3",
+    "V4": "V4", "V5": "V5", "V7": "V7", "V8": "V8", "V9": "V9", "V10": "V10",
+})   # read-only: edit the source, never the map at run time
+if set(PERSON_OF_VIDEO) != set(VIDEOS):   # a new video must be watched before it is split
+    raise RuntimeError("PERSON_OF_VIDEO does not cover exactly the corpus videos")
+
+# Held out for the headline: athlete-disjoint (O55). It is the original
+# V2/V5/V9 hold-out with V3 added, because V3 shows the same instructor as V2;
+# nothing else was chosen, and no test result was looked at to choose it.
+# 1,787 of 4,757 clips (37.6%). It stands in for the paper's subject-disjoint
+# split, which the release cannot reproduce: it is NOT the official split and
 # no number computed on it should be described as one.
-HELD_OUT_VIDEOS = ("V2", "V5", "V9")
+HELD_OUT_VIDEOS = ("V2", "V3", "V5", "V9")
+
+# The split the pipeline's classifier checkpoint (weights/classifier, seed 0)
+# was trained and gated on, kept so that checkpoint and every row derived from
+# it (extent rule, pose switch, V6, end to end, own footage) still reproduce.
+# Chosen once, on label distribution alone, before any model was fit. It is
+# video-disjoint but NOT athlete-disjoint: V2 is held out while V3, the same
+# instructor, trains (O55). Its V5 and V9 scores are unaffected -- each is one
+# person seen nowhere else. Use `split_pipeline`, never `split_by_video`.
+PIPELINE_HELD_OUT_VIDEOS = ("V2", "V5", "V9")
 
 
 def _normalise_label(raw: object) -> "str | None":
@@ -285,12 +365,9 @@ def _load_presegmented(video: str, skel: Path, ann: Path):
     """The nine videos the authors shipped already cut into 25-frame clips."""
     import pandas as pd
 
-    arr = np.load(skel / f"{video}.npy", allow_pickle=False)
+    arr = load_corpus_npy(skel / f"{video}.npy", ("clips",))
     df = pd.read_excel(ann / f"{video}.xlsx")
 
-    if arr.ndim != 4 or arr.shape[1:3] != (MAX_FRAMES, N_JOINTS):
-        raise ValueError(f"{video}: expected (N, {MAX_FRAMES}, {N_JOINTS}, C), "
-                         f"got {arr.shape}")
     # The alignment this loader depends on. If the counts ever diverge, the
     # row-to-clip correspondence is unknowable and guessing would silently
     # mislabel the whole video.
@@ -319,9 +396,7 @@ def _load_v6(skel: Path, ann: Path):
     """V6 ships raw per-frame pose; rebuild clips from its annotation spans."""
     import pandas as pd
 
-    arr = np.load(skel / "V6.npy", allow_pickle=False)
-    if arr.shape[1:] != (1, N_JOINTS, 3):
-        raise ValueError(f"V6: expected (F, 1, {N_JOINTS}, 3), got {arr.shape}")
+    arr = load_corpus_npy(skel / "V6.npy", ("v6",))
     frame_ids = arr[:, 0, 0, 0].astype(np.int64)  # channel 0 is a frame index
     xy = arr[:, 0, :, 1:3]                        # channels 1-2 are x, y
     index = {int(f): i for i, f in enumerate(frame_ids)}
@@ -434,9 +509,7 @@ class Span:
 
 
 def load_v6_track(skel: Path) -> Track:
-    arr = np.load(Path(skel) / "V6.npy", allow_pickle=False)
-    if arr.ndim != 4 or arr.shape[1:] != (1, N_JOINTS, 3):
-        raise ValueError(f"V6: expected (F, 1, {N_JOINTS}, 3), got {arr.shape}")
+    arr = load_corpus_npy(Path(skel) / "V6.npy", ("v6",))
     ids = arr[:, 0, :, 0]
     # Channel 0 is one frame id repeated over the 17 joints. If that ever stops
     # holding, it is not a frame id and the alignment above does not apply.
@@ -519,34 +592,88 @@ def load_corpus(root: Path, include_v6: bool = False) -> "list[Clip]":
     return clips
 
 
-def split_by_video(clips, held_out: tuple = HELD_OUT_VIDEOS):
-    """Video-disjoint split, the stand-in for the unavailable official one.
+def person_of(video: str) -> str:
+    """The person on screen in `video` (PERSON_OF_VIDEO). An unknown id is
+    refused: guessing it is a person of its own is exactly how a repeat
+    athlete would slip across a split unnoticed."""
+    p = PERSON_OF_VIDEO.get(video) if isinstance(video, str) else None
+    if p is None:
+        raise ValueError(f"unknown video id {video!r}: not in PERSON_OF_VIDEO, so "
+                         "who is in it is unknown and it cannot be split by person")
+    return p
 
-    No clip from a held-out video appears in training. This is weaker than
-    subject-disjoint -- if one athlete appears in two videos they straddle the
-    fold -- but it is the strongest guarantee the release supports, and it is
-    strictly better than a clip-level split, which leaks by construction.
-    """
+
+def person_key(clip) -> str:
+    """Group key for leave-persons-out CV (`group_folds`, `cv_splits`)."""
+    return person_of(clip.source)
+
+
+def _split_videos(clips, held_out: tuple):
+    held = set(held_out)
     present = {c.source for c in clips}
-    missing = sorted(set(held_out) - present)
+    missing = sorted(held - present)
     if missing:
         raise ValueError(f"held-out videos absent from the corpus: {missing}")
-    train = [c for c in clips if c.source not in set(held_out)]
-    val = [c for c in clips if c.source in set(held_out)]
+    train = [c for c in clips if c.source not in held]
+    val = [c for c in clips if c.source in held]
     if not train or not val:
         raise ValueError("split produced an empty side")
     return train, val
 
 
+def split_by_video(clips, held_out: tuple = HELD_OUT_VIDEOS):
+    """Athlete-disjoint, video-level split: the stand-in for the unavailable
+    official subject-disjoint one.
+
+    No clip from a held-out video appears in training, and -- checked on the
+    split actually returned, not assumed from the constants -- no person
+    (PERSON_OF_VIDEO) appears on both sides. A held-out set that takes one of
+    a person's videos and leaves another in training is refused, as is any
+    video id the person map does not know. Strictly better than a clip-level
+    split, which leaks by construction.
+    """
+    if isinstance(held_out, str):   # "V2" would iterate as "V", "2"
+        raise ValueError(f"held_out must be a tuple of video ids, not the string {held_out!r}")
+    for v in held_out:
+        person_of(v)
+    train, val = _split_videos(clips, held_out)
+    tr_people = {person_of(c.source) for c in train}
+    va_people = {person_of(c.source) for c in val}
+    both = sorted(tr_people & va_people)
+    if both:
+        where = "; ".join(
+            f"{p}: " + "/".join(sorted({c.source for c in train if person_of(c.source) == p}))
+            + " in training, " + "/".join(sorted({c.source for c in val if person_of(c.source) == p}))
+            + " held out" for p in both)
+        raise ValueError("held-out set splits a person across train and test "
+                         f"({where}); hold out all of a person's videos (O55)")
+    return train, val
+
+
+def split_pipeline(clips):
+    """The pipeline checkpoint's split (PIPELINE_HELD_OUT_VIDEOS): video-disjoint
+    but NOT athlete-disjoint (V2 held out, V3 trains; O55). Only for code that
+    must reproduce or gate that checkpoint. No headline number comes from it."""
+    for v in PIPELINE_HELD_OUT_VIDEOS:
+        person_of(v)
+    return _split_videos(clips, PIPELINE_HELD_OUT_VIDEOS)
+
+
 def _group_order(g: str) -> tuple:
-    # V2 before V10: numeric where the id has a number, so the tie-break is the
-    # order a person reading the corpus would expect, not string order.
-    digits = "".join(ch for ch in g if ch.isdigit())
+    # V2 before V10: numeric on the id's first number, so the tie-break is the
+    # order a person reading the corpus would expect, not string order. The
+    # first number, not all digits joined: a person id "V2+V3" sorts as 2.
+    digits = ""
+    for ch in g:
+        if ch.isdigit():
+            digits += ch
+        elif digits:
+            break
     return (int(digits) if digits else -1, g)
 
 
 def group_folds(clips, k: int = 3, key=lambda c: c.source) -> list[tuple[str, ...]]:
-    """Partition the groups (videos) into k folds for leave-groups-out CV.
+    """Partition the groups (videos, or persons via person_key) into k folds for leave-groups-out CV.
 
     The assignment is LABEL-BLIND by construction: it reads only how many clips
     each group has. Groups go largest first to whichever fold currently holds
@@ -556,7 +683,7 @@ def group_folds(clips, k: int = 3, key=lambda c: c.source) -> list[tuple[str, ..
 
     Why this exists: the single held-out split (HELD_OUT_VIDEOS) is also the
     set every design decision was checked against, so it is a validation set
-    doubling as the test set. Cross-validating over every video puts each clip
+    doubling as the test set. Cross-validating over every group puts each clip
     in a test fold exactly once, and most of those clips were never looked at.
     """
     sizes: dict[str, int] = {}

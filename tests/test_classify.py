@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from boxingvi import classify, pose_yolo, punchfind  # noqa: E402
-from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Track  # noqa: E402
+from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Span, Track  # noqa: E402
 from boxingvi.stgcnpp import STGCNPP, prepare_input  # noqa: E402
 
 PASS = FAIL = 0
@@ -444,9 +444,19 @@ check("... and the capped window still holds the peak, a third in, and fits the 
       ws < 360 < we and (we - ws) / 60 <= 1.0 + 1e-9 and abs((360 - ws) / (we - ws) - 1 / 3) < 0.02
       and len(classify.cut_span(flat800, ws, we, GEOM, 100.0).keypoints) == 25)
 few = classify.clip_cut(flat800, five, peaks5[:4], RULE, GEOM)
-check("under 5 punches there is no tempo to read: the training clips' median window (0.375 s, a third in), and it says so",
-      few.source == "training" and few.length_s == GEOM.duration_s and abs(few.lead_share - 1 / 3) < 1e-12
+# length_s is first frame to last: the training window's 9 frames are 8 steps of 1/24 s, not GEOM.duration_s
+# (9 / 24 s, which counts samples); its peak is 3 of those 8 steps in. Which frames this reads is checked below.
+check("under 5 punches there is no tempo to read: the training clips' median window (9 frames: 8/24 s from first "
+      "to last, the peak 3/8 in), and it says so",
+      few.source == "training" and abs(few.length_s - 8 / 24) < 1e-12 and abs(few.lead_share - 3 / 8) < 1e-12
       and few.n_used == 0 and classify.MIN_CLIP_PUNCHES == 5, str(few))
+raises("a geometry whose peak would fall after the window's last frame is refused (lead-in = duration, 9/24 s)",
+       lambda: replace(GEOM, lead_in_s=GEOM.duration_s))
+late = classify.clip_cut(flat800, five, peaks5[:4], RULE, replace(GEOM, lead_in_s=8 / 24))
+check("... a peak ON the last frame is allowed, and the fallback window ends there",
+      late.lead_share == 1.0
+      and classify.read_clip_window(body(400, 24.0), 50, late, replace(GEOM, lead_in_s=8 / 24), 100.0)[1] == (42, 50),
+      str(late))
 check("no punch, no cut", classify.clip_cut(flat800, five, [], RULE, GEOM) is None)
 raises("a peak whose hand has no speed there is refused, not skipped (the list was not made from this pose)",
        lambda: classify.clip_cut(flat800, five, peaks5[:4] + [(620, 1)], RULE, GEOM))
@@ -476,6 +486,43 @@ check("at the training rate a span is its own frames, as the corpus cuts a label
       np.array_equal(frames_of(k24), np.arange(50, 62)))
 check("a span longer than the corpus's 25 frames keeps its first 25 (the corpus trims the tail too)",
       np.array_equal(frames_of(classify.cut_span(c24, 50, 99, GEOM, 100.0)), np.arange(50, 75)))
+
+
+def coded(f_, n_=400):
+    t_ = body(n_, f_, hx=960, hy=600)
+    t_.xy[:, 0, 0] += 0.001 * t_.frame_ids
+    return t_
+
+
+# Codex on PR #14: the under-5 fallback read 47-56 (10 frames) at a 24 fps peak at 50, where cut_window reads
+# 47-55. Compared here by the frames actually read (each frame's index is coded into the nose's x).
+w50, s50 = classify.read_clip_window(c24, 50, few, GEOM, 100.0)
+check("the under-5 fallback reads cut_window's frames: 47-55 at a 24 fps peak at 50, not 47-56, and says so",
+      np.array_equal(frames_of(w50), np.arange(47, 56)) and s50 == (47, 55)
+      and np.array_equal(frames_of(classify.cut_window(c24, 50, GEOM, 100.0)), np.arange(47, 56)),
+      f"{frames_of(w50)} {s50}")
+# Phone footage is not at 24 fps. Through clip_window + cut_span a correct 8-step span reads 8 frames at 25,
+# 29.97 and 59.94 fps (its start snaps to a frame; only whole steps fit), so the rate matters to this check.
+bad_rates = []
+for f_ in (23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0):
+    tf_ = coded(f_, int(16 * f_))
+    for p_ in range(int(0.5 * f_), int(15 * f_), 7):
+        w_, s_ = classify.read_clip_window(tf_, p_, few, GEOM, 100.0)
+        got, ref = frames_of(w_), frames_of(classify.cut_window(tf_, p_, GEOM, 100.0))
+        if not (len(got) == GEOM.n_frames and np.array_equal(got, ref) and s_ == (got[0], got[-1])
+                and s_[0] <= p_ <= s_[1]):
+            bad_rates.append((f_, p_, got, ref, s_))
+check("... and at 23.976, 24, 25, 29.97, 30, 59.94 and 60 fps, at every peak tried: cut_window's 9 frames, "
+      "frame for frame, with the peak inside and the span its first and last", not bad_rates, str(bad_rates[:2]))
+via_span = classify.cut_span(c24, *classify.clip_window(50, few, 24.0), GEOM, 100.0)
+check("control: the same 24 fps fallback read through clip_window + cut_span holds 9 frames (the length is right; "
+      "the phone-rate check above is what needs cut_window)", len(frames_of(via_span)) == 9)
+w_cc, s_cc = classify.read_clip_window(coded60, 200, cc, GEOM, 100.0)
+check("a clip's own cut is read exactly as gated: clip_window, then cut_span",
+      s_cc == classify.clip_window(200, cc, 60.0)
+      and np.array_equal(w_cc.keypoints, classify.cut_span(coded60, *s_cc, GEOM, 100.0).keypoints))
+raises("a cut from an unknown source is refused, not read as one or the other",
+       lambda: classify.read_clip_window(coded60, 200, cc._replace(source="per punch"), GEOM, 100.0))
 one = classify.cut_span(coded60, 100, 101, GEOM, 100.0)
 check("a punch under two training frames long is unclassifiable, with the reason",
       one.keypoints is None and "shorter than two frames" in one.reason)
@@ -546,6 +593,8 @@ check("a good rule file is read", extent_json()() == {"frac": 0.5, "lead_widths"
 raises("a rule that did not beat the fixed window is refused", extent_json(beats_fixed_window=False))
 raises("a rule file from before the per-clip cut (the flag, but no gated cut) is refused", extent_json(gated_cut=None))
 raises("a rule file that gated another cut is refused", extent_json(gated_cut="per punch, at labelled peaks"))
+raises("a rule file gated with the greedy attribution (before 2026-10-20) is refused: the gate measured other pairs",
+       extent_json(gated_cut="per clip, median over the finder's detections, windows at its matched detections"))
 raises("a rule with no verdict is refused (truthy is not True)", extent_json(beats_fixed_window="yes"))
 raises("a rule measured with another wrist-speed variant is refused", extent_json(variant="radial"))
 raises("a width level of 1.0 is refused", extent_json(frac=1.0))
@@ -622,8 +671,8 @@ check("each row has a type from the class list and a confidence in (0, 1]",
 check("each punch records the frames it was read from, around its peak",
       all(int(r["punch_start_frame"]) <= int(r["frame"]) <= int(r["punch_end_frame"]) for r in rows), str(rows[0]))
 length = [int(r["punch_end_frame"]) - int(r["punch_start_frame"]) for r in rows]
-check("three punches are too few to read a tempo: each is read over the training window, 0.375 s (22 frames at 60 fps)",
-      all(abs(k_ - 0.375 * fps) <= 1 for k_ in length), str(length))
+check("three punches are too few to read a tempo: each is read over the training window, 8/24 s first to last "
+      "(20 frames at 60 fps)", all(abs(k_ - 8 / 24 * fps) <= 1 for k_ in length), str(length))
 check("orthodox: left-hand punches are lead, right-hand punches rear",
       [r["lead_rear"] for r in rows] == ["lead", "lead", "rear"])
 check("hands_agree says whether the type's hand is the finder's",
@@ -634,7 +683,7 @@ check("the sidecar names the classifier, the extent rule and the stance, and has
       and prov["extent"] == {"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8}
       and prov["csv_sha256"] == hashlib.sha256((tmp / "o" / "IMG_7777.classified.csv").read_bytes()).hexdigest()
       and prov["cut"]["per"] == "clip" and prov["cut"]["source"] == "training" and prov["cut"]["n_used"] == 0
-      and prov["cut"]["length_s"] == 0.375, str(prov))
+      and abs(prov["cut"]["length_s"] - 8 / 24) < 1e-12, str(prov))
 classify_punches.main(args + ["--stance", "southpaw"])
 rows_s = list(csv.DictReader((tmp / "o" / "IMG_7777.classified.csv").open(encoding="utf-8")))
 check("southpaw flips lead and rear, and nothing else",
@@ -664,6 +713,23 @@ stray = punches.read_text(encoding="utf-8") + f"600,{600 / fps:.3f},left,9.000,n
 raises("a CSV row that is not a speed peak of that hand in this pose is refused, not classified",
        lambda: classify_punches.main(args8))
 find_punches.main(["--pose", str(tmp / "IMG_8888.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o")])
+# A row above the threshold but on the rising slope, not at the peak: the per-hand finder could never report it.
+p8 = tmp / "o" / "IMG_8888.punches.csv"
+good8 = p8.read_text(encoding="utf-8")
+r8 = list(csv.DictReader(p8.open(encoding="utf-8")))[1]
+tr8 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_8888.pose.npz").to_track(usable_only=False), 3)
+sg8 = punchfind.wrist_signal(tr8, "relative")
+h8, k8 = ("left", "right").index(r8["hand"]), int(np.flatnonzero(tr8.frame_ids == int(r8["frame"]))[0])
+slope = [k for k in range(k8 - 10, k8) if sg8[k, h8] >= 1.0 and sg8[k + 1, h8] > sg8[k, h8]]
+check("control: the second punch's speed is above the threshold and still rising before its peak", bool(slope))
+f8 = int(tr8.frame_ids[slope[-1]])
+lines8 = good8.splitlines()
+lines8[2] = f"{f8},{f8 / fps:.3f},{r8['hand']},{r8['peak_speed_bl_per_s']},{r8['peak_on_interpolated_frame']}"
+p8.write_text("\n".join(lines8) + "\n", encoding="utf-8")
+raises("a CSV row above the threshold but on the rising slope (not a local peak of that hand) is refused",
+       lambda: classify_punches.main(args8))
+p8.write_text(good8, encoding="utf-8")
+check("control: the untouched CSV is accepted", classify_punches.main(args8) == 0)
 radial = tmp / "radial.json"
 radial.write_text(json.dumps({"chosen": {"variant": "radial", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
 raises("a finder rule with another wrist-speed variant than the window's is refused",
@@ -752,6 +818,84 @@ raises("a CSV naming the other hand at a punch's frame is refused (it has speed 
                                       "--stance", "orthodox", "--out-dir", str(tmp / "o5")]))
 check("... and nothing was written for it", not (tmp / "o5" / "IMG_5555.classified.csv").exists())
 
+# Rows the finder could not have written (Codex on PR #14). Each CSV below is IMG_7777's own, changed in one way.
+tr7 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_7777.pose.npz").to_track(usable_only=False),
+                       int(round(punchfind.BRIDGE_S * fps)))
+sig7 = punchfind.wrist_signal(tr7, "relative")
+best7 = sig7.max(axis=1)
+lines7 = punches.read_text(encoding="utf-8").splitlines()
+f1, hand1 = int(lines7[1].split(",")[0]), lines7[1].split(",")[2]
+(tmp / "bad").mkdir(exist_ok=True)
+
+
+def classify_csv(body_lines, rule_path=rule, out="obad"):
+    p = tmp / "bad" / "IMG_7777.punches.csv"
+    p.write_text("\n".join([lines7[0]] + body_lines) + "\n", encoding="utf-8")
+    return lambda: classify_punches.main(["--pose", str(tmp / "IMG_7777.pose.npz"), "--punches", str(p),
+                                          "--classifier", str(mpath), "--rule", str(rule_path),
+                                          "--extent", str(extent_file), "--stance", "orthodox",
+                                          "--out-dir", str(tmp / out)])
+
+
+def rule_at(threshold):
+    p = tmp / "bad" / "rule_t.json"
+    p.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": float(threshold), "min_gap_s": 0.4}}),
+                 encoding="utf-8")
+    return p
+
+
+def row7(fr, hand):
+    return f"{fr},{fr / fps:.3f},{hand},1.000,no"
+
+
+def accepted(fn):   # a control that must run: a refusal is a FAIL with its reason, not a crash of the suite
+    try:
+        return fn() == 0
+    except ValueError as e:
+        print(f"        refused: {e}")
+        return False
+
+
+check("control: the finder's own CSV, rewritten by the helper, is accepted",
+      accepted(classify_csv(lines7[1:], out="ogood")) and len(lines7) == 4)
+raises("five copies of one punch are refused (they would pass the five-punch gate and set a fake tempo)",
+       classify_csv([lines7[1]] * 5))
+raises("... and so are two", classify_csv([lines7[1], lines7[1]] + lines7[2:]))
+check("... and nothing was written for them", not (tmp / "obad").exists())
+check("control: the frames beside the first peak are the same hand's, above the threshold, and slower",
+      bool(tr7.frame_ids[f1] == f1 and best7[f1 - 1] >= 1.0 and best7[f1 + 1] >= 1.0
+           and best7[f1 - 1] < best7[f1] > best7[f1 + 1]
+           and int(np.argmax(sig7[f1 - 1])) == int(np.argmax(sig7[f1 + 1])) == (0 if hand1 == "left" else 1)),
+      f"{best7[f1 - 1:f1 + 2]}")
+raises("a row one frame up the rising slope of a punch is refused (not a peak)",
+       classify_csv([row7(f1 - 1, hand1)] + lines7[2:]))
+raises("a row one frame down the falling slope is refused", classify_csv([row7(f1 + 1, hand1)] + lines7[2:]))
+slowest = min(float(best7[int(l_.split(",")[0])]) for l_ in lines7[1:])
+check("control: a rule whose threshold is exactly the slowest punch's peak speed accepts the CSV (>=, as find_peaks)",
+      accepted(classify_csv(lines7[1:], rule_path=rule_at(slowest), out="ogood")))
+raises("a row below the rule's threshold is refused (the CSV was not made with this rule)",
+       classify_csv(lines7[1:], rule_path=rule_at(np.nextafter(slowest, np.inf))))
+# A rule at threshold 0 makes ">= threshold" and "no faster neighbour" true on any still stretch: a row there
+# must still be refused, because that hand has no speed at all (find_peaks needs a strict peak).
+h7 = 0 if hand1 == "left" else 1
+flat = [f_ for f_ in range(5, len(sig7) - 5) if not sig7[f_ - 1:f_ + 2, h7].any()]
+check("control: there is a still stretch of that hand, and at threshold 0 the finder's own CSV is accepted",
+      bool(flat) and accepted(classify_csv(lines7[1:], rule_path=rule_at(0.0), out="ogood")), str(len(flat)))
+
+
+def refusal(fn) -> str:
+    try:
+        fn()
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+still_msg = refusal(classify_csv([row7(int(tr7.frame_ids[flat[0]]), hand1)] + lines7[2:], rule_path=rule_at(0.0)))
+check("at threshold 0, a row on a still frame of that hand is refused by the peak check (no speed there, so no peak), "
+      "not later", f"is not a {hand1}-hand speed peak" in still_msg, still_msg)
+check("... and nothing was written for any of them", not (tmp / "obad").exists())
+
 # Labels equal to the frames each punch was read from: the extent's overlap with them must be exactly 1.
 lab = tmp / "IMG_7777.labels.json"
 spans = [{"start": max(int(r["punch_start_frame"]), 0), "end": int(r["punch_end_frame"]), "label": l}
@@ -768,6 +912,10 @@ check("the window's overlap with labels that equal it is 1, over all 3 matched p
       sc["window_iou_with_labels"] == {"n": 3, "mean": 1.0}, str(sc["window_iou_with_labels"]))
 check("the score records the cut it scored", sc["cut"]["per"] == "clip" and sc["cut"]["source"] == "training")
 check("the score names the classifier it scored, by hash", sc["classifier_sha256"] == man["sha256"])
+prov_l = json.loads((tmp / "o" / "IMG_7777.classified.json").read_text(encoding="utf-8"))
+check("the score names the classified CSV it scored: the file's sha256, as the sidecar records it",
+      sc.get("csv_sha256") == prov_l["csv_sha256"]
+      == hashlib.sha256((tmp / "o" / "IMG_7777.classified.csv").read_bytes()).hexdigest(), str(sc.get("csv_sha256")))
 check("control: no matched punch is unclassifiable on the whole clip", sc.get("matched_unclassifiable") == 0)
 half = [{"start": s_["start"], "end": (s_["start"] + s_["end"]) // 2, "label": s_["label"]} for s_ in spans]
 lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": half}), encoding="utf-8")
@@ -795,6 +943,56 @@ check("a labelled punch with no wrist speed in it is not scored 'at its peak' (i
       sc_still["labelled_punch_by_clip_window_unclassifiable"] == 1
       and sc_still["labelled_punch_by_clip_window_at_its_peak"]["n"] == 1
       and sc_still["labelled_punch_from_labelled_frames"]["n"] == 2, str(sc_still))
+# Classified again without --labels (another stance): the CSV changes, the score file on disk does not.
+from boxingvi import report as report_mod  # noqa: E402
+
+score_path = tmp / "o" / "IMG_7777.classify_score.json"
+classify_punches.main(args + ["--stance", "southpaw"])
+prov_s = json.loads((tmp / "o" / "IMG_7777.classified.json").read_text(encoding="utf-8"))
+check("re-classifying without --labels leaves a score whose CSV hash is no longer the sidecar's",
+      json.loads(score_path.read_text(encoding="utf-8"))["csv_sha256"] != prov_s["csv_sha256"])
+try:
+    report_mod.own_reliability(score_path, "IMG_7777", man["sha256"], prov_s["csv_sha256"])
+    why = "accepted"
+except ValueError as e:
+    why = str(e)
+check("... and the report refuses that stale score for the new CSV (same clip, same classifier)",
+      "another classified CSV" in why, why)
+# A fast jab-cross: the finder reports one peak (the right hand's, at 14 s) and it fits both labels; the jab
+# ends first. punchfind.match hands that detection to the jab, so a window read at the cross would be scored
+# against 'jab'. The score must attribute it to the cross, whose middle it sits nearest.
+f14 = int(rows[2]["frame"])
+check("control: the third finder punch is the right hand's", rows[2]["hand"] == "right", str(rows[2]))
+combo = [{"start": f14 - 20, "end": f14 - 3, "label": "jab"}, {"start": f14 - 2, "end": f14 + 14, "label": "cross"}]
+tol14 = int(round(find_punches.TOL_S * fps))
+greedy14 = punchfind.match([f14], [Span(c["start"], c["end"], 0) for c in combo], tol14)
+check("control: punchfind.match gives this detection to the jab (the fixture reproduces the V5 failure)",
+      greedy14 == [(0, 0)], str(greedy14))
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": combo}), encoding="utf-8")
+classify_punches.main(args + ["--stance", "orthodox", "--labels", str(lab)])
+sc_jc = json.loads((tmp / "o" / "IMG_7777.classify_score.json").read_text(encoding="utf-8"))
+check("jab-cross: the matched detection is scored against the cross, not the jab",
+      sc_jc["matched_detections"]["n"] == 1 and sc_jc["matched_detections"]["classes_present"] == ["cross"],
+      str(sc_jc["matched_detections"]))
+check("... and the score says how detections were attributed", sc_jc.get("matching") == "nearest")
+
+print("eval_classify_v6 attribution")
+import eval_classify_v6  # noqa: E402
+
+v6_combo = [Span(10, 20, CLASSES.index("lead_hook")), Span(19, 26, CLASSES.index("rear_hook"))]
+check("control: at 24 fps the tolerance is 2 frames, and punchfind.match gives 22 to the first hook",
+      int(round(eval_classify_v6.TOL_S * 24.0)) == 2 and punchfind.match([22], v6_combo, 2) == [(0, 0)])
+check("readings C/E/G read the second hook at the detection on its middle, not the first",
+      eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0) == {1: 0},
+      str(eval_classify_v6.finder_pairs(np.array([22]), v6_combo, 24.0)))
+check("finder_pairs: no detections -> no pairs", eval_classify_v6.finder_pairs(np.array([], dtype=np.int64), v6_combo, 24.0) == {})
+import run_punch_extent  # noqa: E402
+
+check("the extent gate measures overlap at the detection on the second hook's middle, not the first's",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100)) == [(1, 0)],
+      str(run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 100))))
+check("... and only spans wholly inside the window are kept",
+      run_punch_extent.matched_inside(np.array([22]), v6_combo, 24.0, (0, 25)) == [], "the second hook ends at 26")
 
 def punches_with(text):
     p = tmp / "p.csv"
@@ -814,6 +1012,10 @@ raises("punches: a NaN time is refused", punches_with(hdr + "600,nan,left,1.0,no
 raises("punches: an unknown hand is refused", punches_with(hdr + f"600,{600 / fps:.3f},both,1.0,no\n"))
 raises("punches: a short row is refused", punches_with(hdr + "600,10.009\n"))
 raises("punches: an unknown interpolation flag is refused", punches_with(hdr + f"600,{600 / fps:.3f},left,1.0,maybe\n"))
+raises("punches: a repeated (frame, hand) row is refused",
+       punches_with(hdr + f"600,{600 / fps:.3f},left,1.0,no\n700,{700 / fps:.3f},left,1.0,no\n600,{600 / fps:.3f},left,1.0,no\n"))
+check("punches: control: one frame with both hands is two rows, not a repeat (main() checks which hand peaks)",
+      len(punches_with(hdr + f"600,{600 / fps:.3f},left,1.0,no\n600,{600 / fps:.3f},right,1.0,no\n")()) == 2)
 
 print("train_classifier reproduces only a reference that records how it was trained")
 import train_classifier  # noqa: E402
@@ -826,6 +1028,7 @@ good_run = {"model": "st-gcn++ pretrained", "accuracy": 0.8, "macro_f1": 0.7, "t
 def reference(**top):
     p = tmp / "ref.json"
     p.write_text(json.dumps({"seed": 0, "balanced": False, "include_v6": False, "epochs": 30,
+                             "val_videos": ["V2", "V5", "V9"],   # as the real 09-22 reference records
                              "results": [good_run], **top}), encoding="utf-8")
     return p
 
@@ -837,6 +1040,11 @@ raises("a reference without stgcnpp_epochs is refused (the 09-16 file: 30 for th
 raises("another seed is refused", lambda: train_classifier.reference_metrics(reference(stgcnpp_epochs=20, seed=1), 0, 50))
 raises("another pretrained checkpoint is refused", lambda: train_classifier.reference_metrics(
     reference(stgcnpp_epochs=20, results=[{**good_run, "pretrained_from": {"sha256": "0" * 64}}]), 0, 50))
+raises("a reference from the athlete-disjoint split is refused for its split (O55)",
+       lambda: train_classifier.reference_metrics(
+           reference(stgcnpp_epochs=20, val_videos=["V2", "V3", "V5", "V9"]), 0, 50))
+raises("a reference that does not say what it held out is refused",
+       lambda: train_classifier.reference_metrics(reference(stgcnpp_epochs=20, val_videos=None), 0, 50))
 
 print("run_baseline saves the model it scored")
 from run_baseline import run_stgcnpp  # noqa: E402
@@ -850,6 +1058,343 @@ reloaded = STGCNPP(); reloaded.load_state_dict(torch.load(tmp / "saved.pt", weig
 with torch.no_grad():
     again = reloaded(prepare_input(xs[18:], 50)).argmax(1).numpy()
 check("the saved state_dict reproduces the predictions run_stgcnpp scored", np.array_equal(again, r["_pred"]))
+# The matrix the manifest records, counted by hand from the saved model's own predictions: rows true, columns
+# predicted. Independent of sklearn's convention, so a transposed record fails here.
+by_hand = [[0] * len(CLASSES) for _ in CLASSES]
+for t_, p_ in zip(ys[18:], again):
+    by_hand[int(t_)][int(p_)] += 1
+held = train_classifier.held_out_block(r)
+check("the manifest's held-out block records the saved model's confusion matrix, rows true",
+      held["confusion"] == by_hand and held["accuracy"] == r["accuracy"] and held["per_class_f1"] == r["per_class_f1"],
+      f"{held['confusion']} vs {by_hand}")
+check("... and the matrix is not symmetric, so this test can tell it from its transpose",
+      by_hand != [list(c_) for c_ in zip(*by_hand)], str(by_hand))
+check("... as plain integers (JSON-safe)", all(type(v) is int for row_ in held["confusion"] for v in row_))
+raises("a run with no matrix is not recorded as if it had one",
+       lambda: train_classifier.held_out_block({k: v for k, v in r.items() if k != "confusion"}))
+
+print("per-hand finder rows, point labels and framing marks")
+# A jab and a cross 0.25 s apart, then a lone jab: the per-hand finder reports both hands of the combination.
+xyc = body(n, fps, punches=[3.0, 8.0], hand=0).xy.copy()
+xyc[:, 10] = body(n, fps, punches=[3.25], hand=1).xy[:, 10]
+pose_yolo.PoseSequence(xyc.astype(np.float32), cf, np.ones(n, bool), fps, 1080, 1920, "IMG_5050.mov", "test").save(
+    tmp / "IMG_5050.pose.npz")
+find_punches.main(["--pose", str(tmp / "IMG_5050.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "ph"),
+                   "--per-hand"])
+ph_rows = list(csv.DictReader((tmp / "ph" / "IMG_5050.punches.csv").open(encoding="utf-8")))
+check("control: the per-hand finder reports the combination's two hands", [r["hand"] for r in ph_rows][:2] == ["left", "right"],
+      str([(r["frame"], r["hand"]) for r in ph_rows]))
+args_ph = ["--pose", str(tmp / "IMG_5050.pose.npz"), "--punches", str(tmp / "ph" / "IMG_5050.punches.csv"),
+           "--classifier", str(mpath), "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox",
+           "--out-dir", str(tmp / "ph")]
+check("per-hand rows are accepted: each is a peak of its own hand above the rule's threshold",
+      classify_punches.main(args_ph) == 0
+      and len(list(csv.DictReader((tmp / "ph" / "IMG_5050.classified.csv").open(encoding="utf-8")))) == len(ph_rows))
+# Point labels: a click inside each punch; the lone jab marked 'unclear' (framing).
+lab50 = tmp / "IMG_5050.labels.json"
+clicks = [(int(r["frame"]) + 5, l_) for r, l_ in zip(ph_rows, ("jab", "cross", "unclear"))]
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [{"start": f_, "end": f_, "label": l_} for f_, l_ in clicks]}),
+                 encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+s50 = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("point labels: the finder found 2 of the 2 punches, and 2 of its 3 detections were real",
+      s50["finder"] == {"per_hand": True, "labelled_punches": 2, "detections": 3, "matched": 2, "recall": 1.0,
+                        "precision": 2 / 3}
+      and s50["point_labels"] == 2 and s50["unclear_means"] == "not-a-punch", str(s50["finder"]))
+check("the framing mark that drew a detection is reported, with what the classifier called it",
+      s50["framing"]["marks"] == 1 and s50["framing"]["flagged_as_punches_at_least"] == 1
+      and s50["framing"]["flagged_as_punches_at_most"] == 1
+      and sum(s50["framing"]["lower_bound_named_as"].values()) == 1
+      and set(s50["framing"]["lower_bound_named_as"]) <= set(CLASSES) | {"unclassified"}, str(s50["framing"]))
+check("point labels have no start and end, so the 'from labelled frames' reading is empty, and no length is claimed",
+      s50["labelled_punch_from_labelled_frames"]["n"] == 0 and s50["labelled_length_s_median"] is None
+      and s50["window_iou_with_labels"]["n"] == 0, str(s50))
+check("... while the perfect-finder reading uses the speed peak within 0.2 s of each click",
+      s50["labelled_punch_by_clip_window_at_its_peak"]["n"] == 2)
+# A click on a still frame just before the lone jab, within 0.2 s of its speed peak: the point rule finds the
+# peak; reading the click as a one-frame span would find no wrist speed there.
+tr50 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_5050.pose.npz").to_track(usable_only=False), 3)
+sg50 = punchfind.wrist_signal(tr50, "relative")
+jab_peak = int(ph_rows[2]["frame"])
+still = [f_ for f_ in range(jab_peak - 11, jab_peak + 12) if sg50[f_].max() == 0]   # the wrist at rest after the punch
+check("control: there is a still frame within 0.2 s of the jab's speed peak", bool(still))
+still_click = min(still, key=lambda f_: abs(f_ - jab_peak))
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": still_click, "end": still_click, "label": "jab"}]}), encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50)])
+s_still = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("a click on a still frame within 0.2 s of a punch's peak is read at that peak, not at the click",
+      s_still["labelled_punch_by_clip_window_at_its_peak"]["n"] == 1
+      and s_still["labelled_punch_by_clip_window_unclassifiable"] == 0, f"click {still_click}, peak {jab_peak}: {s_still}")
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [{"start": f_, "end": f_, "label": l_} for f_, l_ in clicks]}),
+                 encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50)])
+s50p = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("with 'unclear' as a punch (the default), all 3 are punches and there is no framing report",
+      s50p["finder"]["labelled_punches"] == 3 and s50p["finder"]["matched"] == 3 and "framing" not in s50p, str(s50p["finder"]))
+# Mixed labels: a drag 15 frames long, a click, and a framing click. The length is the drag's alone.
+f0 = int(ph_rows[0]["frame"])
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": f0 - 5, "end": f0 + 10, "label": "jab"}, {"start": clicks[1][0], "end": clicks[1][0], "label": "cross"},
+    {"start": clicks[2][0], "end": clicks[2][0], "label": "unclear"}]}), encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+smix = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("mixed labels: the labelled length is the drags' median (15 frames), the clicks are not zero-length punches",
+      smix["labelled_length_s_median"] is not None and abs(smix["labelled_length_s_median"] - 15 / fps) < 1e-9
+      and smix["point_labels"] == 1, str(smix["labelled_length_s_median"]))
+# Every label a framing mark: nothing to score as a punch, and no crash.
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": f_, "end": f_ + 10, "label": "unclear"} for f_, _ in clicks]}), encoding="utf-8")
+check("every label a framing mark: scored without a crash",
+      classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"]) == 0)
+sall = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))
+check("... with no punch to find, no length claimed, and all 3 marks reported",
+      sall["finder"]["labelled_punches"] == 0 and sall["finder"]["recall"] is None
+      and sall["labelled_length_s_median"] is None and sall["framing"]["marks"] == 3, str(sall))
+# A framing click beside the lone jab's click: the jab takes the one detection there, so the mark is 0 to 1.
+f2 = int(ph_rows[2]["frame"])
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": f2 + 2, "end": f2 + 2, "label": "jab"}, {"start": f2 + 4, "end": f2 + 4, "label": "unclear"}]}),
+    encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+snear = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))["framing"]
+check("a framing mark whose only detection a punch took is reported as 0 to 1, with nothing named",
+      snear["flagged_as_punches_at_least"] == 0 and snear["flagged_as_punches_at_most"] == 1
+      and snear["lower_bound_named_as"] == {}, str(snear))
+# The jab-cross: both detections are within reach of a click between them, the framing click 8 frames after the
+# cross reaches only the cross. The greedy gives the punch the jab, but a punch matching that takes the cross is
+# just as large and leaves the mark nothing: 0 to 1, not 1. A second framing click on a still stretch draws nothing.
+d0, d1 = int(ph_rows[0]["frame"]), int(ph_rows[1]["frame"])
+pc, fc, still_f = (d0 + d1) // 2, d1 + 8, int(12 * fps)
+tol50 = int(round(find_punches.TOL_S * fps))
+check("control: both detections reach the punch click, only the cross reaches the framing click, the greedy gives the "
+      "punch the jab, and nothing is near the still click",
+      abs(d0 - pc) <= 12 and abs(d1 - pc) <= 12 and abs(d1 - fc) <= 12 and abs(d0 - fc) > 12
+      and punchfind.match([d0, d1], punchfind.for_matching([Span(pc, pc, 0)], tol50, 12), tol50) == [(0, 0)]
+      and all(abs(int(r["frame"]) - still_f) > 12 for r in ph_rows), f"{d0} {d1} {pc} {fc}")
+lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": pc, "end": pc, "label": "jab"}, {"start": fc, "end": fc, "label": "unclear"},
+    {"start": still_f, "end": still_f, "label": "unclear"}]}), encoding="utf-8")
+classify_punches.main(args_ph + ["--labels", str(lab50), "--unclear", "not-a-punch"])
+sx = json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))["framing"]
+check("framing bounds hold whichever maximum punch matching is chosen: 0 to 1 of 2, nothing named as certain",
+      sx == {"marks": 2, "flagged_as_punches_at_least": 0, "flagged_as_punches_at_most": 1,
+             "lower_bound_named_as": {}}, str(sx))
+
+print("per-hand rows where the OTHER hand is faster, and the read sites")
+# Both hands punch together, the right at half the left's reach: each hand peaks at the same frames, the left
+# faster. The per-hand finder reports the right hand's own peaks too; each is a peak of the right hand, so it
+# is accepted although the left is faster there. (A faster-hand rule would refuse every right-hand row.)
+xys = body(n, fps, punches=[3.0, 8.0, 13.0], hand=0).xy.copy()
+base_r = body(n, fps).xy[:, 10]
+xys[:, 10] = base_r + 0.5 * (body(n, fps, punches=[3.0, 8.0, 13.0], hand=1).xy[:, 10] - base_r)
+pose_yolo.PoseSequence(xys.astype(np.float32), cf, np.ones(n, bool), fps, 1080, 1920, "IMG_5151.mov", "test").save(
+    tmp / "IMG_5151.pose.npz")
+find_punches.main(["--pose", str(tmp / "IMG_5151.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "sl"),
+                   "--per-hand"])
+sl_rows = list(csv.DictReader((tmp / "sl" / "IMG_5151.punches.csv").open(encoding="utf-8")))
+tr51 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_5151.pose.npz").to_track(usable_only=False), 3)
+sg51 = punchfind.wrist_signal(tr51, "relative")
+slower = [r for r in sl_rows if r["hand"] == "right"
+          and sg51[int(np.flatnonzero(tr51.frame_ids == int(r["frame"]))[0])].argmax() == 0]
+check("control: the per-hand finder reports right-hand rows at frames where the left hand is faster",
+      len(slower) >= 3, str([(r["frame"], r["hand"]) for r in sl_rows]))
+args_sl = ["--pose", str(tmp / "IMG_5151.pose.npz"), "--punches", str(tmp / "sl" / "IMG_5151.punches.csv"),
+           "--classifier", str(mpath), "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox",
+           "--out-dir", str(tmp / "sl")]
+check("a per-hand row is accepted when the other hand is faster at its frame (judged on its own hand)",
+      accepted(lambda: classify_punches.main(args_sl))
+      and len(list(csv.DictReader((tmp / "sl" / "IMG_5151.classified.csv").open(encoding="utf-8")))) == len(sl_rows))
+# The same with the right hand's punches 2 frames later: at the right hand's own peak the left is faster AND
+# on its slope, so the faster hand's curve has a faster neighbour there. Judged on the row's own hand, the row
+# is a peak and is accepted; judged on the faster hand's curve it would be refused.
+xyo = body(n, fps, punches=[3.0, 8.0, 13.0], hand=0).xy.copy()
+xyo[:, 10] = base_r + 0.5 * (body(n, fps, punches=[3.0 + 2 / fps, 8.0 + 2 / fps, 13.0 + 2 / fps],
+                                  hand=1).xy[:, 10] - base_r)
+pose_yolo.PoseSequence(xyo.astype(np.float32), cf, np.ones(n, bool), fps, 1080, 1920, "IMG_5252.mov", "test").save(
+    tmp / "IMG_5252.pose.npz")
+find_punches.main(["--pose", str(tmp / "IMG_5252.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "so"),
+                   "--per-hand"])
+so_csv = tmp / "so" / "IMG_5252.punches.csv"
+so_rows = list(csv.DictReader(so_csv.open(encoding="utf-8")))
+tr52 = punchfind.bridge(pose_yolo.PoseSequence.load(tmp / "IMG_5252.pose.npz").to_track(usable_only=False), 3)
+sg52 = punchfind.wrist_signal(tr52, "relative")
+best52 = sg52.max(axis=1)
+row52 = {int(f_): k for k, f_ in enumerate(tr52.frame_ids)}
+offset = [r for r in so_rows if r["hand"] == "right" and sg52[row52[int(r["frame"])]].argmax() == 0
+          and (best52[row52[int(r["frame"])] - 1] > best52[row52[int(r["frame"])]]
+               or best52[row52[int(r["frame"])] + 1] > best52[row52[int(r["frame"])]])]
+check("control: right-hand rows where the left is faster and the faster hand's curve has a faster neighbour",
+      len(offset) >= 3, str([(r["frame"], r["hand"]) for r in so_rows]))
+args_so = ["--pose", str(tmp / "IMG_5252.pose.npz"), "--punches", str(so_csv), "--classifier", str(mpath),
+           "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox", "--out-dir", str(tmp / "so")]
+check("a per-hand row is accepted when the other hand is faster and on its slope there (local peak of its own hand)",
+      accepted(lambda: classify_punches.main(args_so)))
+good_so = so_csv.read_text(encoding="utf-8")
+fo = int(offset[0]["frame"])
+rising = [f_ for f_ in range(fo - 6, fo) if sg52[row52[f_], 1] >= 1.0 and sg52[row52[f_ + 1], 1] > sg52[row52[f_], 1]]
+check("control: that right-hand punch is above the threshold and still rising just before its peak", bool(rising))
+so_csv.write_text(good_so.replace(f"{fo},{fo / fps:.3f},right,",
+                                  f"{rising[-1]},{rising[-1] / fps:.3f},right,"), encoding="utf-8")
+raises("... while a row on that hand's own rising slope is still refused", lambda: classify_punches.main(args_so))
+so_csv.write_text(good_so, encoding="utf-8")
+
+print("the pooled finder's own check, applied when the verified sidecar says pooled")
+
+
+def sg(left, right):
+    return np.array([left, right], dtype=float).T
+
+
+own, pooled = classify_punches.own_hand_peak, classify_punches.pooled_peak
+s_ = sg([0, 5, 3], [6, 1, 0])   # the left is faster at frame 1 and at its own peak; the max [6, 5, 3] is not
+check("a faster hand's own peak that is not a peak of the two hands' max: either finder's check passes it, "
+      "the pooled one refuses it", own(s_, 1, 0, 1.0) and not pooled(s_, 1, 0, 1.0))
+s_ = sg([0, 6, 0], [0, 3, 0])
+check("a slower hand's own peak: passed per hand, refused pooled; the faster hand there passes both",
+      own(s_, 1, 1, 1.0) and not pooled(s_, 1, 1, 1.0) and own(s_, 1, 0, 1.0) and pooled(s_, 1, 0, 1.0))
+s_ = sg([0, 4, 0], [0, 4, 0])
+check("an exact tie: the pooled finder names the left (np.argmax), so a right-hand row is refused pooled",
+      pooled(s_, 1, 0, 1.0) and not pooled(s_, 1, 1, 1.0) and own(s_, 1, 1, 1.0))
+s_ = sg([0, 6, 0], [0, 3, 0])
+check("the pooled check still needs the threshold and a strict neighbourhood",
+      not pooled(s_, 1, 0, 6.5) and pooled(s_, 1, 0, 6.0) and not pooled(sg([0, 6, 7], [0, 0, 0]), 1, 0, 1.0))
+from scipy.signal import find_peaks  # noqa: E402 -- what punchfind.detect calls
+
+for left, right in (([0, 4, 4, 4, 0], [0, 1, 1, 1, 0]), ([0, 4, 4, 0], [0, 1, 1, 0])):
+    s_ = sg(left, right)
+    pk_pooled, pk_own = find_peaks(s_.max(axis=1))[0], find_peaks(s_[:, 0])[0]
+    check(f"a flat-topped peak {left}: the row find_peaks reports (equal neighbours) passes both checks",
+          len(pk_pooled) == 1 and list(pk_pooled) == list(pk_own)
+          and own(s_, int(pk_pooled[0]), 0, 1.0) and pooled(s_, int(pk_pooled[0]), 0, 1.0), str(pk_pooled))
+check("the first and last rows are judged on their one neighbour, by both checks",
+      pooled(sg([6, 3], [0, 0]), 0, 0, 1.0) and pooled(sg([3, 6], [0, 0]), 1, 0, 1.0)
+      and not pooled(sg([3, 6], [0, 0]), 0, 0, 1.0)
+      and own(sg([6, 3], [0, 0]), 0, 0, 1.0) and own(sg([3, 6], [0, 0]), 1, 0, 1.0)
+      and not own(sg([3, 6], [0, 0]), 0, 0, 1.0))
+check("... the first row is not compared with the LAST (no wrap-around through index -1)",
+      pooled(sg([6, 3, 9], [0, 0, 0]), 0, 0, 1.0) and own(sg([6, 3, 9], [0, 0, 0]), 0, 0, 1.0))
+check("own-hand check: no speed, below threshold, or a faster neighbour of that hand are refused",
+      not own(sg([0, 0, 0], [0, 0, 0]), 1, 0, 0.0) and not own(sg([0, 2, 0], [0, 0, 0]), 1, 0, 2.5)
+      and not own(sg([0, 2, 3], [9, 9, 9]), 1, 0, 1.0) and own(sg([0, 2, 0], [9, 9, 9]), 1, 0, 1.0))
+
+# Through the script: IMG_5151 (both hands together, the right at half reach), found by the POOLED finder,
+# which names only the faster left hand. A right-hand row at one of the right's own peaks is added.
+find_punches.main(["--pose", str(tmp / "IMG_5151.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "pl")])
+pl_csv, pl_side = tmp / "pl" / "IMG_5151.punches.csv", tmp / "pl" / "IMG_5151.punches.json"
+pl_good, pl_side_good = pl_csv.read_text(encoding="utf-8"), pl_side.read_text(encoding="utf-8")
+pl_rows = list(csv.DictReader(pl_csv.open(encoding="utf-8")))
+r_extra = slower[0]   # a right-hand per-hand row of the same pose: the right's own peak, the left faster there
+check("control: the pooled list names only the left hand, and lacks the right's peak at that frame",
+      {r["hand"] for r in pl_rows} == {"left"}
+      and (r_extra["frame"], "right") not in {(r["frame"], r["hand"]) for r in pl_rows}, str(pl_rows))
+args_pl = ["--pose", str(tmp / "IMG_5151.pose.npz"), "--punches", str(pl_csv), "--classifier", str(mpath),
+           "--rule", str(rule), "--extent", str(extent_file), "--stance", "orthodox", "--out-dir", str(tmp / "pl")]
+check("control: the pooled finder's own list, with its sidecar, passes the pooled check",
+      accepted(lambda: classify_punches.main(args_pl)))
+with_extra = pl_good + f"{r_extra['frame']},{r_extra['time_s']},right,{r_extra['peak_speed_bl_per_s']},no\n"
+
+
+def pooled_case(per_hand_value):
+    """The pooled list plus the right-hand row; the sidecar re-hashed to it and saying `per_hand_value`
+    (None: no sidecar). Returns the refusal message, or '' if accepted."""
+    pl_csv.write_text(with_extra, encoding="utf-8")
+    if per_hand_value is None:
+        pl_side.unlink()
+    else:
+        pl_side.write_text(json.dumps(json.loads(pl_side_good) | {
+            "per_hand": per_hand_value, "csv_sha256": hashlib.sha256(pl_csv.read_bytes()).hexdigest()}),
+            encoding="utf-8")
+    try:
+        return refusal(lambda: classify_punches.main(args_pl))
+    finally:
+        pl_csv.write_text(pl_good, encoding="utf-8")
+        pl_side.write_text(pl_side_good, encoding="utf-8")
+
+
+m_pooled = pooled_case(False)
+check("a verified pooled sidecar: a slower hand's own peak is refused, naming the pooled finder",
+      "says the pooled finder made this list" in m_pooled, m_pooled)
+check("... the same row with a per-hand sidecar is accepted (each hand's own peaks)", pooled_case(True) == "")
+check("... and with no sidecar (unknown) it is accepted too: a missing sidecar never tightens or loosens",
+      pooled_case(None) == "")
+check("control: the files are restored", pl_csv.read_text(encoding="utf-8") == pl_good
+      and pl_side.read_text(encoding="utf-8") == pl_side_good)
+
+# Both pipeline read sites go through classify.read_clip_window: on a clip with fewer than 5 punches the
+# cut is the training window, which only read_clip_window reads with cut_window's own frames (#14).
+calls, real_read = [], classify.read_clip_window
+
+
+def spy(track_, peak, cut_, *rest, **kw):
+    calls.append((int(peak), cut_.source))
+    return real_read(track_, peak, cut_, *rest, **kw)
+
+
+classify.read_clip_window = spy
+try:
+    classify_punches.main(args_ph)
+    no_labels = list(calls)
+    calls.clear()
+    lab50.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+        {"start": f_, "end": f_, "label": l_} for f_, l_ in clicks]}), encoding="utf-8")
+    classify_punches.main(args_ph + ["--labels", str(lab50)])
+    with_labels = list(calls)
+finally:
+    classify.read_clip_window = real_read
+check("control: this clip has fewer than 5 punches, so its cut is the training window",
+      len(ph_rows) < classify.MIN_CLIP_PUNCHES and {s_ for _, s_ in no_labels} == {"training"}, str(no_labels))
+check("the pipeline reads every finder row through read_clip_window, at the row's own frame",
+      sorted(f_ for f_, _ in no_labels) == sorted(int(r["frame"]) for r in ph_rows), str(no_labels))
+check("... and the perfect-finder reading reads each named labelled punch through it too (3 rows + 2 named)",
+      len(with_labels) == len(ph_rows) + 2 and {s_ for _, s_ in with_labels} == {"training"}, str(with_labels))
+
+print("which finder made the punch list: recorded from the sidecar find_punches.py writes")
+prov50 = json.loads((tmp / "ph" / "IMG_5050.classified.json").read_text(encoding="utf-8"))
+check("a per-hand list is recorded as per-hand, in the provenance and the score",
+      prov50["finder_per_hand"] is True and sx is not None
+      and json.loads((tmp / "ph" / "IMG_5050.classify_score.json").read_text(encoding="utf-8"))["finder"]["per_hand"] is True)
+classify_punches.main(args8)
+check("a pooled list is recorded as pooled",
+      json.loads((tmp / "o" / "IMG_8888.classified.json").read_text(encoding="utf-8"))["finder_per_hand"] is False)
+side50 = tmp / "ph" / "IMG_5050.punches.json"
+good_side = side50.read_text(encoding="utf-8")
+
+
+def per_hand_with(sidecar_text):
+    if sidecar_text is None:
+        side50.unlink()
+    else:
+        side50.write_text(sidecar_text, encoding="utf-8")
+    classify_punches.main(args_ph)
+    side50.write_text(good_side, encoding="utf-8")
+    return json.loads((tmp / "ph" / "IMG_5050.classified.json").read_text(encoding="utf-8"))["finder_per_hand"]
+
+
+gs = json.loads(good_side)
+check("no sidecar: unknown (null), not a guess", per_hand_with(None) is None)
+check("a sidecar hashed to other bytes than the CSV holds: unknown",
+      per_hand_with(json.dumps(gs | {"csv_sha256": "0" * 64})) is None)
+check("a sidecar for another clip: unknown", per_hand_with(json.dumps(gs | {"clip": "IMG_8888"})) is None)
+check("a sidecar whose per_hand is not a boolean: unknown", per_hand_with(json.dumps(gs | {"per_hand": "yes"})) is None)
+check("a sidecar for another rule than this run's: unknown",
+      per_hand_with(json.dumps(gs | {"rule": gs["rule"] | {"threshold": gs["rule"]["threshold"] + 0.5}})) is None)
+check("a sidecar that is not JSON: unknown, not a crash", per_hand_with("{not json") is None)
+deep = "[" * 30000 + "]" * 30000
+check("control: the deeply nested sidecar is under the size cap", len(deep.encode()) < 64_000)
+raises("control: ... and json itself cannot parse it", lambda: json.loads(deep), RecursionError)
+check("a deeply nested sidecar (RecursionError in json): unknown, not a crash", per_hand_with(deep) is None)
+check("control: the untouched sidecar is read", per_hand_with(good_side) is True)
+
+print("classify_punches.attribute: widened for eligibility, attributed by the label's own instant")
+pt_c = [Span(1, 1, 0)]                    # a point label at frame 1; tol 3, point tol 6 widen it to [0, 4]
+check("detections [1, 2] give the frame-1 point detection 1 (the widened span's middle is 2)",
+      classify_punches.attribute([1, 2], pt_c, 3, 6) == [(0, 0)], str(classify_punches.attribute([1, 2], pt_c, 3, 6)))
+check("a detection only the widened span reaches still matches the point (eligibility is the widened span)",
+      classify_punches.attribute([7], pt_c, 3, 6) == [(0, 0)] and classify_punches.attribute([8], pt_c, 3, 6) == [])
+two_c = [Span(10, 20, 0), Span(30, 30, 1)]
+check("drag and point labels together: each detection goes to the label whose middle or instant is nearer",
+      classify_punches.attribute([15, 31], two_c, 3, 6) == [(0, 0), (1, 1)])
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

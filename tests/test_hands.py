@@ -177,7 +177,10 @@ check("MIN_CONF and BODY_MIN_JOINTS equal pose_yolo's usable-frame rule",
       punchfind.MIN_CONF == pose_yolo.USABLE_MIN_CONF and punchfind.BODY_MIN_JOINTS == pose_yolo.USABLE_MIN_JOINTS)
 
 print("find_punches CLI")
+import contextlib  # noqa: E402
 import csv  # noqa: E402
+import hashlib  # noqa: E402
+import io  # noqa: E402
 import json  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -234,6 +237,71 @@ find_punches.main(["--pose", str(tmp / "IMG_6666.pose.npz"), "--rule", str(rule)
 check("a 10 s clip gets no chance floor (too few distinct shifts to mean anything)",
       "shift_floor" not in json.loads((tmp / "o" / "IMG_6666.score.json").read_text(encoding="utf-8")))
 
+print("nearest attribution (punchfind.match_nearest)")
+JAB, CROSS = 0, 1
+# A jab 10-18 then a cross 19-26; the finder reports one peak, at the cross's middle (22).
+combo = [Span(10, 18, JAB), Span(19, 26, CROSS)]
+greedy = punchfind.match([22], combo, 4)
+near = punchfind.match_nearest([22], combo, 4)
+check("punchfind.match credits the jab with the cross's detection (why attribution needs match_nearest)",
+      greedy == [(0, 0)], str(greedy))
+check("nearest matching gives that detection to the cross, whose middle it sits on", near == [(1, 0)], str(near))
+# Count comes first: z fits only A; w fits A (nearer) and C. Nearest-per-detection would give both to A.
+a_c = [Span(0, 10, JAB), Span(9, 30, CROSS)]
+check("a maximum matching first: the nearer span is given up when that keeps a hit",
+      punchfind.match_nearest([5, 9], a_c, 0) == [(0, 0), (1, 1)], str(punchfind.match_nearest([5, 9], a_c, 0)))
+rng = np.random.default_rng(3)
+same = True
+for _ in range(200):
+    starts = np.sort(rng.integers(0, 300, 12))
+    sp = [Span(int(s), int(s + rng.integers(3, 20)), int(rng.integers(0, 6))) for s in starts]
+    det = rng.integers(0, 320, int(rng.integers(0, 15)))
+    m = punchfind.match_nearest(det, sp, 3)
+    same &= len(m) == len(punchfind.match(det, sp, 3)) and len({j for _, j in m}) == len(m) \
+        and all(sp[s].start - 3 <= det[j] <= sp[s].end + 3 for s, j in m)
+check("200 random cases: as many hits as punchfind.match, one-to-one, every pair inside span +- tol", bool(same))
+import itertools  # noqa: E402
+
+opt = True
+for _ in range(150):
+    ns, nd = int(rng.integers(1, 6)), int(rng.integers(1, 6))
+    st = np.sort(rng.integers(0, 60, ns))
+    sp = [Span(int(x), int(x + rng.integers(2, 15)), 0) for x in st]
+    det = rng.integers(0, 75, nd)
+    fits = lambda si, di: sp[si].start - 2 <= det[di] <= sp[si].end + 2  # noqa: E731
+    dist = lambda si, di: abs(det[di] - (sp[si].start + sp[si].end) / 2)  # noqa: E731
+    best = (0, 0.0)                              # (hits, -total distance), maximised
+    for perm in itertools.permutations(range(nd), min(ns, nd)):
+        pairs = [(si, di) for si, di in zip(range(ns), perm) if fits(si, di)]
+        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
+    for perm in itertools.permutations(range(ns), min(ns, nd)):   # spans fewer than detections either way
+        pairs = [(si, di) for di, si in zip(range(nd), perm) if fits(si, di)]
+        best = max(best, (len(pairs), -sum(dist(si, di) for si, di in pairs)))
+    m = punchfind.match_nearest(det, sp, 2)
+    opt &= len(m) == best[0] and abs(sum(dist(si, di) for si, di in m) + best[1]) < 1e-9
+check("150 small random cases against brute force: the most hits, then the least total distance", bool(opt))
+check("no detections, or no spans: no pairs", punchfind.match_nearest([], combo, 2) == [] and punchfind.match_nearest([5], [], 2) == [])
+
+raises("negative tolerance refused, as punchfind.match refuses it", lambda: punchfind.match_nearest([1], [Span(0, 1, 0)], -1))
+raises("... even with no detections, before the empty answer", lambda: punchfind.match_nearest([], [Span(0, 1, 0)], -1))
+import scipy.optimize  # noqa: E402
+
+_lsa = scipy.optimize.linear_sum_assignment
+scipy.optimize.linear_sum_assignment = lambda c: (np.array([], int), np.array([], int))   # a solver that drops a hit
+try:
+    raises("a solver answer with fewer hits than punchfind.match is refused, not scored",
+           lambda: punchfind.match_nearest([22], combo, 4), AssertionError)
+finally:
+    scipy.optimize.linear_sum_assignment = _lsa
+check("... and the real solver is back", punchfind.match_nearest([22], combo, 4) == [(1, 0)])
+# The combination as V6 has it: a hook whose span runs into the next, and the finder's one peak at the second's middle.
+hooks = [Span(100, 116, 2), Span(112, 128, 3), Span(200, 210, 2)]
+check("overlapping spans (as 212 of V6's 685 do): the detection goes to the span it sits in the middle of",
+      punchfind.match_nearest([117, 205], hooks, 2) == [(1, 0), (2, 1)]
+      and punchfind.match([117, 205], hooks, 2) == [(0, 0), (2, 1)], str(punchfind.match_nearest([117, 205], hooks, 2)))
+check("pairs come back sorted by span, whatever order the detections arrive in",
+      punchfind.match_nearest([205, 117], hooks, 2) == [(1, 1), (2, 0)], str(punchfind.match_nearest([205, 117], hooks, 2)))
+
 print("coverage is exactly where the signal is")
 walk = body(900, 59.946)
 walk.xy[:, [9, 10]] += np.random.default_rng(3).normal(0, 6, (900, 2, 2)).cumsum(axis=0)  # never still
@@ -255,6 +323,212 @@ raises("no tuned rule file -> refused with what to run",
 rule.write_text(json.dumps({"chosen": {"variant": "sideways", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
 raises("a rule file naming an unknown variant -> refused",
        lambda: find_punches.main(["--pose", str(tmp / "IMG_7777.pose.npz"), "--rule", str(rule)]))
+rule.write_text(json.dumps({"chosen": {"variant": "relative", "threshold": 1.0, "min_gap_s": 0.4}}), encoding="utf-8")
+
+print("point labels: a click inside a punch, not a span")
+pts = [Span(100, 100, 1), Span(300, 320, 2), Span(3, 3, 1)]
+wide = punchfind.for_matching(pts, 6, 12)
+check("a point label is widened so that, with match's own tolerance, it matches within 12 frames; a span is untouched",
+      wide == [Span(94, 106, 1), Span(300, 320, 2), Span(0, 9, 1)], str(wide))
+check("... so a detection 12 frames from the click matches and one 13 frames away does not",
+      punchfind.match([112], wide[:1], 6) == [(0, 0)] and punchfind.match([113], wide[:1], 6) == [])
+check("a point tolerance smaller than match's own changes nothing", punchfind.for_matching(pts, 6, 3)[0] == Span(100, 100, 1))
+raises("a negative tolerance is refused", lambda: punchfind.for_matching(pts, -1, 12))
+check("the point tolerance is half a punch, 0.2 s", punchfind.POINT_TOL_S == 0.2)
+
+print("per-hand finding: a jab-cross faster than the minimum gap")
+combo = body(600, 60.0, punches=[3.0], hand=0)
+combo.xy[:, 10] = body(600, 60.0, punches=[3.25], hand=1).xy[:, 10]   # the right hand 0.25 s after the left
+csig = punchfind.wrist_signal(combo)
+pf, ph = punchfind.detect(combo, csig, 1.0, 0.4)
+hf, hh = punchfind.detect(combo, csig, 1.0, 0.4, per_hand=True)
+check("pooled, the 0.4 s gap makes the two punches one detection", len(pf) == 1, f"{pf} {ph}")
+check("per hand, each hand's punch is found inside its own punch (left 3.0-3.25 s, right 3.25-3.5 s), in frame order",
+      len(hf) == 2 and list(hh) == [0, 1] and hf[0] <= hf[1]
+      and 180 <= hf[0] <= 195 + 6 and 195 <= hf[1] <= 210 + 6, f"{hf} {hh}")
+check("per hand, the gap still applies within a hand: one punch per hand here, not two",
+      list(punchfind.detect(combo, csig, 1.0, 0.4, per_hand=True)[1]).count(0) == 1)
+check("default is the pooled rule (V6-tuned)", np.array_equal(punchfind.detect(combo, csig, 1.0, 0.4)[0], pf))
+check("control: with no minimum gap the pooled finder sees more than one peak in the combination",
+      len(punchfind.detect(combo, csig, 1.0, 0.0)[0]) > len(pf))
+
+print("find_punches: point labels and framing marks")
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": int(3.08 * fps), "end": int(3.08 * fps), "label": "jab"},       # a click 0.08 s after the punch starts
+    {"start": int(9.1 * fps), "end": int(9.1 * fps), "label": "unclear"},    # marked as framing
+    {"start": int(14.05 * fps), "end": int(14.05 * fps), "label": "cross"}]}), encoding="utf-8")
+base = ["--pose", str(tmp / "IMG_7777.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o"), "--labels", str(lab)]
+find_punches.main(base)
+sp_ = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))
+check("'unclear' as a punch (the default): all 3 point labels found, nothing else",
+      sp_["score"]["tp"] == 3 and sp_["score"]["n_labelled"] == 3 and sp_["point_labels"] == 3
+      and sp_["unclear_means"] == "punch" and "framing" not in sp_, str(sp_["score"]))
+find_punches.main(base + ["--unclear", "not-a-punch"])
+sf = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))
+check("'unclear' as framing: 2 punches to find, the detection on the framing mark is a false positive",
+      sf["score"]["n_labelled"] == 2 and sf["score"]["tp"] == 2 and sf["score"]["n_detected"] == 3
+      and abs(sf["score"]["precision"] - 2 / 3) < 1e-12, str(sf["score"]))
+check("... and the framing mark is reported as flagged, at its frame (both bounds 1: no punch near it)",
+      sf["framing"]["marks"] == 1 and sf["framing"]["flagged_as_punches_at_least"] == 1
+      and sf["framing"]["flagged_as_punches_at_most"] == 1 and sf["point_labels"] == 2
+      and len(sf["framing"]["lower_bound_frames"]) == 1
+      and abs(sf["framing"]["lower_bound_frames"][0] - 9.0 * fps) < 0.3 * fps, str(sf["framing"]))
+# A framing mark next to a punch: the punch takes the one detection there, so the mark's count is 0 to 1.
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": int(3.08 * fps), "end": int(3.08 * fps), "label": "jab"},
+    {"start": int(3.2 * fps), "end": int(3.2 * fps), "label": "unclear"},    # framing, inside the same detection's reach
+    {"start": int(9.1 * fps), "end": int(9.1 * fps), "label": "unclear"},
+    {"start": int(14.05 * fps), "end": int(14.05 * fps), "label": "cross"}]}), encoding="utf-8")
+find_punches.main(base + ["--unclear", "not-a-punch"])
+sb = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))["framing"]
+check("a framing mark whose only detection a punch took: reported as 1 to 2 of 2, not as a count of 1",
+      sb["marks"] == 2 and sb["flagged_as_punches_at_least"] == 1 and sb["flagged_as_punches_at_most"] == 2, str(sb))
+find_punches.main(base + ["--per-hand"])
+check("the per-hand choice is recorded with the score",
+      json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))["per_hand"] is True)
+side = json.loads((tmp / "o" / "IMG_7777.punches.json").read_text(encoding="utf-8"))
+check("... and beside the CSV, hashed to it, for classify_punches.py to read",
+      side["per_hand"] is True and side["clip"] == "IMG_7777"
+      and side["csv_sha256"] == hashlib.sha256((tmp / "o" / "IMG_7777.punches.csv").read_bytes()).hexdigest())
+check("... with the CSV's header unchanged",
+      (tmp / "o" / "IMG_7777.punches.csv").read_text(encoding="utf-8").splitlines()[0]
+      == "frame,time_s,hand,peak_speed_bl_per_s,peak_on_interpolated_frame")
+find_punches.main(base)
+check("a pooled run records per_hand false beside its CSV",
+      json.loads((tmp / "o" / "IMG_7777.punches.json").read_text(encoding="utf-8"))["per_hand"] is False)
+
+print("framing bounds: they hold whichever maximum punch matching is chosen")
+P, U = 1, 99   # a punch's label and a framing mark's; framing_bounds does not read labels
+fb = punchfind.framing_bounds([88, 112], [Span(100, 100, P)], [Span(120, 120, U)], 6, 12)
+check("detections at 88 and 112, a punch click at 100, a framing click at 120: a maximal punch matching may take "
+      "112, so at least 0 and at most 1 framing marks were flagged",
+      fb == {"marks": 1, "at_least": 0, "at_most": 1, "lower_set": []}, str(fb))
+greedy = punchfind.match([88, 112], punchfind.for_matching([Span(100, 100, P)], 6, 12), 6)
+check("control: the greedy gives the punch 88, so a count of what it left over would have said 1, not 0",
+      greedy == [(0, 0)] and len(punchfind.match([112], punchfind.for_matching([Span(120, 120, U)], 6, 12), 6)) == 1)
+fb = punchfind.framing_bounds([88, 112, 200], [Span(100, 100, P)], [Span(120, 120, U), Span(205, 205, U)], 6, 12)
+check("a detection in no punch's reach counts toward the lower bound, and is the one listed",
+      fb["at_least"] == 1 and fb["at_most"] == 2 and fb["lower_set"] == [2], str(fb))
+fb = punchfind.framing_bounds([88, 112], [Span(100, 100, P)], [Span(120, 120, U), Span(300, 300, U)], 6, 12)
+check("a framing mark with no detection in reach: the upper bound is below the number of marks",
+      fb["marks"] == 2 and fb["at_most"] == 1, str(fb))
+check("a point punch's reach is +-point_tol: 112 is in it (lower 0), 113 is not (lower 1)",
+      punchfind.framing_bounds([112], [Span(100, 100, P)], [Span(120, 120, U)], 6, 12)["at_least"] == 0
+      and punchfind.framing_bounds([113], [Span(100, 100, P)], [Span(120, 120, U)], 6, 12)["at_least"] == 1)
+check("a drag's reach is its span +-tol: 106 is in it (lower 0), 107 is not (lower 1)",
+      punchfind.framing_bounds([106], [Span(90, 100, P)], [Span(110, 110, U)], 6, 12)["at_least"] == 0
+      and punchfind.framing_bounds([107], [Span(90, 100, P)], [Span(110, 110, U)], 6, 12)["at_least"] == 1)
+check("with no punch labelled the two bounds are the same matching",
+      punchfind.framing_bounds([88, 112], [], [Span(100, 100, U), Span(120, 120, U)], 6, 12)
+      == {"marks": 2, "at_least": 2, "at_most": 2, "lower_set": [0, 1]})
+check("one detection cannot be two framing marks", punchfind.framing_bounds(
+    [100], [], [Span(98, 98, U), Span(102, 102, U)], 6, 12)["at_most"] == 1)
+
+print("find_punches: framing bounds on a real run")
+# A jab-cross 0.25 s apart, per hand: two detections about 15 frames apart, one punch click between them,
+# a framing click 8 frames after the cross, and a framing click on a still stretch.
+xy70 = body(n, fps, punches=[3.0], hand=0).xy.copy()
+xy70[:, 10] = body(n, fps, punches=[3.25], hand=1).xy[:, 10]
+pose_yolo.PoseSequence(xy70.astype(np.float32), np.ones((n, N_JOINTS), np.float32), np.ones(n, bool), fps, 1080,
+                       1920, "IMG_7070.mov", "test").save(tmp / "IMG_7070.pose.npz")
+b70 = ["--pose", str(tmp / "IMG_7070.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o"), "--per-hand"]
+find_punches.main(b70)
+d70 = [int(r["frame"]) for r in csv.DictReader((tmp / "o" / "IMG_7070.punches.csv").open(encoding="utf-8"))]
+check("control: two detections, 13 to 24 frames apart", len(d70) == 2 and 13 <= d70[1] - d70[0] <= 24, str(d70))
+pc, fc = (d70[0] + d70[1]) // 2, d70[1] + 8
+lab70 = tmp / "IMG_7070.labels.json"
+lab70.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": pc, "end": pc, "label": "jab"}, {"start": fc, "end": fc, "label": "unclear"},
+    {"start": int(12 * fps), "end": int(12 * fps), "label": "unclear"}]}), encoding="utf-8")
+tol70 = int(round(find_punches.TOL_S * fps))
+check("control: both detections are within 12 frames of the punch click, only the cross within 12 of the framing click,"
+      " and the greedy gives the punch the jab",
+      abs(d70[0] - pc) <= 12 and abs(d70[1] - pc) <= 12 and abs(d70[1] - fc) <= 12 and abs(d70[0] - fc) > 12
+      and punchfind.match(d70, punchfind.for_matching([Span(pc, pc, P)], tol70, 12), tol70) == [(0, 0)])
+find_punches.main(b70 + ["--labels", str(lab70), "--unclear", "not-a-punch"])
+s70 = json.loads((tmp / "o" / "IMG_7070.score.json").read_text(encoding="utf-8"))
+check("the punch may take either detection, so the framing mark beside it is 0 to 1, and none is listed as certain",
+      s70["framing"] == {"marks": 2, "flagged_as_punches_at_least": 0, "flagged_as_punches_at_most": 1,
+                         "lower_bound_frames": []}, str(s70["framing"]))
+
+print("find_punches: every label a framing mark")
+lab.write_text(json.dumps({"n_frames": n, "fps": fps, "spans": [
+    {"start": int(t_ * fps), "end": int(t_ * fps), "label": "unclear"} for t_ in (3.08, 9.1, 14.05)]}),
+    encoding="utf-8")
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc_all = find_punches.main(base + ["--unclear", "not-a-punch"])
+sall = json.loads((tmp / "o" / "IMG_7777.score.json").read_text(encoding="utf-8"))
+check("scored without a crash, and the score file is written for this run", rc_all == 0
+      and sall["unclear_means"] == "not-a-punch" and sall["score"]["n_labelled"] == 0, str(sall.get("score")))
+check("... recall, F1 and the count ratio undefined (null), precision 0: none of the 3 detections is a punch",
+      sall["score"]["recall"] is None and sall["score"]["f1"] is None and sall["score"]["count_ratio"] is None
+      and sall["score"]["precision"] == 0.0 and sall["score"]["n_detected"] == 3, str(sall["score"]))
+check("... no chance floor (nothing to score a shifted guess against), though the clip is 20 s",
+      "shift_floor" not in sall)
+check("... all 3 marks flagged, by both bounds", sall["framing"]["marks"] == 3
+      and sall["framing"]["flagged_as_punches_at_least"] == 3 and sall["framing"]["flagged_as_punches_at_most"] == 3)
+check("... and it says no punches were labelled, instead of printing 0.000 scores",
+      "no punches labelled" in buf.getvalue() and "recall 0.000" not in buf.getvalue(), buf.getvalue())
+# The same with no detections at all: precision is 0/0 too.
+pose_yolo.PoseSequence(body(n, fps).xy.astype(np.float32), np.ones((n, N_JOINTS), np.float32), np.ones(n, bool),
+                       fps, 1080, 1920, "IMG_7171.mov", "test").save(tmp / "IMG_7171.pose.npz")
+find_punches.main(["--pose", str(tmp / "IMG_7171.pose.npz"), "--rule", str(rule), "--out-dir", str(tmp / "o"),
+                   "--labels", str(lab), "--unclear", "not-a-punch"])
+s71 = json.loads((tmp / "o" / "IMG_7171.score.json").read_text(encoding="utf-8"))
+check("framing-only labels on a still clip: no detections, so precision is null as well, and the 3 marks drew nothing",
+      s71["score"]["n_detected"] == 0 and s71["score"]["precision"] is None and s71["score"]["recall"] is None
+      and s71["framing"]["flagged_as_punches_at_most"] == 0 and s71["framing"]["marks"] == 3, str(s71))
+
+print("detect: eligible x per_hand, keyword-only (#13 x #22)")
+N_ = 60
+tr_ = Track(np.arange(N_), np.zeros((N_, N_JOINTS, 2)), 10.0)     # 10 fps: min_gap 0.4 s = 4 frames
+sg_ = np.zeros((N_, 2))
+sg_[9:14, 0] = [1.0, 5.0, 1.0, 2.0, 1.0]   # left: a large peak at 10 beside a smaller one at 12
+sg_[30, 0], sg_[30, 1] = 3.0, 4.0          # both hands peak on frame 30
+el_ = np.ones((N_, 2), bool)
+el_[10, 0] = False                         # the large peak is not eligible (e.g. a frame skip)
+
+
+def got(**kw):
+    f_, h_ = punchfind.detect(tr_, sg_, 1.5, 0.4, **kw)
+    return list(zip(f_.tolist(), h_.tolist()))
+
+
+combos_ = {
+    ("pooled", "all"): (got(), [(10, 0), (30, 1)]),
+    ("pooled", "eligible"): (got(eligible=el_), [(12, 0), (30, 1)]),
+    ("per_hand", "all"): (got(per_hand=True), [(10, 0), (30, 0), (30, 1)]),
+    ("per_hand", "eligible"): (got(per_hand=True, eligible=el_), [(12, 0), (30, 0), (30, 1)]),
+}
+for (mode_, el_name), (have_, want_) in combos_.items():
+    check(f"detect {mode_}, {el_name} frames: {want_}", have_ == want_, str(have_))
+check("control: without the eligibility mask the large peak at 10 suppresses the eligible one at 12",
+      (12, 0) not in got() and (12, 0) not in got(per_hand=True))
+check("an all-True mask is the original computation, in both modes",
+      got(eligible=np.ones((N_, 2), bool)) == got()
+      and got(per_hand=True, eligible=np.ones((N_, 2), bool)) == got(per_hand=True))
+raises("eligible and per_hand are keyword-only: a fifth positional argument is refused",
+       lambda: punchfind.detect(tr_, sg_, 1.5, 0.4, el_), TypeError)
+raises("an eligibility mask of the wrong shape is refused",
+       lambda: punchfind.detect(tr_, sg_, 1.5, 0.4, eligible=np.ones((N_, 1), bool)))
+
+print("match_nearest: widened spans decide eligibility, the label's own instant decides who")
+pt_ = [Span(1, 1, 0)]                                 # a point label at frame 1
+wide_ = punchfind.for_matching(pt_, 3, 6)             # -> [0, 4]: start clipped at 0, middle 2
+check("control: the widened point near frame 0 has its middle at 2, not 1",
+      (wide_[0].start, wide_[0].end) == (0, 4), str(wide_))
+check("control: by the widened middle, detections [1, 2] give the point to detection 2",
+      punchfind.match_nearest([1, 2], wide_, 3) == [(0, 1)])
+check("with centers = the labels' own instants, detections [1, 2] match the frame-1 point to detection 1",
+      punchfind.match_nearest([1, 2], wide_, 3, centers=punchfind.centers(pt_)) == [(0, 0)],
+      str(punchfind.match_nearest([1, 2], wide_, 3, centers=punchfind.centers(pt_))))
+check("centers of a drag label is its middle, of a point its instant",
+      punchfind.centers([Span(10, 20, 0), Span(7, 7, 1)]).tolist() == [15.0, 7.0])
+raises("centers of the wrong length are refused",
+       lambda: punchfind.match_nearest([1, 2], wide_, 3, centers=np.array([1.0, 2.0])))
+raises("non-finite centers are refused",
+       lambda: punchfind.match_nearest([1, 2], wide_, 3, centers=np.array([np.nan])))
 
 print(f"\n=== {PASS} passed, {FAIL} failed ===")
 sys.exit(1 if FAIL else 0)

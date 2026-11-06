@@ -8,25 +8,33 @@
 
 Writes results/reports/<clip>.report.xlsx (sheets: Punches, Rounds, Reliability,
 About) and <clip>.summary.txt. Refuses unless the CSV is unchanged since
-classify_punches.py wrote it and was named by the classifier --classifier describes
-(the <clip>.classified.json beside it records both hashes). The summary is fixed templates filled with the
+classify_punches.py wrote it, was named by the classifier --classifier describes,
+from this pose (same frames, same fps) and with the --rule finder rule (the
+<clip>.classified.json beside it records all of that); a --score must have scored
+this very CSV. The summary is fixed templates filled with the
 counts; its reliability warnings come from measured numbers (see boxingvi.report),
-and it says so when nothing has been measured on your own footage.
+and it says so when nothing has been measured on your own footage. It leads with a
+warning when the hand each punch type implies matches the wrist that moved less
+often than the report requires (report.HAND_FLOOR), or not significantly more
+often than chance (one-sided exact binomial and Fisher tests, 0.05), and with a
+caution when the check cannot confirm the types at all.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from boxingvi import report  # noqa: E402
+from boxingvi import combos, report  # noqa: E402
 from boxingvi.pose_yolo import PoseSequence  # noqa: E402
 
 DEFAULT_REFERENCE = Path("results/sweep-2026-09-22/seed0.json")   # the run train_classifier.py reproduces
 DEFAULT_RULE = Path("results/punch_finder_v6.json")
+DEFAULT_COMBO_GATE = Path("results/combinations_gate.json")        # score_combinations.py writes it
 DEFAULT_OUT = Path("results/reports")
 
 
@@ -40,6 +48,8 @@ def main(argv=None) -> int:
     ap.add_argument("--rule", type=Path, default=DEFAULT_RULE, help="the punch finder's tuned rule")
     ap.add_argument("--score", type=Path, help="classify_score.json for this clip, if you labelled it")
     ap.add_argument("--rounds", help="round boundaries in seconds, e.g. 0-180,240-420 (default: the whole clip)")
+    ap.add_argument("--combo-gate", type=Path, default=DEFAULT_COMBO_GATE,
+                    help="score_combinations.py's gate result (used only if it matches this classifier, rule, gap)")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     a = ap.parse_args(argv)
 
@@ -51,21 +61,29 @@ def main(argv=None) -> int:
     if not sidecar.is_file():
         raise ValueError(f"no {sidecar.name} beside the CSV: re-run classify_punches.py, which writes it")
     man = report.verify_provenance(a.classified, sidecar, a.classifier, clip)
-    if man["_sidecar"].get("pose_frames") != len(pose):
-        raise ValueError(f"{a.classified.name} was classified on a {man['_sidecar'].get('pose_frames')}-frame "
-                         f"pose; this one has {len(pose)}")
+    side = man["_sidecar"]
+    report.check_pose(side, len(pose), pose.fps)   # frames AND frame rate
     duration = len(pose) / pose.fps
-    rows = report.read_classified(a.classified, duration)
+    rows = report.read_classified(a.classified, duration, fps=pose.fps)
     rounds = report.parse_rounds(a.rounds, duration)
     bench = report.benchmark_reliability(a.reference, man)
-    finder = report.finder_reliability(a.rule)
-    own = report.own_reliability(a.score, clip, man["sha256"]) if a.score else None
+    finder = report.finder_reliability(a.rule, side.get("rule"))
+    own = report.own_reliability(a.score, clip, man["sha256"], side["csv_sha256"]) if a.score else None
 
     facts = report.compute_facts(rows, rounds, duration)
-    text, _ = report.summary(facts, bench, finder, own)
+    runs = combos.group(combos.solo_punches(rows, rounds), pose.fps)
+    # classify_punches.py records the finder mode; a sidecar without it never gets the pooled gate's result
+    mode = side.get("finder_per_hand")
+    cf = combos.compute(runs, report._rule_of(side.get("rule"), "the sidecar")["min_gap_s"], mode is True)
+    gate = (combos.read_gate(a.combo_gate, side.get("rule"), man["sha256"],
+                             mode if isinstance(mode, bool) else None) if a.combo_gate.is_file() else None)
+    text, numbers = report.summary(facts, bench, finder, own, combinations=(cf, gate, False))
+    if Counter(report.numbers_in(text)) != Counter(t for n in numbers for t in report.numbers_in(n)):
+        raise RuntimeError("a number in the summary did not come from its templates")
     a.out_dir.mkdir(parents=True, exist_ok=True)
+    sheet = combos.sheet(runs, lambda p: p["unit"] + 1)
     report.write_workbook(a.out_dir / f"{clip}.report.xlsx", clip, rows, rounds, facts, bench, text, pose.fps,
-                          report.cut_line(man["_sidecar"]))
+                          report.cut_line(side), extra=(("Combinations", sheet),))
     (a.out_dir / f"{clip}.summary.txt").write_text(text + "\n", encoding="utf-8")
     print(text)
     print(f"-> {a.out_dir / f'{clip}.report.xlsx'} and {clip}.summary.txt")
