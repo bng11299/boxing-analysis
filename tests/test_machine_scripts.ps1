@@ -43,6 +43,53 @@ Check 'cuda -> the tag, GPU or not' ((Resolve-TorchBuild 'cuda' 'cu130' { $false
 Check 'auto with an NVIDIA GPU -> the tag' ((Resolve-TorchBuild 'auto' 'cu130' { $true }) -eq 'cu130')
 Check 'auto without one -> cpu' ((Resolve-TorchBuild 'auto' 'cu130' { $false }) -eq 'cpu')
 
+Write-Output 'setup-env: the face blur install'
+$blur = Join-Path $root 'requirements-blur.txt'
+Check 'the deface pin is read from the real requirements-blur.txt' ((Get-Pin $blur 'deface') -eq '1.5.0')
+Check 'the opencv-python pin is read from the real requirements-blur.txt' ((Get-Pin $blur 'opencv-python') -eq '5.0.0.93')
+$cl = Get-ConstraintLines ([ordered]@{ torch = '2.13.0+cu130'; torchvision = '0.28.0+cu130' }) $blur
+Check 'constraints with the pose step: torch, torchvision and the blur OpenCV, nothing else' (($cl -join '|') -eq 'torch==2.13.0+cu130|torchvision==0.28.0+cu130|opencv-python==5.0.0.93') ($cl -join '|')
+$cl = Get-ConstraintLines ([ordered]@{ torch = '2.13.0+cpu' }) $blur
+Check 'constraints for -NoPose: torch and the blur OpenCV' (($cl -join '|') -eq 'torch==2.13.0+cpu|opencv-python==5.0.0.93') ($cl -join '|')
+Set-Content -LiteralPath $r -Value @('deface==1.5.0') -Encoding ASCII
+Throws 'a blur file with no opencv-python pin -> refused' { Get-ConstraintLines ([ordered]@{ torch = '2.13.0+cpu' }) $r } 'found 0'
+$ba = Get-BlurInstallArgs 'B.txt' 'C.txt'
+Check 'the blur file is installed with --no-deps, under the constraints' (($ba -join ' ') -eq '-m pip install --no-deps -r B.txt -c C.txt') ($ba -join ' ')
+
+Write-Output 'setup-env -CheckOnly end to end: the face blur fails closed'
+# A throwaway repo with the real scripts and pins and a bare venv: nothing installed,
+# so it must fail, and say deface is missing. Then a fake deface whose model is not
+# the pinned one: it must fail on the hash.
+$e2e = Join-Path $tmp 'e2e'
+New-Item -ItemType Directory -Path (Join-Path $e2e 'scripts'), (Join-Path $e2e 'src\boxingvi') | Out-Null
+foreach ($f in 'scripts\setup-env.ps1', 'scripts\check_env.py', 'requirements.txt', 'requirements-pose.txt', 'requirements-blur.txt', 'src\boxingvi\faceblur.py') {
+    Copy-Item -LiteralPath (Join-Path $root $f) -Destination (Join-Path $e2e $f) }
+$launcher = $null
+try { $launcher = Find-PyLauncher } catch { Write-Output "  SKIP  no py launcher: $($_.Exception.Message)" }
+$pinned = [regex]::Match((Get-Content -Raw -LiteralPath (Join-Path $root 'src\boxingvi\faceblur.py')), '(?m)^CENTERFACE_SHA256 = "([0-9a-f]{64})"').Groups[1].Value
+Check 'the pinned model hash is read from faceblur.py for the test below' ($pinned.Length -eq 64) $pinned
+if ($launcher) { try {
+    $ErrorActionPreference = 'Continue'
+    & $launcher -3.13 -m venv --without-pip (Join-Path $e2e '.venv')
+    if ($LASTEXITCODE -ne 0) { throw "py -3.13 -m venv exited $LASTEXITCODE" }
+    Check 'the throwaway venv exists (so an exit 1 below is the check, not "NO .venv")' (Test-Path -LiteralPath (Join-Path $e2e '.venv\Scripts\python.exe'))
+    $ps = Join-Path $PSHOME 'powershell.exe'
+    $runCheck = { $o = & $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $e2e 'scripts\setup-env.ps1') -CheckOnly -NoPose -Torch cpu 2>&1 | Out-String; @($LASTEXITCODE, $o) }
+    $code, $out = & $runCheck
+    Check 'no deface in the venv -> -CheckOnly exits 1' ($code -eq 1) "exit $code"
+    Check '... and says deface is not installed' (($out -match 'deface is not installed \(pinned 1\.5\.0\)') -and ($out -match 'import deface\.centerface failed')) $out
+    $site = Join-Path $e2e '.venv\Lib\site-packages\deface'
+    New-Item -ItemType Directory -Path $site | Out-Null
+    Set-Content -LiteralPath (Join-Path $site '__init__.py') -Value '' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $site 'centerface.onnx') -Value 'not the pinned model' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $site 'centerface.py') -Encoding ASCII -Value @(
+        'import os', "default_onnx_path = os.path.join(os.path.dirname(__file__), 'centerface.onnx')",
+        'class CenterFace:', '    def __init__(self, *a, **k):', "        raise SystemExit('the model was parsed before its hash was checked')")
+    $code, $out = & $runCheck
+    Check 'a centerface.onnx that is not the pinned one -> -CheckOnly exits 1' ($code -eq 1) "exit $code"
+    Check '... and names the hash mismatch, without loading it' (($out -match "not the pinned $pinned") -and ($out -notmatch 'parsed before')) $out
+} finally { $ErrorActionPreference = 'Stop' } }
+
 Write-Output 'setup-env: the -Recreate delete guard'
 $fakeRepo = Join-Path $tmp 'repo'
 New-Item -ItemType Directory -Path (Join-Path $fakeRepo '.venv'), (Join-Path $fakeRepo 'data') | Out-Null

@@ -43,3 +43,4 @@ Records are in log order (some iterations live inside another feature's record).
 - 2026-10-28 — [`feat/linker-join-check`](quality/linker-join-check.md)
 - 2026-10-28 — [`feat/combinations`](quality/combinations.md)
 - 2026-10-28 — [`feat/fast-combinations`](quality/fast-combinations.md)
+- 2026-10-22 — [`chore/deface-env`](quality/deface-env.md)

@@ -1,0 +1,10 @@
+# Face blur (blur_faces.py), on BOTH machines, with or without the pose step.
+# Install with scripts\setup-env.ps1, which installs this file with --no-deps:
+# deface declares scikit-image, imageio, tqdm and an unpinned opencv-python, any
+# of which could replace a pinned package. Its CenterFace detector, the only part
+# blur_faces.py uses, needs just cv2 and numpy (requirements.txt).
+# opencv-python parses the pinned centerface.onnx; 5.0.0.93 is the version the
+# blur was measured with (10-22). It is also a constraint on the pose step, so
+# ultralytics (opencv-python>=4.7,!=4.13.0.90) gets this one, not the newest.
+deface==1.5.0
+opencv-python==5.0.0.93
