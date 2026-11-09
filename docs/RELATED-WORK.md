@@ -1,6 +1,7 @@
 # How our numbers compare with published work
 
-Working notes for the poster and paper (checked 2026-11-07). Our numbers come from
+Working notes for the poster and paper (checked 2026-11-07; BoxMAC's status re-checked
+2026-11-09, when it was found withdrawn). Our numbers come from
 `docs/RESULTS.md` and are frozen at tag `results-freeze-2026-11-06`. Other works' numbers are
 as their authors report them; we re-ran none of them.
 
@@ -27,8 +28,8 @@ Three things decide whether two accuracies can be compared:
 |---|---|---|---|---|---|---|
 | **Ours (row 1f)** | BoxingVI, YouTube shadowboxing / bag / pads | 2D pose, ST-GCN++ pretrained, CPU | 6, imbalanced (0.31) | Held-out videos **and athletes** | **77.2% acc, 0.633 macro-F1** (3 seeds) | — |
 | Ours, interpretable (row 1h) | same | 2D pose, hand features + random forest | 6 (0.31) | same | 67.4% acc, 0.494 macro-F1 | — |
-| BoxingVI (Hegde et al., arXiv 2511.16524, 2025) | same dataset | — | 6 | Ships a 5,513 / 1,402 clip split | **No classification result** | Ours is the first baseline. Semantic Scholar lists 0 citing papers as of 2026-11-07 |
-| BoxMAC (arXiv 2412.18204, 2024) | 15 pro boxers, real bouts | RGB; ViT best (CNN and ConvLSTM also tried) | 13 multi-label, punches **plus** defence/stance | Test clips from different videos (boxer overlap not stated) | 70.4–73.9% test acc | **Closest.** Similar band, harder label set, RGB. How multi-label accuracy is computed isn't stated |
+| BoxingVI (Kumar et al., arXiv 2511.16524, 2025; Hegde is the last author) | same dataset | — | 6 | Ships a 5,513 / 1,402 clip split | **No classification result** | Ours is the first baseline. Semantic Scholar lists 0 citing papers as of 2026-11-07 |
+| BoxMAC (arXiv 2412.18204v1, 2024; **withdrawn by its authors 2025-02-17**) | 15 pro boxers, real bouts | RGB; image models (VGG16, VGG19, ResNet-50, ViT) and a video ConvLSTM | 13 multi-label, punches **plus** defence/stance | Test clips from different videos (boxer overlap not stated) | v1 only: 70.4–73.9% test acc on images (ViT best), 71.9% on video | **Not usable as a comparison.** The withdrawal notice says the findings need significant changes and that not all co-authors had agreed to the submission. Keep it off the poster and slides; in the paper, mention it only as a withdrawn preprint, without its numbers |
 | FACTS (arXiv 2412.16454, 2024) | Olympic Boxing (Stefański), league bouts | RGB, VideoMAE | 8 (hand × head / body / block / miss) | Stratified; by boxer or by video not stated | 83.25% acc | Partly. Different classes: target and outcome, not punch type. Head punches score F1 0.62–0.65, body punches 0.97–0.98 |
 | Watanabe & Kameda (icSPORTS 2024) | **Computer-generated** 3D boxing simulation | OpenPose to ST-GCN++ | 4 (jab, straight, hook, uppercut) | Random over synthetic clips | 94% type, 88% hit/miss | **No.** Synthetic footage, random split, no lead/rear distinction. No result on real footage |
 | Bhargav (blog post, not peer-reviewed) | Custom dataset | Pose, PoseConv3D | 6 | Not stated | 87.3% acc | **No.** No stated split or data |
@@ -50,8 +51,9 @@ Frame-level and event-level F1 are different metrics, so this is a rough compari
 
 - **First result on BoxingVI** (77.2% / 0.633), on an athlete-disjoint split the benchmark
   itself doesn't enforce.
-- **In the same band as the closest published RGB work** (BoxMAC 70–74%), using only 2D pose on
-  a CPU. The class sets differ, so state it as "comparable range", not "beats".
+- **No published punch-type result is directly comparable.** The RGB work on real bouts either
+  labels something else (FACTS: target and outcome, not punch type) or has been withdrawn
+  (BoxMAC). State our number beside its own floors, not beside another paper's.
 - **Above JAB AI's developer-stated ~70%.**
 - **The higher published numbers come with easier conditions.** The 87–97% results use
   synthetic footage, sensors, depth cameras, fewer classes, or splits that aren't stated.
@@ -63,7 +65,9 @@ Frame-level and event-level F1 are different metrics, so this is a rough compari
 
 ## Before citing in the paper
 
-- Read BoxMAC's full text for how multi-label accuracy is computed and whether test boxers
-  appear in training.
+- BoxMAC: v2 on arXiv is a withdrawal that promises a revised version; that arXiv record lists
+  no later version as of 2026-11-09 (a version published elsewhere was not searched for). Check
+  again before the paper is final; until a new version exists, do not cite its numbers. v1
+  does not say how multi-label accuracy is computed.
 - Get Kasiri et al. 2017's class count and split; only an excerpt was read here.
-- FACTS and BoxMAC are arXiv preprints. Check whether either has since been peer-reviewed.
+- FACTS is an arXiv preprint. Check whether it has since been peer-reviewed.
