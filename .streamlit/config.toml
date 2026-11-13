@@ -1,0 +1,19 @@
+# Local demo app (docs/commands/demo.md). Run from the repo root: Streamlit reads this file from the
+# folder it is started in.
+
+[server]
+# Loopback only: the app is reachable from this laptop and nothing else on the network.
+address = "127.0.0.1"
+port = 8501
+# No browser auto-open and no first-run e-mail prompt; open http://127.0.0.1:8501 yourself.
+headless = true
+# Keep equal to MAX_UPLOAD_BYTES in src/boxingvi/demo.py (tests/test_demo.py checks it). In MB.
+maxUploadSize = 1024
+# The framework's CORS and XSRF protections stay at their defaults (on).
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Hide the developer menu (Deploy, rerun options) so a visitor sees only the demo.
+toolbarMode = "viewer"
