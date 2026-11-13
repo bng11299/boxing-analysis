@@ -32,6 +32,12 @@ import analyse_clip  # noqa: E402
 from boxingvi import demo  # noqa: E402
 
 PASS = FAIL = 0
+SKIPPED: "list[str]" = []
+
+
+def skip(name: str) -> None:
+    SKIPPED.append(name)
+    print(f"  SKIP  {name}  (UNVERIFIED on this machine)")
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -101,7 +107,7 @@ if make_link(root / "escape", outside):
     refused("a link inside the root that leads out of it is refused", demo.contained, root, "escape/secret.txt")
     check("is_inside follows the link too", not demo.is_inside(root / "escape" / "secret.txt", root))
 else:
-    print("  SKIP  link escape (cannot create a link here)")
+    skip("link escape (cannot create a link here)")
 check("is_inside: a sibling folder with the root's name as prefix is not inside",
       not demo.is_inside(tmp / "root2" / "x", root) and demo.is_inside(root / "sub", root))
 
@@ -114,6 +120,10 @@ refused("a file under a participant folder is refused", demo.refuse_participant,
 refused("the participant folder itself is refused", demo.refuse_participant, proot, roots)
 refused(".. out of a normal folder into the participant folder is refused", demo.refuse_participant,
         tmp / "root" / ".." / "comps-participant-data" / "P01", roots)
+for unc in (r"\\localhost\C$\Users\x\comps-participant-data\P01", r"\\127.0.0.1\C$\comps-participant-data",
+            r"\\?\UNC\localhost\C$\comps-participant-data", r"\\server\share\clips"):
+    refused(f"a network path {unc!a} is refused (a UNC route around the root comparison)", demo.refuse_participant, unc, roots)
+    refused(f"and as a folder the app is pointed at: {unc!a}", demo.check_folder, unc, roots)
 check("an ordinary folder is accepted", demo.refuse_participant(root, roots) == root.resolve())
 refused("the real default participant folder is refused (it need not exist)", demo.refuse_participant,
         Path.home() / "comps-participant-data" / "x.mp4")
@@ -131,7 +141,7 @@ if make_link(root / "to-participant", proot / "P01"):
     refused("a link from a normal folder into a participant folder is refused", demo.check_folder,
             root / "to-participant", roots)
 else:
-    print("  SKIP  link to participant folder (cannot create a link here)")
+    skip("link to participant folder (cannot create a link here)")
 refused("deleting uploads in a participant folder is refused", demo.delete_upload, proot, "upload_20260101_000000_abcdef",
         roots)
 
@@ -177,7 +187,7 @@ try:
     check("an output that is a link leading outside the folder is excluded",
           "IMG_0008" not in [c.name for c in demo.find_clips(linked)])
 except OSError:
-    print("  SKIP  file symlink (cannot create one here)")
+    skip("file symlink (cannot create one here)")
 
 # ------------------------------------------------------------------ upload names and extensions ---
 print("upload names and extensions")
@@ -221,9 +231,22 @@ check("the cap in the code equals the cap in .streamlit/config.toml",
       == demo.MAX_UPLOAD_BYTES // (1024 * 1024))
 check("list_uploads lists stored uploads, newest name first, and nothing else",
       [x.name for x in demo.list_uploads(up)] == sorted((p.name, p2.name), reverse=True))
-check("find_upload finds a stored upload by its name", demo.find_upload(up, p.stem) == p.resolve())
-check("find_upload refuses a name this app did not make", demo.find_upload(up, "IMG_4406") is None
-      and demo.find_upload(up, "upload_../x") is None)
+# S1: a name collision must never destroy the file already there
+_real_hex = demo.secrets.token_hex
+demo.secrets.token_hex = lambda n=3: "abcdef"
+pin = datetime(2030, 1, 2, 3, 4, 5)
+first = demo.save_upload(up, "a.mp4", io.BytesIO(b"FIRST"), now=pin)
+try:
+    demo.save_upload(up, "b.mp4", io.BytesIO(b"SECOND"), now=pin)
+    collided = None
+except FileExistsError:
+    collided = True
+except Exception as e:   # noqa: BLE001
+    collided = repr(e)
+demo.secrets.token_hex = _real_hex
+check("a name collision is an error, and the first upload survives it intact",
+      collided is True and first.read_bytes() == b"FIRST", str(collided))
+first.unlink()
 
 # ------------------------------------------------------------------ rounds, stance, device ---
 print("rounds, stance and device")
@@ -256,8 +279,8 @@ out = demo.out_dir_for(up)
 argv = demo.build_analyse_argv(vid, "southpaw", "cpu", "0-30, 40-60", out)
 check("argv is a list of strings, starting with this interpreter",
       isinstance(argv, list) and all(isinstance(a, str) for a in argv) and argv[0] == sys.executable)
-check("argv runs analyse_clip.py by absolute path", Path(argv[argv.index("-u") + 1]) == (ROOT / "analyse_clip.py").resolve()
-      or Path(argv[2]).name == "analyse_clip.py")
+check("argv is: interpreter, -u, analyse_clip.py by absolute path, then only flags and their values",
+      argv[1] == "-u" and Path(argv[2]) == (ROOT / "analyse_clip.py").resolve() and Path(argv[2]).is_absolute())
 check("--stance carries the stance exactly", argv[argv.index("--stance") + 1] == "southpaw" and argv.count("--stance") == 1)
 check("--video and --out-dir are absolute", Path(argv[argv.index("--video") + 1]).is_absolute()
       and Path(argv[argv.index("--out-dir") + 1]).is_absolute())
@@ -265,35 +288,54 @@ check("--device is passed", argv[argv.index("--device") + 1] == "cpu")
 check("rounds are one --rounds=<text> element", "--rounds=0-30, 40-60" in argv)
 check("no --rounds when none was given", not any(a.startswith("--rounds") for a in
                                                  demo.build_analyse_argv(vid, "orthodox", "cpu", "", out)))
-user_text = [argv[argv.index("--stance") + 1], argv[argv.index("--device") + 1]]
-check("no user-supplied element contains a shell metacharacter",
-      not any(set(t) & SHELL_CHARS for t in user_text) and not (set("0-30, 40-60") & SHELL_CHARS - set()))
+user_text = [argv[argv.index("--stance") + 1], argv[argv.index("--device") + 1], "0-30, 40-60"]
+check("no user-supplied element (stance, device, rounds) contains a shell metacharacter",
+      not any(set(t) & SHELL_CHARS for t in user_text))
+check("exactly the expected flags appear, each once",
+      sorted(a for a in argv[3:] if a.startswith("--")) == ["--device", "--out-dir", "--rounds=0-30, 40-60", "--stance", "--video"]
+      and all(argv[3:].count(f) == 1 for f in ("--video", "--stance", "--device", "--out-dir")))
 for stance, device, rounds in (("orthodox; calc", "cpu", None), ("orthodox", "cpu && calc", None),
                                ("orthodox", "cpu", "0-5; calc"), ("orthodox", "cpu", "0-5 | more"), (None, "cpu", None)):
     refused(f"argv is not built for {stance!a}/{device!a}/{rounds!a}", demo.build_analyse_argv, vid, stance, device, rounds, out)
 for bad_video in ("IMG_4406.mov", "my video.mp4", "upload_20260101_000000_abcdef.mp4.exe", "../upload_x.mp4",
                   "upload_20260101_000000_abcdef.avi", "upload_x$(id).mp4", "-upload_x.mp4"):
     refused(f"argv is not built for the video {bad_video!a}", demo.build_analyse_argv, up / bad_video, "orthodox", "cpu", None, out)
-check("a path that starts with - cannot read as an option: video and out-dir come after their flags, absolute",
-      all(not a.startswith("-") or a.startswith(("--", "-u")) for a in argv))
+check("a path cannot read as an option: the value after --video and --out-dir is absolute",
+      all(Path(argv[argv.index(f) + 1]).is_absolute() for f in ("--video", "--out-dir")))
+refused("argv is not built when the output folder is not <uploads>/out (elsewhere)", demo.build_analyse_argv, vid,
+        "orthodox", "cpu", None, tmp / "elsewhere")
+refused("nor for <uploads>/other", demo.build_analyse_argv, vid, "orthodox", "cpu", None, up / "other")
+refused("nor for the uploads folder itself", demo.build_analyse_argv, vid, "orthodox", "cpu", None, up)
 
 # the subprocess seam: a fake Popen records exactly what it is handed
 calls = []
 
 
+class FakeStdout:
+    def __init__(self, lines):
+        self._it = iter(lines)
+        self.closed = False
+
+    def __iter__(self):
+        return self._it
+
+    def close(self):
+        self.closed = True
+
+
 class FakeProc:
-    def __init__(self, lines, rc=0):
-        self.stdout = iter(lines)
-        self._rc = rc
+    def __init__(self, lines, rc=0, running=False):
+        self.stdout = FakeStdout(lines)
+        self._rc, self.killed, self._running = rc, False, running
 
     def wait(self):
         return self._rc
 
     def poll(self):
-        return self._rc
+        return None if (self._running and not self.killed) else self._rc
 
     def kill(self):
-        pass
+        self.killed = True
 
 
 def fake_popen(argv_, **kw):
@@ -311,6 +353,24 @@ check("it never used a shell and gave the child no stdin", kw.get("shell") is Fa
 check("stderr is merged into the stream so errors show in order", kw.get("stderr") == subprocess.STDOUT)
 check("the child makes no network call of its own (YOLO_OFFLINE=1) and is unbuffered",
       kw["env"].get("YOLO_OFFLINE") == "1" and kw["env"].get("PYTHONUNBUFFERED") == "1")
+check("the child is run in its own process group and in UTF-8 (a cp1252 pipe would garble or crash it)",
+      kw["env"].get("PYTHONUTF8") == "1" and ("creationflags" in kw or "start_new_session" in kw))
+dead = FakeProc(["a\n", "b\n"], running=True)
+
+
+def boom(line):
+    raise RuntimeError("the page was rerun")
+
+
+try:
+    demo.run_analyse(argv, on_line=boom, popen=lambda a, **k: dead)
+except RuntimeError:
+    pass
+check("if the page stops mid-run (on_line raises), the child is killed and its pipe closed",
+      dead.killed and dead.stdout.closed)
+finished = FakeProc(["x\n"], rc=0, running=False)
+demo.run_analyse(argv, popen=lambda a, **k: finished)
+check("a child that finished by itself is not killed", not finished.killed and finished.stdout.closed)
 check("a failing child's exit code is returned", demo.run_analyse(argv, popen=lambda a, **k: FakeProc(["err\n"], rc=1)) == 1)
 refused("a command string is refused (list only)", demo.run_analyse, "python analyse_clip.py --video x")
 refused("a list with a non-string is refused", demo.run_analyse, ["python", Path("x")])
@@ -347,12 +407,36 @@ check("ffmpeg ran without a shell", made[0][1].get("shell") is False and isinsta
 check("no temporary file is left next to it", [f.name for f in res.glob("*.tmp.mp4")] == [])
 demo.ensure_web_preview(ov, ffmpeg="ffmpeg", run=fake_run)
 check("a fresh cached preview is not made again", len(made) == 1)
+check("the preview carries its overlay's mtime", w.stat().st_mtime_ns == ov.stat().st_mtime_ns)
 os.utime(ov, (w.stat().st_mtime + 100, w.stat().st_mtime + 100))
 demo.ensure_web_preview(ov, ffmpeg="ffmpeg", run=fake_run)
 check("a preview older than the overlay is made again", len(made) == 2)
+os.utime(ov, (w.stat().st_mtime - 5000, w.stat().st_mtime - 5000))
+demo.ensure_web_preview(ov, ffmpeg="ffmpeg", run=fake_run)
+check("an OLDER overlay put back (restored copy) also makes it again", len(made) == 3)
+import threading  # noqa: E402
+import time  # noqa: E402
+
+w.unlink()
+slow = []
+
+
+def slow_run(argv_, **kw):
+    slow.append(1)
+    time.sleep(0.4)
+    Path(argv_[-1]).write_bytes(b"web")
+    return subprocess.CompletedProcess(argv_, 0, "", "")
+
+
+threads = [threading.Thread(target=demo.ensure_web_preview, args=(ov, "ffmpeg", slow_run)) for _ in range(4)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+check("four sessions asking for one cold preview at once make it once", len(slow) == 1, str(len(slow)))
 w.unlink()
 check("ffmpeg missing: None, so the page offers the original instead of crashing",
-      demo.ensure_web_preview(ov, ffmpeg=None, run=fake_run) is None and len(made) == 2)
+      demo.ensure_web_preview(ov, ffmpeg=None, run=fake_run) is None and len(made) == 3)
 refused("a failing ffmpeg is a refusal, not a crash", demo.ensure_web_preview, ov, "ffmpeg",
         lambda a, **k: subprocess.CompletedProcess(a, 1, "", "boom"))
 refused("an ffmpeg that exits 0 but wrote nothing is a refusal", demo.ensure_web_preview, ov, "ffmpeg",
@@ -385,17 +469,27 @@ known = [
     ("50,2.5,left,4.1,no,lead,jab,0.9,lead,yes,"),
     ("60,3.0,right,5.5,no,rear,cross,0.95,rear,yes,"),
     ("70,3.5,right,5.0,no,rear,,0.1,rear,no,"),
+    ("80,4.0,left,4.0,no,lead,unclassified,0.2,lead,no,"),
 ]
 csvp = tmp / "known.classified.csv"
 csvp.write_text(header + "\n" + "\n".join(known) + "\n", encoding="utf-8")
 s = demo.summarise_punches(csvp)
-check("REAL FACT: a fixture of 3 jabs, 2 crosses, 1 lead hook and 1 unnamed counts exactly so",
-      s.total == 7 and s.counts == {"jab": 3, "cross": 2, "lead_hook": 1, "unnamed": 1}, str(s.counts))
-check("counts come most common first, ties by name", list(s.counts) == ["jab", "cross", "lead_hook", "unnamed"])
+check("REAL FACT: a fixture of 3 jabs, 2 crosses, 1 lead hook, 1 unclassified (the pipeline's word) and 1 blank counts exactly so",
+      s.total == 8 and s.counts == {"jab": 3, "cross": 2, "lead_hook": 1, "unclassified": 1, "unnamed": 1}, str(s.counts))
+check("counts come most common first, ties by name",
+      list(s.counts) == ["jab", "cross", "lead_hook", "unclassified", "unnamed"])
+real_csv = Path(os.environ.get("BOXING_DEMO_REAL_RESULTS", ROOT / "results" / "analyse")) / "IMG_4406.classified.csv"
+if real_csv.is_file():
+    rs = demo.summarise_punches(real_csv)
+    check("REAL FILE: IMG_4406.classified.csv counts 41 punches: 17 jab, 7 cross, 7 rear uppercut, 6 lead hook, 4 lead uppercut",
+          rs.total == 41 and rs.counts == {"jab": 17, "cross": 7, "rear_uppercut": 7, "lead_hook": 6, "lead_uppercut": 4},
+          str(rs.counts))
+else:
+    skip("the real IMG_4406 counts (results/analyse is gitignored; set BOXING_DEMO_REAL_RESULTS to the folder)")
 check("the counts add up to the rows", sum(s.counts.values()) == s.total == len(s.rows))
 check("rows hold exactly the display columns, in file order",
       list(s.rows[0]) == list(demo.TABLE_COLUMNS) and s.rows[3]["punch_type"] == "lead_hook" and s.rows[3]["hands_agree"] == "no"
-      and s.rows[0]["time_s"] == "0.5" and s.rows[6]["confidence"] == "0.1")
+      and s.rows[0]["time_s"] == "0.5" and s.rows[6]["confidence"] == "0.1" and s.rows[7]["punch_type"] == "unclassified")
 no_col = tmp / "nocol.classified.csv"
 no_col.write_text("frame,time_s,hand\n1,0.1,left\n", encoding="utf-8")
 refused("a CSV missing a display column is refused, not shown with a gap", demo.summarise_punches, no_col)
@@ -443,7 +537,30 @@ try:
     check("a link in the outputs is removed as a link; its target survives",
           not (out / f"{name2}.summary.txt").is_symlink() and (tmp / "precious.txt").read_text() == "keep me")
 except OSError:
-    print("  SKIP  file symlink delete (cannot create one here)")
+    skip("file symlink delete (cannot create one here)")
+
+name3 = demo.new_upload_name()
+(up / f"{name3}.mp4").write_bytes(b"v")
+out_shadow = tmp / "uploads_shadow"
+out_shadow.mkdir()
+bait = out_shadow / f"{name3}.summary.txt"
+bait.write_text("outside the uploads folder: must survive")
+real_out = out
+moved = up / "out_moved"
+if real_out.exists():
+    real_out.rename(moved)
+if make_link(real_out, out_shadow):
+    demo.delete_upload(up, name3)
+    check("an out/ that is a link to a folder elsewhere is not followed: what is there survives",
+          bait.read_text() == "outside the uploads folder: must survive" and not (up / f"{name3}.mp4").exists())
+    try:
+        os.rmdir(real_out)
+    except OSError:
+        pass
+else:
+    skip("delete_upload with out/ as a link to an outside folder")
+if moved.exists() and not real_out.exists():
+    moved.rename(real_out)
 
 # ------------------------------------------------------------------ config and source hygiene ---
 print("config and source")
@@ -472,5 +589,7 @@ check("requirements-demo.txt pins exactly; requirements.txt does not mention the
 import shutil  # noqa: E402
 
 shutil.rmtree(tmp, ignore_errors=True)
-print(f"\n=== {PASS} passed, {FAIL} failed ===")
+print(f"\n=== {PASS} passed, {FAIL} failed, {len(SKIPPED)} skipped ===")
+for n in SKIPPED:
+    print(f"  not verified here: {n}")
 sys.exit(1 if FAIL else 0)

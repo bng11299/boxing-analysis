@@ -29,6 +29,7 @@ from boxingvi import demo  # noqa: E402
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 LOG_LINES_KEPT = 500
 LOG_REFRESH_S = 0.4
+VIEW_GALLERY, VIEW_ANALYSE = "Gallery", "Analyse a clip"
 
 
 def parse_cli() -> argparse.Namespace:
@@ -64,9 +65,13 @@ def show_result(clip: demo.Clip, key: str) -> None:
             st.warning("ffmpeg is not installed, so no web preview can be made. "
                        "The original overlay (large) can be downloaded instead.")
         if web is None:
-            size_mb = overlay.stat().st_size / (1024 * 1024)
-            st.download_button(f"Download the original overlay ({size_mb:.0f} MB)", data=overlay.open("rb"),
-                               file_name=overlay.name, mime="video/mp4", key=f"{key}-overlay")
+            try:
+                size_mb = overlay.stat().st_size / (1024 * 1024)
+            except OSError:
+                size_mb = 0.0
+            # a callable: the file is read when the button is clicked, not on every rerun
+            st.download_button(f"Download the original overlay ({size_mb:.0f} MB)", data=lambda: read_bytes(overlay),
+                               file_name=overlay.name, mime="video/mp4", key=f"{key}-overlay", on_click="ignore")
     with text_col:
         st.markdown("**Summary** (exactly as the tool wrote it, caveats included)")
         try:
@@ -81,7 +86,9 @@ def show_result(clip: demo.Clip, key: str) -> None:
     else:
         left, right = st.columns([2, 3])
         with left:
-            st.markdown(f"**Punches by type** ({punches.total} in all)")
+            st.markdown(f"**Punches by type** ({punches.total} in classified.csv)")
+            st.caption("Counts every punch in the file. The summary counts only punches inside the rounds, "
+                       "when rounds were given, so its totals can be smaller.")
             if punches.counts:
                 chart = pd.DataFrame({"punch type": list(punches.counts), "punches": list(punches.counts.values())})
                 st.bar_chart(chart, x="punch type", y="punches", sort="-punches", horizontal=True)
@@ -96,11 +103,13 @@ def show_result(clip: demo.Clip, key: str) -> None:
 
     d1, d2, _ = st.columns([1, 1, 3])
     with d1:
-        st.download_button("Download report.xlsx", data=read_bytes(clip.path("report.xlsx")),
-                           file_name=clip.path("report.xlsx").name, mime=XLSX_MIME, key=f"{key}-xlsx")
+        xlsx = clip.path("report.xlsx")
+        st.download_button("Download report.xlsx", data=lambda: read_bytes(xlsx), file_name=xlsx.name,
+                           mime=XLSX_MIME, key=f"{key}-xlsx", on_click="ignore")
     with d2:
-        st.download_button("Download classified.csv", data=read_bytes(clip.path("classified.csv")),
-                           file_name=clip.path("classified.csv").name, mime="text/csv", key=f"{key}-csv")
+        csv_path = clip.path("classified.csv")
+        st.download_button("Download classified.csv", data=lambda: read_bytes(csv_path), file_name=csv_path.name,
+                           mime="text/csv", key=f"{key}-csv", on_click="ignore")
 
 
 def gallery_tab(results_dir: Path) -> None:
@@ -125,7 +134,7 @@ def run_upload(uploaded, stance: str, device: str, rounds: "str | None", uploads
         uploaded.seek(0)
         stored = demo.save_upload(uploads_dir, uploaded.name, uploaded)
         out_dir = demo.out_dir_for(uploads_dir)
-        argv = demo.build_analyse_argv(stored, stance, device, rounds, out_dir, cuda_available=device != "cpu")
+        argv = demo.build_analyse_argv(stored, stance, device, rounds, out_dir, cuda_available=device in demo.available_devices())
     except (demo.DemoError, OSError) as e:
         st.session_state["run_error"] = str(e)
         return
@@ -154,7 +163,7 @@ def run_upload(uploaded, stance: str, device: str, rounds: "str | None", uploads
 def analyse_tab(uploads_dir: Path) -> None:
     out_dir = demo.out_dir_for(uploads_dir)
     st.warning("**This is slow on a CPU:** pose extraction takes minutes per minute of video, so a long clip "
-               "is not a live-demo job. Use the Gallery for that. Stay on this tab while it runs.")
+               "is not a live-demo job. Use the Gallery for that. Do not touch the page while it runs: any click restarts the page and stops the analysis.")
     st.caption("Own footage only. The clip is stored under the uploads folder with a generated name, "
                "never the name you gave it, and can be deleted below.")
 
@@ -240,11 +249,14 @@ def main() -> None:
     st.title("Single-camera boxing analysis")
     st.caption("Punches found, named and counted from one phone video. Runs on this laptop only; "
                "nothing is uploaded anywhere.")
-    gallery, analyse = st.tabs(["Gallery", "Analyse a clip"])
-    with gallery:
-        gallery_tab(results_dir)
-    with analyse:
+    # Two views styled as tabs. st.tabs would run BOTH on every rerun, so a cold-cache video
+    # transcode in the Gallery would stall the Analyse view too; this runs only the chosen one.
+    view = st.segmented_control("View", [VIEW_GALLERY, VIEW_ANALYSE], default=VIEW_GALLERY, required=True,
+                                label_visibility="collapsed", key="view")
+    if view == VIEW_ANALYSE:
         analyse_tab(uploads_dir)
+    else:
+        gallery_tab(results_dir)
 
 
 main()

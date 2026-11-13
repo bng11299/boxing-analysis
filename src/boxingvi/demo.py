@@ -26,6 +26,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -96,6 +97,9 @@ def refuse_participant(path, roots=PARTICIPANT_ROOTS) -> Path:
     docs/commands/privacy.md); the demo never reads or writes there. Resolved first, so a relative
     path, `..` or a link cannot step around it. Returns the resolved path."""
     rp = _resolved(path)
+    if faceblur._is_network(Path(path)) or faceblur._is_network(rp):
+        # a UNC loopback share (admin C$ share) names the same folder by a route no root comparison sees
+        raise DemoError("network paths are not accepted")
     for root in roots:
         if is_inside(rp, root):
             raise DemoError("that folder holds participant data; the demo works on your own footage only")
@@ -168,7 +172,7 @@ def upload_extension(filename) -> str:
         raise DemoError("the file has no usable name")
     ext = Path(filename.replace("\\", "/")).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise DemoError(f"{ext or 'that'} is not accepted: upload a {', '.join(ALLOWED_EXTENSIONS)} video")
+        raise DemoError(f"that file type is not accepted: upload a {', '.join(ALLOWED_EXTENSIONS)} video")
     return ext
 
 
@@ -201,8 +205,9 @@ def save_upload(uploads_dir, filename, fileobj, max_bytes: int = MAX_UPLOAD_BYTE
     name = new_upload_name(now)
     dest = contained(folder, f"{name}{ext}")
     total = 0
+    out = open(dest, "xb")   # exclusive, and outside the try: an existing file is never touched, even to clean up
     try:
-        with open(dest, "xb") as out:
+        with out:
             while True:
                 block = fileobj.read(1 << 20)
                 if not block:
@@ -217,18 +222,6 @@ def save_upload(uploads_dir, filename, fileobj, max_bytes: int = MAX_UPLOAD_BYTE
         dest.unlink(missing_ok=True)
         raise
     return dest
-
-
-def find_upload(uploads_dir, name: str, roots=PARTICIPANT_ROOTS) -> "Path | None":
-    """The stored video for an upload name, or None. The name must be one this module made."""
-    if not is_upload_name(name):
-        return None
-    folder = check_folder(uploads_dir, roots)
-    for ext in ALLOWED_EXTENSIONS:
-        p = folder / f"{name}{ext}"
-        if p.is_file() and is_inside(p, folder):
-            return p
-    return None
 
 
 def list_uploads(uploads_dir, roots=PARTICIPANT_ROOTS) -> "list[Path]":
@@ -256,8 +249,6 @@ def delete_upload(uploads_dir, name: str, roots=PARTICIPANT_ROOTS) -> "list[Path
         p = base / fname
         if not (p.is_file() or p.is_symlink()):
             return
-        if not is_inside(p.parent, base):
-            raise DemoError("refusing to delete outside the uploads folder")
         p.unlink()   # a link is removed as a link; its target is never touched
         removed.append(p)
 
@@ -269,7 +260,8 @@ def delete_upload(uploads_dir, name: str, roots=PARTICIPANT_ROOTS) -> "list[Path
         for e in list(out.iterdir()):
             if e.is_dir() and not e.is_symlink() and e.name.startswith(f".{name}."):
                 shutil.rmtree(e, ignore_errors=True)
-                removed.append(e)
+                if not e.exists():
+                    removed.append(e)
     return removed
 
 
@@ -331,8 +323,8 @@ def build_analyse_argv(video, stance, device, rounds, out_dir, python=None, cuda
     video = Path(video)
     if not is_upload_name(video.stem) or video.suffix not in ALLOWED_EXTENSIONS:
         raise DemoError("only a video stored by this app can be analysed")
-    if _resolved(video).parent != _resolved(Path(out_dir)).parent:   # outputs go in <uploads>/out
-        raise DemoError("the video is not in the uploads folder")
+    if _resolved(Path(out_dir)) != _resolved(video).parent / "out":   # outputs go in <uploads>/out
+        raise DemoError("the video is not in the uploads folder, or the output folder is not its out/")
     validate_stance(stance)
     validate_device(device, cuda_available)
     rounds = validate_rounds(rounds)
@@ -352,18 +344,38 @@ def run_analyse(argv: "list[str]", on_line=None, popen=subprocess.Popen) -> int:
     stdin, and YOLO_OFFLINE=1 so the pose library makes no network call of its own."""
     if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
         raise DemoError("the command must be an argument list")
-    env = dict(os.environ, PYTHONUNBUFFERED="1", YOLO_OFFLINE="1")
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONUTF8="1", YOLO_OFFLINE="1")
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+             else {"start_new_session": True})
     proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                 text=True, encoding="utf-8", errors="replace", shell=False, env=env)
+                 text=True, encoding="utf-8", errors="replace", shell=False, env=env, **group)
     try:
         for line in proc.stdout:
             if on_line is not None:
                 on_line(line.rstrip("\r\n"))
         return proc.wait()
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        if proc.poll() is None:   # the page was rerun or stopped mid-analysis: stop the whole tree
+            _kill_tree(proc)
             proc.wait()
+        close = getattr(proc.stdout, "close", None)
+        if close:
+            close()
+
+
+def _kill_tree(proc) -> None:
+    """analyse_clip.py starts ffmpeg and ffprobe children; killing only the python would orphan them."""
+    pid = getattr(proc, "pid", None)
+    try:
+        if pid is not None and os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(int(pid))], stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=30, shell=False)
+        elif pid is not None:
+            import signal
+            os.killpg(os.getpgid(int(pid)), signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    proc.kill()
 
 
 # ------------------------------------------------------------------ web preview (ffmpeg) ---
@@ -387,8 +399,11 @@ def ffmpeg_web_argv(ffmpeg, src, dst) -> "list[str]":
 
 
 def preview_is_fresh(src, web) -> bool:
+    """The preview is stamped with its overlay's mtime when made, so any change to the overlay
+    (newer, or an older copy put back) makes it stale."""
     try:
-        return web.is_file() and web.stat().st_size > 0 and web.stat().st_mtime >= src.stat().st_mtime
+        return (web.is_file() and not web.is_symlink() and web.stat().st_size > 0
+                and web.stat().st_mtime_ns == src.stat().st_mtime_ns)
     except OSError:
         return False
 
@@ -408,12 +423,30 @@ def ensure_web_preview(overlay, ffmpeg="auto", run=subprocess.run) -> "Path | No
     exe = find_ffmpeg() if ffmpeg == "auto" else ffmpeg
     if not exe:
         return None
+    with _preview_lock(web):   # two sessions on one clip make one preview, not two
+        if preview_is_fresh(overlay, web):
+            return web
+        return _make_preview(overlay, web, exe, run)
+
+
+_PREVIEW_LOCKS: "dict[str, threading.Lock]" = {}
+_PREVIEW_LOCKS_GUARD = threading.Lock()
+
+
+def _preview_lock(web: Path) -> threading.Lock:
+    with _PREVIEW_LOCKS_GUARD:
+        return _PREVIEW_LOCKS.setdefault(str(_resolved(web)), threading.Lock())
+
+
+def _make_preview(overlay: Path, web: Path, exe, run) -> Path:
     tmp = web.with_name(f"{web.stem}.{secrets.token_hex(4)}.tmp.mp4")
     try:
         r = run(ffmpeg_web_argv(exe, overlay, tmp), stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=FFMPEG_TIMEOUT_S, shell=False)
         if r.returncode != 0 or not tmp.is_file() or tmp.stat().st_size == 0:
             raise DemoError("ffmpeg could not make a web preview of the overlay")
+        stamp = overlay.stat().st_mtime_ns
+        os.utime(tmp, ns=(stamp, stamp))   # the preview carries its overlay's mtime: see preview_is_fresh
         os.replace(tmp, web)
     except subprocess.TimeoutExpired:
         raise DemoError("making the web preview took too long") from None
