@@ -1,0 +1,3 @@
+# Local demo app only (docs/commands/demo.md). Not part of requirements.txt: the pipeline and its tests never import it.
+# Transitive dependencies are left to pip; none of them changes a pin in requirements.txt (checked when this was added).
+streamlit==1.66.1
