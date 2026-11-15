@@ -21,10 +21,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from boxingvi import demo  # noqa: E402
+# pandas and boxingvi.demo (which pulls in analyse_clip, scikit-learn and scipy) are imported by
+# load_heavy(), AFTER the header is on screen. Imported up here, they kept the page blank for up to
+# ~30 s on a cold disk, because Streamlit draws nothing until the script reaches its first element.
+# Later reruns find them in sys.modules, so the import costs nothing after the first visit.
+demo = None
+pd = None
+
+
+def load_heavy() -> None:
+    global demo, pd
+    first = "boxingvi.demo" not in sys.modules
+    note = st.empty()
+    if first:
+        note.info("Loading the analysis code (first start only; can take up to a minute on a cold laptop)...")
+    import pandas as _pd
+    from boxingvi import demo as _demo
+    pd, demo = _pd, _demo
+    note.empty()
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 LOG_LINES_KEPT = 500
@@ -234,6 +250,11 @@ def remove_upload(uploads_dir: Path, name: str) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Boxing punch analysis", layout="wide")
+    # Header first, so a cold start shows the page and a loading note instead of a blank screen.
+    st.title("Single-camera boxing analysis")
+    st.caption("Punches found, named and counted from one phone video. Runs on this laptop only; "
+               "nothing is uploaded anywhere.")
+    load_heavy()
     try:
         args = parse_cli()
         results_dir = demo.check_folder(args.results_dir)
@@ -246,9 +267,6 @@ def main() -> None:
         st.error(str(e))
         st.stop()
 
-    st.title("Single-camera boxing analysis")
-    st.caption("Punches found, named and counted from one phone video. Runs on this laptop only; "
-               "nothing is uploaded anywhere.")
     # Two views styled as tabs. st.tabs would run BOTH on every rerun, so a cold-cache video
     # transcode in the Gallery would stall the Analyse view too; this runs only the chosen one.
     view = st.segmented_control("View", [VIEW_GALLERY, VIEW_ANALYSE], default=VIEW_GALLERY, required=True,
