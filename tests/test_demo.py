@@ -580,6 +580,16 @@ for n, src in sources.items():
 check("the demo has no external assets: no http(s) URL is loaded by either file",
       not re.search(r"https?://", sources["demo_app.py"] + sources["src/boxingvi/demo.py"]))
 check("demo.py is importable without streamlit having been imported", "streamlit" not in sys.modules)
+# Cold start: Streamlit draws nothing until the script reaches its first element, so a top-level
+# import of the heavy modules left the page blank for up to ~30 s. The header must come first.
+app = sources["demo_app.py"]
+check("demo_app.py does not import boxingvi.demo or pandas at module level (page would stay blank)",
+      not re.search(r"^(import pandas|from boxingvi import demo)\b", app, re.M))
+main_body = app[app.index("def main()"):]
+check("main() draws the title before load_heavy() imports the analysis code",
+      0 <= main_body.find("st.title(") < main_body.find("load_heavy()"))
+check("main() calls load_heavy() before anything that uses demo",
+      0 <= main_body.find("load_heavy()") < main_body.find("demo."))
 check("requirements-demo.txt pins exactly; requirements.txt does not mention the demo",
       all(re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][0-9A-Za-z.+-]*", ln)
           for ln in (ROOT / "requirements-demo.txt").read_text(encoding="utf-8").splitlines()
