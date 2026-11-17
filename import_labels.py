@@ -24,13 +24,21 @@ DEFAULT_OUT = Path("data/own")
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
+    # allow_abbrev=False: `--spar` must not reach sparring mode without the
+    # sanitised error wrapper below, which matches the full flag only.
+    ap = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--export", type=Path, required=True, help='Label Studio export, format "JSON"')
     ap.add_argument("--video", type=Path, required=True, help="the video that was labelled")
-    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--out-dir", type=Path)
+    ap.add_argument("--sparring", action="store_true", help="require a boxer on each punch; write next to the video")
     ap.add_argument("--force", action="store_true", help="replace existing labels for this clip")
     a = ap.parse_args(argv)
+
+    if a.sparring:
+        return _sparring(a)
+    if a.out_dir is None:
+        a.out_dir = DEFAULT_OUT
 
     info = probe(a.video)
     if info.timing is None or info.vfr:
@@ -59,5 +67,42 @@ def main(argv=None) -> int:
     return 0
 
 
+def _sparring(args):
+    from boxingvi.sparring_io import external_path, staged_output, strict_cfr
+
+    if args.out_dir is None:
+        raise ValueError("--out-dir is required in --sparring mode")
+    directory = external_path(args.out_dir)
+    video = args.video.resolve()
+    if directory != video.parent:
+        raise ValueError("--out-dir must be next to the video (its containing directory)")
+    out = external_path(directory / f"{video.stem}.labels.json")
+    if out.exists() and not args.force:
+        raise ValueError("output exists; pass --force to replace it")
+    if out == args.export.resolve() or (out.exists() and out.samefile(args.export)):
+        raise ValueError("output must not replace the source export")
+    info = strict_cfr(video)
+    if info.fps_frac != 30:
+        raise ValueError("sparring config frameRate is 30; video must be constant 30 fps")
+    export, digest = lsimport.load_sparring_export(args.export)
+    labels = lsimport.parse_sparring_export(export, info.timing.n_frames)
+    record = labels.to_json(video.stem, info.fps, info.timing.n_frames)
+    record["export_sha256"] = digest
+    record["label_studio"] = "1.23.2 (frames 1-based; offset must be +1)"
+    with staged_output(out, args.force) as temporary:
+        temporary.write_text(json.dumps(record, indent=1, allow_nan=False), encoding="utf-8")
+    print(f"{len(labels.spans)} punches; {info.timing.n_frames} frames; {info.fps:g} fps")
+    print(f"  -> {out}")
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    if "--sparring" in sys.argv[1:]:
+        try:
+            sys.exit(main())
+        except (ValueError, OSError, RuntimeError) as exc:
+            message = str(exc) if isinstance(exc, ValueError) else "sparring import failed"
+            print(f"error: {message}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        sys.exit(main())

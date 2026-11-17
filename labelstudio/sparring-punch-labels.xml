@@ -1,0 +1,40 @@
+<!--
+  Two-boxer sparring, Label Studio 1.23.2, constant 30 fps numbered video.
+  Use the already face-blurred copy made by scripts/number_frames.py.
+  Keep boxer A/B identities fixed throughout the clip; crossing sides does not
+  change identity. Agree which boxer is A before labelling.
+
+  1. FIRST mark single-frame frame-check regions at burned-in frames 100 and
+     2000 (press f, click once, do not drag). No boxer on a frame-check.
+  2. One region per punch: first movement toward target through full extension
+     or contact, inclusive. Combinations are several regions.
+  3. Choose a boxer on EVERY punch: A, B, or ? if the thrower is unclear.
+     The required choice applies to punch labels only, not frame-check.
+     jab = lead straight, cross = rear straight; unclear is an unnameable punch.
+  4. Submit before exporting the single task in full JSON format (not JSON-MIN).
+
+  The boxer box shows for the SELECTED region (click it on the timeline after
+  drawing). No required/visibleWhen/whenLabelValue: with them the box did not
+  appear in 1.23.2 (10-28), and `required` would also demand a boxer on the
+  frame checks. The importer enforces the rule instead: every punch needs
+  exactly one boxer, and a frame-check must have none.
+-->
+<View>
+  <Header value="Mark frame-check at burned-in frames 100 and 2000 first. One region per punch; select its boxer A, B or ?."/>
+  <Video name="video" value="$video" frameRate="30" height="720" timelineHeight="140"/>
+  <TimelineLabels name="punches" toName="video">
+    <Label value="jab" hotkey="1" background="#1f77b4"/>
+    <Label value="cross" hotkey="2" background="#d62728"/>
+    <Label value="lead_hook" hotkey="3" background="#17becf"/>
+    <Label value="rear_hook" hotkey="4" background="#ff7f0e"/>
+    <Label value="lead_uppercut" hotkey="5" background="#2ca02c"/>
+    <Label value="rear_uppercut" hotkey="6" background="#9467bd"/>
+    <Label value="unclear" hotkey="u" background="#7f7f7f"/>
+    <Label value="frame-check" hotkey="f" background="#000000"/>
+  </TimelineLabels>
+  <Choices name="boxer" toName="video" choice="single-radio" perRegion="true">
+    <Choice value="A"/>
+    <Choice value="B"/>
+    <Choice value="?"/>
+  </Choices>
+</View>
