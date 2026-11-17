@@ -23,9 +23,11 @@ Reliability comes from measurements, linked by hashes rather than trusted:
   only if the sidecar records that rule (variant, threshold, minimum gap).
   V6 labels only hooks and uppercuts, so its precision understates the truth and
   its count ratio overstates the over-count; how far counts are off on your
-  footage is unknown, and the summary says so.
+  footage is unknown unless you labelled the clip, and the summary says so.
 * your own footage: the clip's classify_score.json, when you labelled it, and
-  only if it scored the same classifier and the same classified CSV.
+  only if it scored the same classifier and the same classified CSV: how many of
+  your labelled punches it found and how many it reported matched no label (when
+  the score records its finder block), and how often it named a matched punch.
 
 Fixed rules, stated in the report: a punch type the classifier names correctly
 under LOW_RECALL of the time is "named least reliably"; a count more than
@@ -403,6 +405,22 @@ def own_reliability(score: Path, clip: str, classifier_sha256: str, csv_sha256: 
     if n:
         out["accuracy"] = _prob(m.get("accuracy"), "own accuracy")
         out["floor"] = _prob(m.get("majority_floor_accuracy"), "own majority floor")
+    # How well the punches were FOUND in this clip. Optional: score files written before
+    # classify_punches.py --labels recorded it still give the naming score above.
+    f = d.get("finder")
+    if f is not None:
+        if not isinstance(f, dict):
+            raise ValueError(f"{Path(score).name}: the finder block is not an object")
+        fd = {"labelled": _count(f.get("labelled_punches"), "labelled punch count"),
+              "detected": _count(f.get("detections"), "detection count"),
+              "matched": _count(f.get("matched"), "matched count")}
+        if fd["matched"] > min(fd["labelled"], fd["detected"]):
+            raise ValueError(f"{Path(score).name}: {fd['matched']} matched is more than the labelled "
+                             f"({fd['labelled']}) or detected ({fd['detected']}) punches")
+        if n + out["unclassifiable"] > fd["matched"]:
+            raise ValueError(f"{Path(score).name}: more matched punches were named ({n + out['unclassifiable']}) "
+                             f"than were matched ({fd['matched']})")
+        out["finder"] = fd
     return out
 
 
@@ -674,16 +692,31 @@ def summary(facts: dict, bench: dict, finder: dict, own: "dict | None", who: str
           f"which wrist moved has not been checked against labels.")
     src = f"benchmark video {w.num(finder['video'])}" if finder["video"] else "the benchmark video"
     ratio = w.num(f"{finder['count_ratio']:.1f}")
+    own_found = own.get("finder") if own else None
     w.say(f"Finding punches is the least tested stage. On {src}, the only one with continuous labels, it found "
           f"{w.pct(finder['recall'])} of the labelled punches but flagged {ratio} "
-          f"times as many punches as were labelled; part of that is real punches that were never labelled there, "
-          f"so how far the totals above are off is not known.")
+          f"times as many punches as were labelled; part of that is real punches that were never labelled there"
+          + ("." if own_found else ", so how far the totals above are off is not known."))
+    if own_found:
+        lab, det, hit = own_found["labelled"], own_found["detected"], own_found["matched"]
+        found = (f"Against your own labels for this clip it found {w.count(hit)} of your {w.count(lab)} "
+                 f"{_punches(lab)}" + (f" ({w.pct(hit / lab)})" if lab else ""))
+        if det == 0:
+            found += ", and it reported none at all."
+        elif det == hit:
+            found += f", and every {_punches(1)} it reported matched one of your labels."
+        else:
+            extra = det - hit
+            found += (f", and {w.count(extra)} of the {w.count(det)} {_punches(det)} it reported matched none of "
+                      f"them: a punch you did not label, a move that was not a punch, or a false alarm.")
+        w.say(found)
     if own is None:
         w.say("None of this has been measured on your own footage yet: label a clip to measure it.")
     elif not own["n"]:
         w.say("You labelled this clip, but no labelled punch with a nameable type matched a punch the tool found.")
     else:
-        w.say(f"Against your own labels for this clip it named {w.pct(own['accuracy'])} of {w.count(own['n'])} "
+        lead = "It" if own_found else "Against your own labels for this clip it"
+        w.say(f"{lead} named {w.pct(own['accuracy'])} of {w.count(own['n'])} "
               f"matched {_punches(own['n'])} correctly; always guessing your commonest punch would score "
               f"{w.pct(own['floor'])}.")
         if own["unclassifiable"]:
