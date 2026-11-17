@@ -383,6 +383,28 @@ to = variant(facts, {"n": 12, "unclassifiable": 2, "accuracy": 0.75, "floor": 0.
 check("with own labels: measured accuracy next to its floor, and the matched punches it could not name",
       "named 75% of 12 matched punches correctly; always guessing your commonest punch would score 50%." in to
       and "2 more matched punches could not be named." in to and "not been measured" not in to, to)
+check("own labels without a finder block: the finding sentence still says the error is not known",
+      "how far the totals above are off is not known" in to, to)
+# IMG_5835's real classify_score.json (results/repro5835/own_tol0.2): 149 labelled, 162 reported,
+# 117 matched, 0.744 of 117 named right, commonest-punch floor 0.248. The poster quotes these.
+own5835 = {"n": 117, "unclassifiable": 0, "accuracy": 0.7435897435897436, "floor": 0.24786324786324787,
+           "finder": {"labelled": 149, "detected": 162, "matched": 117}}
+tf = variant(facts, own5835, name="own labels with finding")
+check("with a finder block: found / labelled and the unmatched detections, from the score",
+      "Against your own labels for this clip it found 117 of your 149 punches (79%), and 45 of the 162 punches "
+      "it reported matched none of them" in tf, tf)
+check("with a finder block: the naming sentence follows without repeating 'Against your own labels'",
+      "It named 74% of 117 matched punches correctly; always guessing your commonest punch would score 25%." in tf
+      and tf.count("Against your own labels") == 1, tf)
+check("with a finder block: no 'not known' and no 'not been measured'",
+      "is not known" not in tf and "not been measured" not in tf, tf)
+tp_ = variant(facts, {**own5835, "finder": {"labelled": 117, "detected": 117, "matched": 117}}, name="all matched")
+check("every reported punch matched: says so, no '0 of the 117'", "every punch it reported matched" in tp_
+      and "0 of the" not in tp_, tp_)
+tnd = variant(facts, {"n": 0, "unclassifiable": 0, "finder": {"labelled": 5, "detected": 0, "matched": 0}},
+              name="reported nothing")
+check("nothing reported: 'found 0 of your 5 punches (0%), and it reported none at all', not 'every punch matched'",
+      "found 0 of your 5 punches (0%), and it reported none at all." in tnd and "every punch" not in tnd, tnd)
 tz = variant(facts, {"n": 0, "unclassifiable": 0}, name="labelled, nothing matched")
 check("labelled but nothing matched: not 'label a clip'", "You labelled this clip, but no labelled punch" in tz
       and "label a clip" not in tz, tz)
@@ -678,6 +700,21 @@ score_with()
 raises("no CSV hash to check against is refused, not skipped",
        lambda: report.own_reliability(score, "IMG_1", man["sha256"], None), match="no classified-CSV sha256")
 check("a good score is read", score_with()()["accuracy"] == 1.0)
+check("a score without a finder block is read, with no finding numbers", "finder" not in score_with()())
+FIND = {"labelled_punches": 10, "detections": 12, "matched": 8}
+check("a score with a finder block is read", score_with(finder=FIND)()["finder"]
+      == {"labelled": 10, "detected": 12, "matched": 8})
+raises("a finder block that is not an object is refused", score_with(finder=[10, 12, 8]), match="not an object")
+raises("a finder block missing its matched count is refused",
+       score_with(finder={"labelled_punches": 10, "detections": 12}))
+raises("a negative labelled count is refused", score_with(finder={**FIND, "labelled_punches": -1}))
+raises("a boolean detection count is refused", score_with(finder={**FIND, "detections": True}))
+raises("a float matched count is refused", score_with(finder={**FIND, "matched": 8.5}))
+raises("more matched than labelled is refused", score_with(finder={**FIND, "matched": 11}), match="more than")
+raises("more matched than detected is refused",
+       score_with(finder={"labelled_punches": 20, "detections": 9, "matched": 10}), match="more than")
+raises("more punches named than matched is refused (3 named, 2 matched)",
+       score_with(finder={"labelled_punches": 10, "detections": 12, "matched": 2}), match="were named")
 
 print("spreadsheet")
 from openpyxl import load_workbook  # noqa: E402
