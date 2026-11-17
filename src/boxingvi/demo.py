@@ -43,6 +43,8 @@ from boxingvi.boxers import PARTICIPANT_ROOTS  # noqa: E402
 
 DEFAULT_RESULTS = Path("results/analyse")
 DEFAULT_UPLOADS = Path("results/demo_uploads")
+# analyse_clip.py runs in the pipeline venv, not the demo's (docs/commands/demo.md).
+DEFAULT_PIPELINE_PYTHON = REPO_ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 ANALYSE_SCRIPT = REPO_ROOT / "analyse_clip.py"
 OUTPUT_SUFFIXES = tuple(suffix for suffix, _ in analyse_clip.OUTPUTS)
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".m4v")
@@ -303,17 +305,44 @@ def validate_device(device, cuda_available: bool = False) -> str:
     return device
 
 
-def available_devices() -> "list[str]":
-    """cpu, plus cuda:N for each device torch reports. torch is imported only here, and only
-    when the Analyse tab is drawn."""
-    devices = ["cpu"]
+_PYTHON_NAME = re.compile(r"python(3(\.\d{1,2})?)?(\.exe)?", re.IGNORECASE)
+_CUDA_PROBE = ("import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)")
+CUDA_PROBE_TIMEOUT_S = 180   # a cold torch import on this laptop took 7-30 s; a hung driver must not hang the page
+
+
+def check_python(path) -> Path:
+    """The pipeline venv's interpreter, which runs analyse_clip.py. The demo runs in its own venv
+    (.venv-demo, no torch) so the pipeline venv never has streamlit's pyarrow in it. An operator
+    flag, but still checked: an existing regular file named like a Python interpreter."""
+    p = Path(path)
+    if not _PYTHON_NAME.fullmatch(p.name):
+        raise DemoError(f"--pipeline-python must be a Python interpreter (python.exe), not {p.name!r}")
     try:
-        import torch
-        if torch.cuda.is_available():
-            devices += [f"cuda:{i}" for i in range(min(torch.cuda.device_count(), 99))]
-    except Exception:   # no torch, or a driver that fails to load: cpu is always there
-        pass
-    return devices
+        rp = p.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise DemoError(f"no pipeline Python at {p}: create the pipeline venv (scripts/setup-env.ps1) "
+                        "or pass --pipeline-python") from None
+    if not rp.is_file():
+        raise DemoError(f"--pipeline-python is not a file: {p}")
+    return p.absolute()   # not rp: a venv's python.exe may be a link to the base interpreter, losing the venv
+
+
+def available_devices(python=None, run=subprocess.run) -> "list[str]":
+    """cpu, plus cuda:N for each device torch reports IN THE PIPELINE VENV, which is where
+    analyse_clip.py runs; this venv has no torch. Asked once through an argument list with a
+    timeout; anything unexpected (no torch, a failing driver, a timeout, odd output) means cpu only."""
+    devices = ["cpu"]
+    if python is None:
+        return devices
+    try:
+        r = run([str(python), "-c", _CUDA_PROBE], capture_output=True, text=True,
+                timeout=CUDA_PROBE_TIMEOUT_S, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return devices
+    out = (r.stdout or "").strip().splitlines()
+    if r.returncode != 0 or not out or not re.fullmatch(r"[0-9]{1,2}", out[-1]):
+        return devices
+    return devices + [f"cuda:{i}" for i in range(int(out[-1]))]
 
 
 def build_analyse_argv(video, stance, device, rounds, out_dir, python=None, cuda_available: bool = False) -> "list[str]":
@@ -328,7 +357,7 @@ def build_analyse_argv(video, stance, device, rounds, out_dir, python=None, cuda
     validate_stance(stance)
     validate_device(device, cuda_available)
     rounds = validate_rounds(rounds)
-    argv = [python or sys.executable, "-u", str(ANALYSE_SCRIPT),
+    argv = [str(check_python(python)) if python is not None else sys.executable, "-u", str(ANALYSE_SCRIPT),
             "--video", str(_resolved(video)),
             "--stance", stance,
             "--device", device,

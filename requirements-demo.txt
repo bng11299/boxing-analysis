@@ -1,3 +1,14 @@
-# Local demo app only (docs/commands/demo.md). Not part of requirements.txt: the pipeline and its tests never import it.
-# Transitive dependencies are left to pip; none of them changes a pin in requirements.txt (checked when this was added).
+# Local demo app only (docs/commands/demo.md). Installed into its OWN venv, .venv-demo, never into .venv:
+# streamlit needs pyarrow, whose unsigned DLLs Smart App Control blocked intermittently on 2026-11-17, and
+# with pyarrow present pandas imports it, so a block broke every pandas import in the pipeline too.
+# The gallery imports boxingvi.demo (analyse_clip, report, stats); the pins below are what that needs,
+# copied from requirements.txt and kept equal to it (tests/test_demo.py checks). No torch: the Analyse tab
+# runs analyse_clip.py in the pipeline venv (--pipeline-python).
+joblib==1.5.3
+numpy==2.2.6
+openpyxl==3.1.5
+pandas==2.3.3
+scikit-learn==1.9.0
+scipy==1.18.0
+threadpoolctl==3.6.0
 streamlit==1.66.1

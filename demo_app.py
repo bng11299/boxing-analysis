@@ -1,6 +1,9 @@
 """Local demo of analyse_clip.py: a thin Streamlit page over src/boxingvi/demo.py.
 
-  python -m streamlit run demo_app.py -- --results-dir results/analyse [--uploads-dir results/demo_uploads]
+  .venv-demo\Scripts\python -m streamlit run demo_app.py -- --results-dir results/analyse
+      [--uploads-dir results/demo_uploads] [--pipeline-python .venv\Scripts\python.exe]
+
+Runs in its own venv (.venv-demo, requirements-demo.txt); analyse_clip.py runs in the pipeline venv.
 
 Run it from the repo root (Streamlit reads .streamlit/config.toml from there). It binds to 127.0.0.1,
 sends no telemetry and loads nothing from outside this laptop. Two tabs: a Gallery of finished clips
@@ -55,7 +58,14 @@ def parse_cli() -> argparse.Namespace:
                     help="where finished clips are listed (default %(default)s)")
     ap.add_argument("--uploads-dir", type=Path, default=demo.DEFAULT_UPLOADS,
                     help="where uploads are stored; outputs go in <uploads-dir>/out (default %(default)s)")
+    ap.add_argument("--pipeline-python", type=Path, default=demo.DEFAULT_PIPELINE_PYTHON,
+                    help="the pipeline venv's python, which runs analyse_clip.py (default %(default)s)")
     return ap.parse_args(sys.argv[1:])
+
+
+@st.cache_data(show_spinner="Asking the pipeline venv which devices torch can use (first time only)...")
+def pipeline_devices(python: str) -> "list[str]":
+    return demo.available_devices(python)
 
 
 def read_bytes(path: Path) -> bytes:
@@ -143,14 +153,15 @@ def gallery_tab(results_dir: Path) -> None:
     show_result(clips[names.index(chosen)], key=f"gallery-{chosen}")
 
 
-def run_upload(uploaded, stance: str, device: str, rounds: "str | None", uploads_dir: Path) -> None:
+def run_upload(uploaded, stance: str, device: str, rounds: "str | None", uploads_dir: Path, python: Path) -> None:
     """Store the upload, run analyse_clip.py on it, keep the log; the result is drawn by the caller."""
     st.session_state.pop("run_error", None)
     try:
         uploaded.seek(0)
         stored = demo.save_upload(uploads_dir, uploaded.name, uploaded)
         out_dir = demo.out_dir_for(uploads_dir)
-        argv = demo.build_analyse_argv(stored, stance, device, rounds, out_dir, cuda_available=device in demo.available_devices())
+        argv = demo.build_analyse_argv(stored, stance, device, rounds, out_dir, python=python,
+                                       cuda_available=device in pipeline_devices(str(python)))
     except (demo.DemoError, OSError) as e:
         st.session_state["run_error"] = str(e)
         return
@@ -176,8 +187,13 @@ def run_upload(uploaded, stance: str, device: str, rounds: "str | None", uploads
                                          "the log above says which stage failed.")
 
 
-def analyse_tab(uploads_dir: Path) -> None:
+def analyse_tab(uploads_dir: Path, pipeline_python: Path) -> None:
     out_dir = demo.out_dir_for(uploads_dir)
+    try:
+        python = demo.check_python(pipeline_python)
+    except demo.DemoError as e:
+        st.error(f"The Analyse tab needs the pipeline venv: {e}")
+        return
     st.warning("**This is slow on a CPU:** pose extraction takes minutes per minute of video, so a long clip "
                "is not a live-demo job. Use the Gallery for that. Do not touch the page while it runs: any click restarts the page and stops the analysis.")
     st.caption("Own footage only. The clip is stored under the uploads folder with a generated name, "
@@ -189,7 +205,7 @@ def analyse_tab(uploads_dir: Path) -> None:
         stance = st.selectbox("Boxer's stance (required: the tool never guesses)", list(demo.STANCES), index=None,
                               placeholder="Choose a stance")
     with c2:
-        device = st.selectbox("Device", demo.available_devices())
+        device = st.selectbox("Device", pipeline_devices(str(python)))
     with c3:
         rounds_text = st.text_input("Rounds in seconds (optional)", placeholder="0-180,240-420")
     consent = st.checkbox("This is my own footage, or I have the filmed person's consent")
@@ -207,7 +223,7 @@ def analyse_tab(uploads_dir: Path) -> None:
     if not ready and rounds_error is None and missing:
         st.caption("Still needed: " + ", ".join(missing) + ".")
     if st.button("Analyse this clip", type="primary", disabled=not ready):
-        run_upload(uploaded, stance, device, rounds, uploads_dir)
+        run_upload(uploaded, stance, device, rounds, uploads_dir, python)
 
     if err := st.session_state.get("run_error"):
         st.error(err)
@@ -272,7 +288,7 @@ def main() -> None:
     view = st.segmented_control("View", [VIEW_GALLERY, VIEW_ANALYSE], default=VIEW_GALLERY, required=True,
                                 label_visibility="collapsed", key="view")
     if view == VIEW_ANALYSE:
-        analyse_tab(uploads_dir)
+        analyse_tab(uploads_dir, args.pipeline_python)
     else:
         gallery_tab(results_dir)
 

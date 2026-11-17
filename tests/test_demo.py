@@ -270,6 +270,51 @@ check("device: cuda:0 is accepted when it is", demo.validate_device("cuda:0", Tr
 for bad in ("gpu", "cuda", "cuda:", "cuda:100", "cpu; x", "cuda:0 --weights x", "", None):
     refused(f"device {bad!a} is refused", demo.validate_device, bad, True)
 check("the device list always starts with cpu", demo.available_devices()[0] == "cpu")
+check("no pipeline python: cpu only, nothing is run", demo.available_devices(None) == ["cpu"])
+
+
+class _R:
+    def __init__(self, out, rc=0):
+        self.stdout, self.returncode = out, rc
+
+
+seen = []
+
+
+def fake_run(out=None, rc=0, exc=None):
+    def run(argv, **kw):
+        seen.append((argv, kw))
+        if exc:
+            raise exc
+        return _R(out, rc)
+    return run
+
+
+check("the pipeline venv reports 2 CUDA devices: cpu, cuda:0, cuda:1",
+      demo.available_devices("py.exe", run=fake_run("2\n")) == ["cpu", "cuda:0", "cuda:1"])
+a_, kw_ = seen[-1]
+check("the CUDA probe is an argument list with a timeout, no shell, no stdin",
+      isinstance(a_, list) and a_[:2] == ["py.exe", "-c"] and kw_.get("timeout") and not kw_.get("shell")
+      and kw_.get("stdin") == subprocess.DEVNULL)
+check("0 devices: cpu only", demo.available_devices("py.exe", run=fake_run("0\n")) == ["cpu"])
+for why, fr in (("torch missing (exit 1)", fake_run("", 1)), ("odd output", fake_run("two\n")),
+                ("an absurd count", fake_run("100\n")), ("a negative count", fake_run("-1\n")),
+                ("no output", fake_run(None)), ("a timeout", fake_run(exc=subprocess.TimeoutExpired("py", 1))),
+                ("no such interpreter", fake_run(exc=FileNotFoundError()))):
+    check(f"CUDA probe, {why}: cpu only, no crash", demo.available_devices("py.exe", run=fr) == ["cpu"])
+
+print("pipeline python")
+check("this interpreter is accepted as a pipeline python", demo.check_python(sys.executable) == Path(sys.executable).absolute())
+refused("a missing interpreter is refused", demo.check_python, tmp / "nope" / "python.exe")
+(tmp / "python.exe").mkdir(exist_ok=True)
+refused("a folder named python.exe is refused", demo.check_python, tmp / "python.exe")
+fake_exe = tmp / "calc.exe"
+fake_exe.write_bytes(b"MZ")
+refused("a file not named like python is refused (calc.exe)", demo.check_python, fake_exe)
+for bad in ("python.exe --version", "python.exe;calc", "pythonw.exe", "-python.exe"):
+    refused(f"pipeline python name {bad!a} is refused", demo.check_python, tmp / bad)
+check("the default pipeline python is the repo's .venv, not this (demo) venv",
+      demo.DEFAULT_PIPELINE_PYTHON.parent.parent == ROOT / ".venv")
 
 # ------------------------------------------------------------------ argv for analyse_clip ---
 print("analyse_clip argv")
@@ -304,6 +349,10 @@ check("a path cannot read as an option: the value after --video and --out-dir is
       all(Path(argv[argv.index(f) + 1]).is_absolute() for f in ("--video", "--out-dir")))
 refused("argv is not built when the output folder is not <uploads>/out (elsewhere)", demo.build_analyse_argv, vid,
         "orthodox", "cpu", None, tmp / "elsewhere")
+check("with a pipeline python, argv starts with it (analyse_clip runs in the pipeline venv)",
+      demo.build_analyse_argv(vid, "orthodox", "cpu", None, out, python=sys.executable)[0] == str(Path(sys.executable).absolute()))
+refused("argv is not built with a pipeline python that is not a python (calc.exe)", demo.build_analyse_argv, vid,
+        "orthodox", "cpu", None, out, python=fake_exe)
 refused("nor for <uploads>/other", demo.build_analyse_argv, vid, "orthodox", "cpu", None, up / "other")
 refused("nor for the uploads folder itself", demo.build_analyse_argv, vid, "orthodox", "cpu", None, up)
 
@@ -595,6 +644,20 @@ check("requirements-demo.txt pins exactly; requirements.txt does not mention the
           for ln in (ROOT / "requirements-demo.txt").read_text(encoding="utf-8").splitlines()
           if ln.strip() and not ln.lstrip().startswith("#"))
       and "streamlit" not in (ROOT / "requirements.txt").read_text(encoding="utf-8").lower())
+
+
+def pins(name):
+    return dict(ln.split("==", 1) for ln in (ROOT / name).read_text(encoding="utf-8").splitlines()
+                if "==" in ln and not ln.lstrip().startswith("#"))
+
+
+demo_pins, main_pins = pins("requirements-demo.txt"), pins("requirements.txt")
+shared = sorted(set(demo_pins) & set(main_pins))
+check("every package the demo venv shares with the pipeline is pinned to the same version "
+      f"({', '.join(shared)})", shared and all(demo_pins[k] == main_pins[k] for k in shared),
+      {k: (demo_pins[k], main_pins[k]) for k in shared if demo_pins[k] != main_pins[k]})
+check("the demo venv installs no torch (analyse_clip runs in the pipeline venv)", "torch" not in demo_pins)
+check("the demo venv is gitignored", re.search(r"^\.venv-demo/$", (ROOT / ".gitignore").read_text(encoding="utf-8"), re.M))
 
 import shutil  # noqa: E402
 
