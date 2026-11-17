@@ -2,19 +2,31 @@
 
 A one-page Streamlit app over `analyse_clip.py`, for showing the tool on your own laptop (poster session, advisor, friends). Local only: it binds to `127.0.0.1`, sends no telemetry and loads nothing from the internet.
 
-Install (once, into the existing pose `.venv`; `requirements-demo.txt` is separate from `requirements.txt` on purpose):
+Install (once) into **its own venv, `.venv-demo`**, never into the pipeline's `.venv`:
 
 ```
-.\.venv\Scripts\python -m pip install -r requirements-demo.txt
+py -3.13 -m venv .venv-demo
+.\.venv-demo\Scripts\python -m pip install -r requirements-demo.txt
 ```
+
+Why two venvs: Streamlit needs pyarrow, and once pyarrow is installed pandas imports it. On 2026-11-17 Smart App Control blocked pyarrow's unsigned `_compute` DLL for about five minutes (Event Viewer: CodeIntegrity, event 3077), and in a shared venv that broke every pandas import in the pipeline and its tests. With the demo in `.venv-demo`, the pipeline never loads pyarrow. The demo still does, so before a live demo run the check below. If Windows blocks it, wait a few minutes and retry, or use the prepared clips. Do not turn Smart App Control off: Windows cannot turn it back on without a reinstall.
+
+```
+.\.venv-demo\Scripts\python -c "import pyarrow.compute, pandas; print('ok')"
+```
+
+Uninstalling the demo's packages from an older shared `.venv`: `.\.venv\Scripts\python -m pip uninstall -y streamlit pyarrow` (nothing else there depends on pyarrow).
 
 Run, **from the repo root** (Streamlit reads `.streamlit/config.toml` from the folder it is started in), then open <http://127.0.0.1:8501>:
 
 ```
-.\.venv\Scripts\python -m streamlit run demo_app.py -- --results-dir results/analyse
+.\.venv-demo\Scripts\python -m streamlit run demo_app.py -- --results-dir results/analyse
 ```
 
-Flags after `--`: `--results-dir` (finished clips; default `results/analyse`) and `--uploads-dir` (uploads; default `results/demo_uploads`, outputs in its `out/`). Both sit under `results/`, which is gitignored.
+Flags after `--`:
+- `--results-dir`: finished clips (default `results/analyse`).
+- `--uploads-dir`: uploads (default `results/demo_uploads`, outputs in its `out/`). Both folders sit under `results/`, which is gitignored.
+- `--pipeline-python`: the interpreter that runs `analyse_clip.py` for the Analyse tab (default `.venv\Scripts\python.exe`, the pipeline venv). The demo venv has no torch. The device list comes from asking that interpreter's torch once.
 
 ## The two tabs
 
