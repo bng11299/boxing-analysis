@@ -1,8 +1,8 @@
 """Check an LLM narrator's reply against the report's facts, and write the narrated report only if it passes.
 
-  python report_punches.py ... --prompt-out          # writes <clip>.narration-prompt.json
+  python cli/report_punches.py ... --prompt-out          # writes <clip>.narration-prompt.json
   (paste its "prompt_text" into a model, or send "system" + "user"; save the reply as draft.json)
-  python narration_check.py --prompt results/reports/<clip>.narration-prompt.json --draft draft.json
+  python cli/narration_check.py --prompt results/reports/<clip>.narration-prompt.json --draft draft.json
 
 Writes <clip>.narrated.txt beside the prompt when the draft keeps every rule (boxingvi.narrate.check): numbers
 only from the facts each sentence cites, none spelled out, no absolutes, no failed fact in the headline, any
@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from boxingvi import boxers, narrate  # noqa: E402
 
