@@ -131,6 +131,7 @@ Consequences baked into the code rather than left to memory:
 | `tests/` | Plain-script test suites (no pytest): `python tests/test_pipeline.py`. |
 | `scripts/` | Environment and machine set-up (`setup-env.ps1`, `check_env.py`, the pose-watcher installer). |
 | `docs/` | [`RESULTS.md`](docs/RESULTS.md) (every reported number and how to reproduce it), `commands/` (recipes by area), `gates/` (pre-registered pass/fail bars), `quality/` (quality-loop records), `adr/` (repo decisions). |
+| `poster/` | Pixel-free poster figures: per-type accuracy bars, confusion matrix, QR code, college logo. The printed poster and its photo strips are not in git (they hold frames from footage). |
 | `config/`, `labelstudio/`, `.streamlit/` | Tracker, labelling and demo configuration. |
 | `requirements*.txt` | Pinned environments: pipeline, pose, face blur, demo. |
 | `data/`, `results/`, `weights/` | Corpus, derived outputs and model weights. All gitignored: never committed. |

@@ -23,6 +23,15 @@ Dataset/
 *.HEIC
 *.wav
 *.m4a
+# Poster: only pixel-free figures are tracked, each named here (an allowlist, so a
+# new image is ignored until someone checks it). The printed poster and its photo
+# strips hold unblurred frames from footage, so they never enter git.
+!poster/bars.png
+!poster/cm.png
+!poster/qr.png
+!poster/oxy_logo_hi.png
+poster/*.pdf
+poster/*.pptx
 # Arrays and pickles (pose files, tracks) written outside data/ and results/.
 # CSV is not ignored: annotations are part of the release contract.
 *.npy

@@ -89,5 +89,9 @@ repo root. Outputs still land in `results/` at the repo root: each script's repo
   which is the gate working as designed (any edit under `src/boxingvi/` does the same).
 - **Open branches** that add or edit root scripts (`feat/scouting-summary`, `codex/sparring-labels`) need a
   rebase; Git's rename detection carries edits across, but new scripts must be put in `cli/` by hand.
+- **Poster figures (added 2026-11-22):** `poster/` tracks only the pixel-free figures (`bars.png`,
+  `cm.png`, `qr.png`, `oxy_logo_hi.png`), named one by one in `.gitignore`. The photo strips and the
+  printed poster (PDF, PPTX) hold unblurred frames from footage, so they stay out of git under the
+  "never pixels" rule. The build scripts and drafts are kept outside the repo.
 - **Deferred:** a `pyproject.toml` with `[project.scripts]` (option 4). Do it when the logic moves into the
   library, not as part of a move.
