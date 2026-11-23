@@ -448,7 +448,7 @@ def load_yolo(weights, sha256: "str | None", device: str = "cpu"):
         raise FileNotFoundError(f"no weights at {p}")
     if not sha256:
         raise ValueError("refusing a checkpoint with no pinned sha256 "
-                         "(compute one with: python run_ingest.py --hash-weights <file>)")
+                         "(compute one with: python cli/run_ingest.py --hash-weights <file>)")
     if sha256_file(p) != sha256.lower():
         raise ValueError(f"{p.name} does not match the pinned sha256; not loading it")
     try:

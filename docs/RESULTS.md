@@ -298,61 +298,61 @@ From the repo root, PowerShell, with the venv's `python`.
 
 ```
 # C0  finder rule (row 3)
-python run_punch_finder.py --data data --video data/rgb/V6.mp4 --out results/repro/punch_finder_v6.json
+python cli/run_punch_finder.py --data data --video data/rgb/V6.mp4 --out results/repro/punch_finder_v6.json
 # C1  extent rule (row 0; needed by every classify step after #23)
-python run_punch_extent.py --data data --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --rule results/repro/punch_finder_v6.json --out results/repro/punch_extent.json
+python cli/run_punch_extent.py --data data --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --rule results/repro/punch_finder_v6.json --out results/repro/punch_extent.json
 # C2  full baseline sweep, one seed (rows 1f-1i; at d0bc628, rows 1a, 1d, 1e); SEED = 0, 1, 2
-python run_baseline.py --data data --stgcnpp both --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth --stgcnpp-epochs 20 --seed SEED --out results/repro/sweep/seedSEED.json
+python cli/run_baseline.py --data data --stgcnpp both --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth --stgcnpp-epochs 20 --seed SEED --out results/repro/sweep/seedSEED.json
 # C3  retrain the pipeline's classifier; saves only if it equals the reference (row 1c)
-python train_classifier.py --data data --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth --out results/repro/weights/stgcnpp-boxingvi-seed0.pt --reference results/sweep-2026-09-22/seed0.json --rule results/repro/punch_finder_v6.json
+python cli/train_classifier.py --data data --pretrained weights/stgcnpp_ntu120_xsub_hrnet_j.pth --out results/repro/weights/stgcnpp-boxingvi-seed0.pt --reference results/sweep-2026-09-22/seed0.json --rule results/repro/punch_finder_v6.json
 # C4  pose switch; gate 1 re-scores the saved checkpoint (rows 1b, 2, 2v)
-python eval_pose_switch.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --extent results/repro/punch_extent.json --out results/repro/pose_switch.json
+python cli/eval_pose_switch.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --extent results/repro/punch_extent.json --out results/repro/pose_switch.json
 # C5  classify at finder detections on V6 (rows 4, 4r)
-python eval_classify_v6.py --data data --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --out results/repro/classify_v6.json
+python cli/eval_classify_v6.py --data data --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --out results/repro/classify_v6.json
 # C6  end to end V5 + V9 (rows 5a-5c)
-python eval_pipeline_v5v9.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --reference results/repro/pose_switch.json --out-dir results/repro/e2e_v5v9
+python cli/eval_pipeline_v5v9.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --reference results/repro/pose_switch.json --out-dir results/repro/e2e_v5v9
 # C7  same, scoring the existing blind judgments (row 5d; see note 2)
 New-Item -ItemType Directory -Force results/repro/e2e_v5v9_audit
 Copy-Item results/e2e_v5v9/audit_key.json results/repro/e2e_v5v9_audit/audit_key.json
-python eval_pipeline_v5v9.py ...C6's arguments... --out-dir results/repro/e2e_v5v9_audit --judgments results/e2e_v5v9/audit/judgments.csv
+python cli/eval_pipeline_v5v9.py ...C6's arguments... --out-dir results/repro/e2e_v5v9_audit --judgments results/e2e_v5v9/audit/judgments.csv
 # C8  own footage, as shipped (+-0.2 s points); CLIP = IMG_4406, IMG_4395 (rows 6a, 6b, 6d), IMG_5835 (rows 6e, 6g, 6h)
-python find_punches.py --pose results/ingest/CLIP.pose.npz --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --out-dir results/repro/own_tol0.2
-python classify_punches.py --pose results/ingest/CLIP.pose.npz --punches results/repro/own_tol0.2/CLIP.punches.csv --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --out-dir results/repro/own_tol0.2
+python cli/find_punches.py --pose results/ingest/CLIP.pose.npz --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --out-dir results/repro/own_tol0.2
+python cli/classify_punches.py --pose results/ingest/CLIP.pose.npz --punches results/repro/own_tol0.2/CLIP.punches.csv --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox --labels data/own/CLIP.labels.json --unclear not-a-punch --rule results/repro/punch_finder_v6.json --extent results/repro/punch_extent.json --out-dir results/repro/own_tol0.2
 # C9  own footage at +-0.1 s: the same two main()s with punchfind.POINT_TOL_S = 0.1 (no CLI flag exists; this is how #22 scored it)
 python -c "import sys; sys.path[:0]=['src','.']; from boxingvi import punchfind; punchfind.POINT_TOL_S=0.1; import find_punches; sys.exit(find_punches.main(sys.argv[1:]))" ...C8's find arguments... --out-dir results/repro/own_tol0.1
 python -c "import sys; sys.path[:0]=['src','.']; from boxingvi import punchfind; punchfind.POINT_TOL_S=0.1; import classify_punches; sys.exit(classify_punches.main(sys.argv[1:]))" ...C8's classify arguments, punches from own_tol0.1... --out-dir results/repro/own_tol0.1
 # C10 Olympic crediting (row 7a); T = a folder holding the 29 <id>.tracks.npz (here a copy, results/repro/olympic_tracks)
-python olympic_attribute.py --data data/olympic --tracks T --out results/repro/olympic_attribution.json
+python cli/olympic_attribute.py --data data/olympic --tracks T --out results/repro/olympic_attribution.json
 # C11 linking (row 7b)
-python olympic_link.py --data data/olympic --tracks T --out results/repro/olympic_linking.json
+python cli/olympic_link.py --data data/olympic --tracks T --out results/repro/olympic_linking.json
 # C12 completeness: linked, credited min 1, credited min 2 (rows 7c, 7d)
-python olympic_completeness.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --out results/repro/olympic_completeness.json --sample-out results/repro/olympic_completeness_sample.csv
-python olympic_completeness.py ...same... --credited --out results/repro/olympic_completeness_credited.json --sample-out results/repro/olympic_completeness_credited_sample.csv
-python olympic_completeness.py ...same... --credited --min-punches 2 --out results/repro/olympic_completeness_credited_min2.json --sample-out results/repro/olympic_completeness_credited_min2_sample.csv
+python cli/olympic_completeness.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --out results/repro/olympic_completeness.json --sample-out results/repro/olympic_completeness_sample.csv
+python cli/olympic_completeness.py ...same... --credited --out results/repro/olympic_completeness_credited.json --sample-out results/repro/olympic_completeness_credited_sample.csv
+python cli/olympic_completeness.py ...same... --credited --min-punches 2 --out results/repro/olympic_completeness_credited_min2.json --sample-out results/repro/olympic_completeness_credited_min2_sample.csv
 # C13 camera frame skips (row 7e): decodes each video once, writes T/<id>.framechange.npz (~1 h on CPU)
-python olympic_framechange.py --data data/olympic --tracks T
+python cli/olympic_framechange.py --data data/olympic --tracks T
 # C14 masked and measured completeness, sample check (rows 7f-7i); N = 1, 2 (file suffix _min2 for 2)
-python olympic_completeness.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --credited --min-punches N --skips --out results/repro/olympic_completeness_credited[_min2]_skips.json --sample-out results/repro/olympic_completeness_credited[_min2]_skips_sample.csv
-python olympic_completeness.py ...same, with --skips-measure in place of --skips (they cannot be combined)... --out results/repro/olympic_completeness_credited[_min2]_skipsmeasure.json --sample-out results/repro/olympic_completeness_credited[_min2]_skipsmeasure_sample.csv
-python olympic_completeness.py ...same, --skips... --skipcheck results/repro/olympic_completeness_credited_min2_sample.csv --skipcheck-out results/repro/olympic_completeness_credited_min2_sample_skipcheck.csv
+python cli/olympic_completeness.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --credited --min-punches N --skips --out results/repro/olympic_completeness_credited[_min2]_skips.json --sample-out results/repro/olympic_completeness_credited[_min2]_skips_sample.csv
+python cli/olympic_completeness.py ...same, with --skips-measure in place of --skips (they cannot be combined)... --out results/repro/olympic_completeness_credited[_min2]_skipsmeasure.json --sample-out results/repro/olympic_completeness_credited[_min2]_skipsmeasure_sample.csv
+python cli/olympic_completeness.py ...same, --skips... --skipcheck results/repro/olympic_completeness_credited_min2_sample.csv --skipcheck-out results/repro/olympic_completeness_credited_min2_sample_skipcheck.csv
 # C16 per-boxer path on Olympic Boxing, linker identity (rows 9a-9d)
-python olympic_boxers.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --out results/repro/olympic_boxers.json --identity-dir results/repro/olympic_boxers
+python cli/olympic_boxers.py --data data/olympic --tracks T --rule results/repro/punch_finder_v6.json --out results/repro/olympic_boxers.json --identity-dir results/repro/olympic_boxers
 # C17 ring-floor filter, development videos (rows 10a-10b): backgrounds + stillness, Brendan's clicks, the margin grid
-python olympic_ring.py prepare --data data/olympic
-python olympic_ring.py click --floors data/olympic_ring/floors.json
-python olympic_ring.py evaluate --split dev --data data/olympic --tracks T --floors data/olympic_ring/floors.json --rule results/repro/punch_finder_v6.json --out results/olympic_ring/dev_grid.json
+python cli/olympic_ring.py prepare --data data/olympic
+python cli/olympic_ring.py click --floors data/olympic_ring/floors.json
+python cli/olympic_ring.py evaluate --split dev --data data/olympic --tracks T --floors data/olympic_ring/floors.json --rule results/repro/punch_finder_v6.json --out results/olympic_ring/dev_grid.json
 # C18 hand-checked linker joins (rows 11a-11d): draw once, Brendan answers in the window, score once (answers stay local)
-python linker_join_check.py sample --data data/olympic --tracks T
-python linker_join_check.py check --data data/olympic --tracks T
-python linker_join_check.py score
+python cli/linker_join_check.py sample --data data/olympic --tracks T
+python cli/linker_join_check.py check --data data/olympic --tracks T
+python cli/linker_join_check.py score
 # C19 punch combinations gate (rows 12a-12c): C8's find + classify into a fresh folder, then score
-python score_combinations.py --clip IMG_4406 --clip IMG_4395 --punches-dir results/repro/own_tol0.2 --labels-dir data/own --pose-dir results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --out results/repro/combinations_gate.json
+python cli/score_combinations.py --clip IMG_4406 --clip IMG_4395 --punches-dir results/repro/own_tol0.2 --labels-dir data/own --pose-dir results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --out results/repro/combinations_gate.json
 # C20 fast combinations (rows 13a-13e; note 15): tune on training once, then the held-out run ONCE (it creates
 #     results/fast_combinations_heldout.started first and refuses to run again; re-running it needs a new gate)
-python tune_fast_combinations.py --data data --poses results/ingest
-python eval_fast_combinations.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox
+python cli/tune_fast_combinations.py --data data --poses results/ingest
+python cli/eval_fast_combinations.py --data data --poses results/ingest --classifier weights/classifier/stgcnpp-boxingvi-seed0.json --stance orthodox
 # C15 face blur, own footage only (row 8; run 2026-11-03, note 6); CLIP = IMG_4406, IMG_4395
-python blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
+python cli/blur_faces.py --video data/own/CLIP.mov --out <a folder outside any checkout>/own-CLIP.blurred.mp4 --allow-outside-participant-root
 ```
 
 ## How to reproduce from a clean clone

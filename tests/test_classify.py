@@ -23,7 +23,7 @@ import torch
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 from boxingvi import classify, pose_yolo, punchfind  # noqa: E402
 from boxingvi.data import CLASSES, N_JOINTS, SOURCE_SIZE, Clip, Span, Track  # noqa: E402

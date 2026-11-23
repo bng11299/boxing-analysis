@@ -16,7 +16,7 @@ import numpy as np
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 from boxingvi import poseswitch  # noqa: E402
 from boxingvi.data import N_JOINTS  # noqa: E402
@@ -260,7 +260,7 @@ ext_ = e2e / "extent.json"
 ext_.write_text(json.dumps({"frac": 0.5, "lead_widths": 1.3, "tail_widths": 1.8, "variant": "relative",
                             "beats_fixed_window": True, "gated_cut": classify.GATED_CUT}), encoding="utf-8")
 out_ = e2e / "results" / "pose_switch.json"
-run = subprocess.run([sys.executable, str(ROOT / "eval_pose_switch.py"), "--data", str(data_), "--poses", str(poses_),
+run = subprocess.run([sys.executable, str(ROOT / "cli" / "eval_pose_switch.py"), "--data", str(data_), "--poses", str(poses_),
                       "--classifier", str(mpath), "--extent", str(ext_), "--videos", "V5", "--out", str(out_)],
                      cwd=e2e, capture_output=True, text=True, timeout=600)
 tail = (run.stdout + run.stderr)[-1500:]

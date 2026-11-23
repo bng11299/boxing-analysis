@@ -23,7 +23,7 @@ import numpy as np
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 import glove_identity  # noqa: E402
 from boxingvi import faceblur, gloves, glovescore, video  # noqa: E402
@@ -697,7 +697,8 @@ import subprocess  # noqa: E402
 repo = tmp / "minirepo"
 (repo / "src" / "boxingvi").mkdir(parents=True)
 (repo / "src" / "boxingvi" / "appearance.py").write_text("def hsv(x):\n    return x\n")
-(repo / "glove_identity.py").write_text("# cli\n")
+(repo / "cli").mkdir()
+(repo / "cli" / "glove_identity.py").write_text("# cli\n")
 g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)  # noqa: E731
 g("init", "-q"); g("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
 g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x")

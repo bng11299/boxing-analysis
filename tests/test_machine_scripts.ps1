@@ -184,11 +184,11 @@ Write-Output 'install-pose-watcher: what the task runs'
 $wr = Join-Path $tmp 'watch repo'
 $spec = Get-WatcherSpec $wr (Join-Path $tmp 'w.log')
 Check 'the task runs the repo venv python, not a bare python' ($spec.Execute -eq (Join-Path $wr '.venv\Scripts\python.exe')) $spec.Execute
-Check 'the script and log paths are quoted (the repo path has a space)' ($spec.Argument -eq "`"$(Join-Path $wr 'pose_watcher.py')`" --log `"$(Join-Path $tmp 'w.log')`"") $spec.Argument
+Check 'the script and log paths are quoted (the repo path has a space)' ($spec.Argument -eq "`"$(Join-Path $wr 'cli\pose_watcher.py')`" --log `"$(Join-Path $tmp 'w.log')`"") $spec.Argument
 Check 'it runs from the repo root' ($spec.WorkingDirectory -eq $wr)
 Throws 'refuses to register when the venv, script and weights are missing' { Assert-WatcherSpec $spec } 'not found: .*python\.exe.*pose_watcher\.py.*yolo11m-pose\.pt'
-New-Item -ItemType Directory -Path (Join-Path $wr '.venv\Scripts'), (Join-Path $wr 'weights') | Out-Null
-foreach ($f in '.venv\Scripts\python.exe', 'pose_watcher.py') { Set-Content -LiteralPath (Join-Path $wr $f) -Value 'x' -Encoding ASCII }
+New-Item -ItemType Directory -Path (Join-Path $wr '.venv\Scripts'), (Join-Path $wr 'weights'), (Join-Path $wr 'cli') | Out-Null
+foreach ($f in '.venv\Scripts\python.exe', 'cli\pose_watcher.py') { Set-Content -LiteralPath (Join-Path $wr $f) -Value 'x' -Encoding ASCII }
 Throws 'refuses when only the weights are missing, naming them' { Assert-WatcherSpec $spec } 'not found: [^;]*yolo11m-pose\.pt$|not found: [^;]*yolo11m-pose\.pt\.'
 Set-Content -LiteralPath (Join-Path $wr 'weights\yolo11m-pose.pt') -Value 'x' -Encoding ASCII
 try { Assert-WatcherSpec $spec; Check 'accepts a repo with all three' $true } catch { Check 'accepts a repo with all three' $false $_.Exception.Message }

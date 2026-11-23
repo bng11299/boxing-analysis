@@ -20,7 +20,7 @@ Uninstalling the demo's packages from an older shared `.venv`: `.\.venv\Scripts\
 Run, **from the repo root** (Streamlit reads `.streamlit/config.toml` from the folder it is started in), then open <http://127.0.0.1:8501>:
 
 ```
-.\.venv-demo\Scripts\python -m streamlit run demo_app.py -- --results-dir results/analyse
+.\.venv-demo\Scripts\python -m streamlit run cli/demo_app.py -- --results-dir results/analyse
 ```
 
 Flags after `--`:

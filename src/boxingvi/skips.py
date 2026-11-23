@@ -181,7 +181,7 @@ def load_for(table, path) -> Skips:
     """Load `path` and verify it against the pose table; ValueError/FileNotFoundError otherwise."""
     path = Path(path)
     if not path.is_file():
-        raise FileNotFoundError(f"no {path.name}: run olympic_framechange.py first")
+        raise FileNotFoundError(f"no {path.name}: run cli/olympic_framechange.py first")
     s = Skips.load(path)
     s.verify(table)
     return s

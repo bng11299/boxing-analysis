@@ -27,7 +27,7 @@ import torch
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 import pose_watcher  # noqa: E402
 import wait_for_pose  # noqa: E402
@@ -423,7 +423,7 @@ try:
 except RuntimeError as e:
     check("the lock is free again once its holder ends", False, str(e))
 with pose_watcher.SingleInstance(staging / "watcher.lock"):
-    p = subprocess.run([sys.executable, str(ROOT / "pose_watcher.py"), "--src", str(src), "--ingest-dir", str(ingest),
+    p = subprocess.run([sys.executable, str(ROOT / "cli" / "pose_watcher.py"), "--src", str(src), "--ingest-dir", str(ingest),
                         "--staging", str(staging), "--once", "--weights", str(weights), "--device", "cpu"],
                        capture_output=True, text=True, timeout=300, cwd=str(ROOT))
 check("a second watcher in ANOTHER PROCESS exits 1 while the lock is held",

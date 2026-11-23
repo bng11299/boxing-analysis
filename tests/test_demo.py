@@ -26,7 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 import analyse_clip  # noqa: E402
 from boxingvi import demo  # noqa: E402
@@ -325,7 +325,7 @@ argv = demo.build_analyse_argv(vid, "southpaw", "cpu", "0-30, 40-60", out)
 check("argv is a list of strings, starting with this interpreter",
       isinstance(argv, list) and all(isinstance(a, str) for a in argv) and argv[0] == sys.executable)
 check("argv is: interpreter, -u, analyse_clip.py by absolute path, then only flags and their values",
-      argv[1] == "-u" and Path(argv[2]) == (ROOT / "analyse_clip.py").resolve() and Path(argv[2]).is_absolute())
+      argv[1] == "-u" and Path(argv[2]) == (ROOT / "cli" / "analyse_clip.py").resolve() and Path(argv[2]).is_absolute())
 check("--stance carries the stance exactly", argv[argv.index("--stance") + 1] == "southpaw" and argv.count("--stance") == 1)
 check("--video and --out-dir are absolute", Path(argv[argv.index("--video") + 1]).is_absolute()
       and Path(argv[argv.index("--out-dir") + 1]).is_absolute())
@@ -421,7 +421,7 @@ finished = FakeProc(["x\n"], rc=0, running=False)
 demo.run_analyse(argv, popen=lambda a, **k: finished)
 check("a child that finished by itself is not killed", not finished.killed and finished.stdout.closed)
 check("a failing child's exit code is returned", demo.run_analyse(argv, popen=lambda a, **k: FakeProc(["err\n"], rc=1)) == 1)
-refused("a command string is refused (list only)", demo.run_analyse, "python analyse_clip.py --video x")
+refused("a command string is refused (list only)", demo.run_analyse, "python cli/analyse_clip.py --video x")
 refused("a list with a non-string is refused", demo.run_analyse, ["python", Path("x")])
 
 # ------------------------------------------------------------------ web preview ---
@@ -621,17 +621,17 @@ check("CORS and XSRF protection stay on (not disabled in config)",
       cfg.get("server", {}).get("enableCORS", True) is True and cfg.get("server", {}).get("enableXsrfProtection", True) is True)
 check("headless is on: no browser opened behind the app's back, no first-run e-mail prompt",
       cfg["server"].get("headless") is True)
-sources = {n: (ROOT / n).read_text(encoding="utf-8") for n in ("src/boxingvi/demo.py", "demo_app.py")}
+sources = {n: (ROOT / n).read_text(encoding="utf-8") for n in ("src/boxingvi/demo.py", "cli/demo_app.py")}
 for n, src in sources.items():
     check(f"{n}: no shell=True, no os.system, no eval/exec",
           not re.search(r"shell\s*=\s*True|os\.system|\beval\(|\bexec\(", src))
     check(f"{n}: no network library is imported", not re.search(r"^\s*(import|from)\s+(requests|urllib|http|socket|httpx|aiohttp)\b", src, re.M))
 check("the demo has no external assets: no http(s) URL is loaded by either file",
-      not re.search(r"https?://", sources["demo_app.py"] + sources["src/boxingvi/demo.py"]))
+      not re.search(r"https?://", sources["cli/demo_app.py"] + sources["src/boxingvi/demo.py"]))
 check("demo.py is importable without streamlit having been imported", "streamlit" not in sys.modules)
 # Cold start: Streamlit draws nothing until the script reaches its first element, so a top-level
 # import of the heavy modules left the page blank for up to ~30 s. The header must come first.
-app = sources["demo_app.py"]
+app = sources["cli/demo_app.py"]
 check("demo_app.py does not import boxingvi.demo or pandas at module level (page would stay blank)",
       not re.search(r"^(import pandas|from boxingvi import demo)\b", app, re.M))
 main_body = app[app.index("def main()"):]
