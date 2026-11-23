@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-for _p in (REPO_ROOT, REPO_ROOT / "src"):   # analyse_clip.py sits at the repo root, the library under src/
+for _p in (REPO_ROOT / "cli", REPO_ROOT / "src"):   # analyse_clip.py sits in cli/, the library under src/
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -45,7 +45,7 @@ DEFAULT_RESULTS = Path("results/analyse")
 DEFAULT_UPLOADS = Path("results/demo_uploads")
 # analyse_clip.py runs in the pipeline venv, not the demo's (docs/commands/demo.md).
 DEFAULT_PIPELINE_PYTHON = REPO_ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-ANALYSE_SCRIPT = REPO_ROOT / "analyse_clip.py"
+ANALYSE_SCRIPT = REPO_ROOT / "cli" / "analyse_clip.py"
 OUTPUT_SUFFIXES = tuple(suffix for suffix, _ in analyse_clip.OUTPUTS)
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".m4v")
 STANCES = tuple(sorted(classify.STANCES))

@@ -24,7 +24,7 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "cli"))
 
 import label_moments as cli  # noqa: E402
 from boxingvi import labelmoments as lm  # noqa: E402

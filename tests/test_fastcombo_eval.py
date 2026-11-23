@@ -21,7 +21,7 @@ import numpy as np
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 import eval_fast_combinations as ev  # noqa: E402
 import tune_fast_combinations as tune  # noqa: E402

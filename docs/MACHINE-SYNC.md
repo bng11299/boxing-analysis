@@ -116,7 +116,7 @@ registered from inside the app is fine, but test it after an app restart):
 cd ~\repos\boxing-comps
 git pull
 .\scripts\setup-env.ps1                          # CUDA torch AND the pose step; ends ENVIRONMENT OK
-.\.venv\Scripts\python.exe run_ingest.py --hash-weights weights\yolo11m-pose.pt   # must print 29b17eaf...
+.\.venv\Scripts\python.exe cli/run_ingest.py --hash-weights weights\yolo11m-pose.pt   # must print 29b17eaf...
 .\scripts\install-pose-watcher.ps1 -DryRun       # shows the task; refuses if venv, script or weights are missing
 .\scripts\install-pose-watcher.ps1               # registers "boxing-comps pose watcher" at logon and starts it
 Get-Content ~\boxing-comps-pose-watcher.log -Tail 5   # "watching ... every 30 s"
@@ -130,7 +130,7 @@ it should work: a sleeping or logged-out laptop runs nothing, and the desktop ju
 
 ```powershell
 Copy-Item <phone export>\IMG_5835.mov data\own\
-.\.venv\Scripts\python.exe wait_for_pose.py --video data\own\IMG_5835.mov --stance orthodox
+.\.venv\Scripts\python.exe cli/wait_for_pose.py --video data\own\IMG_5835.mov --stance orthodox
 ```
 
 It prints `waiting for ...` until the pose arrives (about the clip's transfer time twice, plus

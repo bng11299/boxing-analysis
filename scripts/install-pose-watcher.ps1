@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    On the GPU laptop: start pose_watcher.py at every logon, as a scheduled task for this user.
+    On the GPU laptop: start cli\pose_watcher.py at every logon, as a scheduled task for this user.
 
 .DESCRIPTION
     Registers the task "boxing-comps pose watcher" (current user, at logon, normal privileges, no
-    stored password). It runs <repo>\.venv\Scripts\python.exe pose_watcher.py from the repo root, appending
+    stored password). It runs <repo>\.venv\Scripts\python.exe cli/cli\pose_watcher.py from the repo root, appending
     to ~\boxing-comps-pose-watcher.log. It is restarted if it stops, with no time limit, and runs on battery.
-    Checks first that the venv, the pinned pose weights and pose_watcher.py are where the task will look.
+    Checks first that the venv, the pinned pose weights and cli\pose_watcher.py are where the task will look.
     Changes nothing else. See docs\MACHINE-SYNC.md section 5.
 
 .PARAMETER DryRun
@@ -32,7 +32,7 @@ $TaskName = 'boxing-comps pose watcher'
 function Get-WatcherSpec([string]$Repo, [string]$LogPath) {
     # What the task runs. Every path is absolute and quoted; nothing comes from outside this repo and $HOME.
     $python = Join-Path $Repo '.venv\Scripts\python.exe'
-    $script = Join-Path $Repo 'pose_watcher.py'
+    $script = Join-Path $Repo 'cli\pose_watcher.py'
     [pscustomobject]@{
         Execute          = $python
         Argument         = "`"$script`" --log `"$LogPath`""

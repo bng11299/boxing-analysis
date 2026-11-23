@@ -184,7 +184,7 @@ import io  # noqa: E402
 import json  # noqa: E402
 import tempfile  # noqa: E402
 
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 import find_punches  # noqa: E402
 
 tmp = Path(tempfile.mkdtemp())

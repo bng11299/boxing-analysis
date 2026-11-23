@@ -1,0 +1,49 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below, and cite BoxingVI (the benchmark it is built on)."
+title: "PosePunch: Single-Camera Analysis of Boxing Video"
+type: software
+authors:
+  - family-names: Ng
+    given-names: Brendan
+repository-code: "https://github.com/bng11299/boxing-analysis"
+keywords:
+  - boxing
+  - action recognition
+  - pose estimation
+  - skeleton
+references:
+  - type: article
+    title: "BoxingVI: A Multi-Modal Benchmark for Boxing Action Recognition and Localization"
+    authors:
+      - family-names: Kumar
+        given-names: Rahul
+      - family-names: Baghel
+        given-names: Vipul
+      - family-names: Singh
+        given-names: Sudhanshu
+      - family-names: Badatya
+        given-names: Bikash Kumar
+      - family-names: Yadav
+        given-names: Shivam
+      - family-names: Srinivasan
+        given-names: Babji
+      - family-names: Hegde
+        given-names: Ravi
+    journal: "arXiv preprint arXiv:2511.16524"
+    year: 2025
+    url: "https://arxiv.org/abs/2511.16524"
+  - type: article
+    title: "Boxing Punch Detection with Single Static Camera"
+    authors:
+      - family-names: Stefański
+        given-names: Piotr
+      - family-names: Kozak
+        given-names: Jan
+      - family-names: Jach
+        given-names: Tomasz
+    journal: Entropy
+    volume: 26
+    issue: 8
+    start: 617
+    year: 2024
+    doi: "10.3390/e26080617"

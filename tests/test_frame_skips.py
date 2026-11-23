@@ -28,7 +28,7 @@ import numpy as np
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 import olympic_completeness  # noqa: E402
 import olympic_framechange  # noqa: E402
@@ -784,7 +784,7 @@ def refuse(name, mutate, why):
 
 fcf.unlink()
 rc_, _, err_ = cli(olympic_completeness, args_cut)
-check("a missing framechange file: exit 2, the message names the video and says to run olympic_framechange.py, nothing written",
+check("a missing framechange file: exit 2, the message names the video and says to run cli/olympic_framechange.py, nothing written",
       rc_ == 2 and "GH000001" in err_ and "olympic_framechange" in err_ and created() == snapshot, f"{rc_} {err_}")
 fcf.write_bytes(before)
 refuse("a framechange file of another video name", lambda: skips.Skips(real.change, "GH000002.mp4", real.video_fp).save(fcf), "pose table for")

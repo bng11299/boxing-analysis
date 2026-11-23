@@ -122,6 +122,22 @@ Consequences baked into the code rather than left to memory:
   would be ours, not the authors', and an off-by-one on the span would misalign
   every V6 clip while looking entirely plausible.
 
+## Repository layout
+
+| Path | What is there |
+|---|---|
+| `src/boxingvi/` | The library: loaders, features, models, punch finding, reports. Everything importable. |
+| `cli/` | The runnable scripts (`run_baseline.py`, `analyse_clip.py`, `demo_app.py`, the `olympic_*` and `eval_*` tools). Run them from the repo root: `python cli/run_baseline.py ...`. |
+| `tests/` | Plain-script test suites (no pytest): `python tests/test_pipeline.py`. |
+| `scripts/` | Environment and machine set-up (`setup-env.ps1`, `check_env.py`, the pose-watcher installer). |
+| `docs/` | [`RESULTS.md`](docs/RESULTS.md) (every reported number and how to reproduce it), `commands/` (recipes by area), `gates/` (pre-registered pass/fail bars), `quality/` (quality-loop records), `adr/` (repo decisions). |
+| `poster/` | Pixel-free poster figures: per-type accuracy bars, confusion matrix, QR code, college logo. The printed poster and its photo strips are not in git (they hold frames from footage). |
+| `config/`, `labelstudio/`, `.streamlit/` | Tracker, labelling and demo configuration. |
+| `requirements*.txt` | Pinned environments: pipeline, pose, face blur, demo. |
+| `data/`, `results/`, `weights/` | Corpus, derived outputs and model weights. All gitignored: never committed. |
+
+[ADR-0001](docs/adr/0001-repository-layout.md) records why the scripts live in `cli/`.
+
 ## Getting the data
 
 Only `Skeleton_data/` and `Annotation_files/` are needed (~50 MB). Skip
@@ -135,7 +151,7 @@ programmatically: <https://drive.google.com/drive/folders/1Vyl8twJQ1qkqEPwhvfsrJ
 just:
 
 ```bash
-python run_baseline.py --data path/to/Dataset
+python cli/run_baseline.py --data path/to/Dataset
 ```
 
 The layout probe still runs first and prints what it found; `--layout-only`
@@ -147,7 +163,7 @@ below, trust the probe and not this README.
 ```bash
 python -m pip install -r requirements.txt
 python tests/test_pipeline.py
-python run_baseline.py --synthetic
+python cli/run_baseline.py --synthetic
 ```
 
 The synthetic run exercises every stage. Its accuracy figures are meaningless as
@@ -195,7 +211,7 @@ come from elsewhere:
 - **The author's own footage and the consented sparring footage** are not
   released, so the rows built on them cannot be re-run from outside.
 
-`python run_baseline.py --synthetic` checks the plumbing without any corpus; it
+`python cli/run_baseline.py --synthetic` checks the plumbing without any corpus; it
 does not reproduce any reported number.
 
 References in the docs to O-numbers (e.g. O55), ISSUES-LOG, STATE.md, the

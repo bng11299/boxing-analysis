@@ -644,7 +644,7 @@ with tempfile.TemporaryDirectory() as _d:
     check("... and refused before a single byte is read", _reads == [])
 
 print("\n--- 23. run_baseline: seeds, intervals, and pinning ---")
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "cli"))
 import run_baseline  # noqa: E402
 
 check("--seed is accepted and parsed",

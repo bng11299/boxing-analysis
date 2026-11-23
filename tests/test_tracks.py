@@ -18,7 +18,7 @@ import numpy as np
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 import run_ingest  # noqa: E402
 from boxingvi import olympic, overlay, pose_yolo, video  # noqa: E402
