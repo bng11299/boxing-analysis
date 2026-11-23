@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "cli"))
 
 
 def _no_net(*a, **k):
@@ -204,7 +204,7 @@ check("the key is read from the environment only (no file read, no argparse opti
       re.search(r"(?<![a-z])open\(|read_text|Path\(", (ROOT / "src/boxingvi/gemini.py").read_text(
           encoding="utf-8")) is None
       and not any(re.search(r"add_argument\([^)]*key", (ROOT / f).read_text(encoding="utf-8"), re.I)
-                  for f in ("report_punches.py", "analyse_clip.py")))
+                  for f in ("cli/report_punches.py", "cli/analyse_clip.py")))
 
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
